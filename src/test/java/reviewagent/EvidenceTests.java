@@ -15,6 +15,7 @@ final class EvidenceTests {
         Path fixture = Files.createTempDirectory("review-evidence-test-");
         try {
             checkEvidence(fixture);
+            checkKnowledgeSnapshot(fixture);
         } finally {
             try (var paths = Files.walk(fixture)) {
                 for (Path path : paths.sorted(Comparator.reverseOrder()).toList()) {
@@ -78,6 +79,32 @@ final class EvidenceTests {
         require(supplemental.coverage().contains("schema:1.3 contracts/order.proto: UNAVAILABLE"), "undeclared version");
         require(supplemental.coverage().contains("../outside.txt all: UNAVAILABLE"), "unsafe path");
         require(EvidenceText.bytes(evidence.markdown() + supplemental.markdown()) <= 10_000, "combined evidence budget");
+    }
+
+    private static void checkKnowledgeSnapshot(Path fixture) throws Exception {
+        Path repo = Files.createDirectory(fixture.resolve("knowledge repo"));
+        var executor = new ProcessExecutor();
+        git(executor, repo, "init", "-q");
+        git(executor, repo, "config", "core.quotePath", "true");
+        Files.writeString(repo.resolve("需求说明.md"), "Confirmed requirements\n");
+        Files.write(repo.resolve("binary.md"), new byte[]{0, 1, 2});
+        git(executor, repo, "add", "--all");
+        git(executor, repo, "commit", "-qm", "initial snapshot");
+
+        var git = new GitClient(repo, executor);
+        String missingCommit = "1".repeat(git.resolveCommit("HEAD").length());
+        git(executor, repo, "update-index", "--add", "--cacheinfo", "160000," + missingCommit + ",module");
+        git(executor, repo, "commit", "-qm", "record a submodule pointer");
+
+        KnowledgeSnapshot snapshot = new RepositorySnapshotCollector(git).collect("HEAD", 20_000, 20_000, 10_000);
+        require(snapshot.files().size() == 3, "inventory includes all three tree entries");
+        require(snapshot.chunks().size() == 1
+                && snapshot.chunks().getFirst().contains("===== FILE: 需求说明.md =====\nConfirmed requirements"),
+                "non-ASCII tracked file is included with its original name");
+        require(snapshot.files().stream().anyMatch(file -> file.path().equals("module")
+                && file.status() == KnowledgeFile.Status.SKIPPED_NON_REGULAR), "submodule recorded without loading it");
+        require(snapshot.files().stream().anyMatch(file -> file.path().equals("binary.md")
+                && file.status() == KnowledgeFile.Status.SKIPPED_BINARY_OR_GENERATED), "binary with text extension skipped");
     }
 
     private static void git(ProcessExecutor executor, Path repo, String... arguments) throws Exception {

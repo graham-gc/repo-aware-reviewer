@@ -41,9 +41,15 @@ final class RepositorySnapshotCollector {
         long included = 0;
         long repositoryBytes = 0;
 
-        for (String path : git.trackedFiles(commit)) {
-            long size = git.fileSizeAt(commit, path);
+        for (GitClient.TrackedFile file : git.trackedFiles(commit)) {
+            String path = file.path();
+            long size = file.size();
             repositoryBytes += size;
+            if (!file.regular()) {
+                inventory.add(new KnowledgeFile(path, size, KnowledgeFile.Status.SKIPPED_NON_REGULAR,
+                        "symlink or submodule entry"));
+                continue;
+            }
             if (!isKnowledgeText(path)) {
                 inventory.add(new KnowledgeFile(path, size,
                         KnowledgeFile.Status.SKIPPED_BINARY_OR_GENERATED, "binary, generated, vendored, or unsupported text type"));
@@ -54,12 +60,17 @@ final class RepositorySnapshotCollector {
                         "file exceeds --max-file-bytes"));
                 continue;
             }
+            String content = git.blob(file.objectId());
+            if (content.indexOf('\0') >= 0) {
+                inventory.add(new KnowledgeFile(path, size, KnowledgeFile.Status.SKIPPED_BINARY_OR_GENERATED,
+                        "blob contains binary data"));
+                continue;
+            }
             if (included + size > maxTotalBytes) {
-                throw new IllegalArgumentException("Selected repository text exceeds --max-total-bytes at " + path
+                throw new IllegalArgumentException("Selected repository text exceeds --max-total-bytes at " + EvidenceText.oneLine(path)
                         + "; raise the limit to avoid a partial knowledge scan");
             }
-            String content = git.fileAt(commit, path, maxFileBytes + 1);
-            String section = "\n\n===== FILE: " + path + " =====\n" + content;
+            String section = "\n\n===== FILE: " + EvidenceText.oneLine(path) + " =====\n" + content;
             int sectionBytes = section.getBytes(StandardCharsets.UTF_8).length;
             if (!chunk.isEmpty() && chunk.toString().getBytes(StandardCharsets.UTF_8).length + sectionBytes > chunkBytes) {
                 chunks.add(chunk.toString());
