@@ -12,7 +12,8 @@ A read-only, evidence-driven code review CLI prototype. Its review pipeline foll
 - Resolves and records immutable base and target commit SHAs.
 - Reads repository review instructions from the base commit so the reviewed change cannot rewrite its own rules.
 - Loads external requirement and human-maintained knowledge files and records their SHA-256 hashes.
-- Collects the Git diff, target-version contents of changed files, and dependency manifests as review evidence.
+- Budgets expanded Git diff context by changed file and records any partial or omitted evidence.
+- Loads requested tracked source and exact cached Maven evidence between discovery and verification.
 - Runs two agent stages: candidate discovery followed by independent verification and final reporting.
 - Does not build, test, execute, or modify the reviewed repository by default.
 - Supports `--prepare-only` to generate the evidence bundle and prompts without invoking an agent.
@@ -101,20 +102,24 @@ java -jar build/code-review-agent.jar review \
 
 The agent command must read its prompt from standard input and write a plain-text response to standard output. The CLI does not invoke a shell: `--agent-command` and every `--agent-arg` value are passed directly to `ProcessBuilder` as separate arguments.
 
+The discovery pass can request tracked text from the pinned base or target and individual Java types or `.proto` entries from `~/.m2/repository`. Maven requests must match a fixed direct JAR dependency in the root `pom.xml` for the selected revision. The CLI records artifact hashes, uses `javap` for public Java signatures, and performs no build or dependency download. Requested evidence is included in the prompt to the configured backend during verification.
+
 ## Output
 
 Each run creates a separate directory containing:
 
 - `scope.md`: resolved review scope and input summary;
 - `evidence.md`: diff, target files, instructions, requirements, and knowledge evidence;
+- `coverage.md`: per-file patch coverage and the outcome of supplemental requests;
 - `discover-prompt.md`: candidate discovery prompt;
 - `candidates.md`: candidate findings;
+- `supplemental-evidence.md`: additional evidence supplied to verification;
 - `verify-prompt.md`: independent verification prompt;
 - `report.md`: final review report.
 
 ## Prototype limitations
 
-- The prototype identifies Java imports and Maven coordinates, but does not yet implement precise, symbol-driven dependency source loading.
+- Dependency inspection covers cached direct Maven JARs only. Parent/BOM, profiles, transitive resolution, other package managers, and downloads are not implemented.
 - It does not yet run builds, tests, or static analyzers.
 - Repository registration, knowledge-base approval history, and Skill/MCP adapters are not yet implemented.
 - Agent output is currently Markdown; a structured findings schema is planned.

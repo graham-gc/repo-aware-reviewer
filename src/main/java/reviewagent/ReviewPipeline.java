@@ -25,7 +25,7 @@ final class ReviewPipeline {
     }
 
     private Path run(CliOptions options, CommandProgress progress) throws IOException, InterruptedException {
-        int totalSteps = options.prepareOnly() ? 3 : 4;
+        int totalSteps = options.prepareOnly() ? 3 : 5;
         progress.step(0, totalSteps, "Resolving Git review scope");
         GitClient git = new GitClient(options.repo(), executor);
         ReviewScope scope = git.resolve(options);
@@ -39,6 +39,7 @@ final class ReviewPipeline {
 
         write(runDirectory.resolve("scope.md"), scopeMarkdown(options, scope, requirement, knowledge));
         write(runDirectory.resolve("evidence.md"), evidence.markdown());
+        write(runDirectory.resolve("coverage.md"), evidence.coverage());
 
         PromptFactory prompts = new PromptFactory();
         String discoveryPrompt = prompts.discovery(evidence);
@@ -46,7 +47,7 @@ final class ReviewPipeline {
         if (options.prepareOnly()) {
             progress.step(2, totalSteps, "Preparing verification prompt");
             write(runDirectory.resolve("verify-prompt-template.md"),
-                    prompts.verification(evidence, "[candidate findings will be inserted here]"));
+                    prompts.verification(evidence, "[candidate findings will be inserted here]", ""));
             progress.finish(totalSteps, "Evidence and prompts ready");
             return runDirectory;
         }
@@ -57,8 +58,14 @@ final class ReviewPipeline {
         String candidates = agent.invoke(discoveryPrompt);
         write(runDirectory.resolve("candidates.md"), candidates);
 
-        progress.step(3, totalSteps, "Verifying findings and preparing the report");
-        String verifyPrompt = prompts.verification(evidence, candidates);
+        progress.step(3, totalSteps, "Loading requested Git and dependency evidence");
+        MavenEvidence maven = new MavenEvidence(git, executor, SupplementalEvidence.defaultMavenCache());
+        SupplementalEvidence.Result supplemental = new SupplementalEvidence(git, maven).collect(evidence, candidates);
+        write(runDirectory.resolve("supplemental-evidence.md"), supplemental.markdown());
+        write(runDirectory.resolve("coverage.md"), evidence.coverage() + supplemental.coverage());
+
+        progress.step(4, totalSteps, "Verifying findings and preparing the report");
+        String verifyPrompt = prompts.verification(evidence, candidates, supplemental.markdown());
         write(runDirectory.resolve("verify-prompt.md"), verifyPrompt);
         String report = agent.invoke(verifyPrompt);
         write(runDirectory.resolve("report.md"), report);

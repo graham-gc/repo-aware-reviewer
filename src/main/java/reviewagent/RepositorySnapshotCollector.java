@@ -75,7 +75,7 @@ final class RepositorySnapshotCollector {
         return new KnowledgeSnapshot(commit, List.copyOf(inventory), List.copyOf(chunks), included, repositoryBytes);
     }
 
-    private static boolean isKnowledgeText(String path) {
+    static boolean isKnowledgeText(String path) {
         String normalized = "/" + path.toLowerCase(Locale.ROOT).replace('\\', '/');
         for (String segment : SKIPPED_SEGMENTS) {
             if (normalized.contains(segment)) {
