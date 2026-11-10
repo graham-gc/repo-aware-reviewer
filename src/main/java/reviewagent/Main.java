@@ -8,6 +8,12 @@ public final class Main {
 
     public static void main(String[] args) {
         try {
+            if (args.length >= 2 && "knowledge".equals(args[0]) && "generate".equals(args[1])) {
+                KnowledgeOptions options = KnowledgeOptions.parse(args);
+                var output = new KnowledgePipeline(new ProcessExecutor(), Clock.systemDefaultZone()).run(options);
+                System.out.println(output);
+                return;
+            }
             CliOptions options = CliOptions.parse(args);
             var output = new ReviewPipeline(new ProcessExecutor(), Clock.systemDefaultZone()).run(options);
             System.out.println(output);

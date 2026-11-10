@@ -27,6 +27,33 @@ bash scripts/build.sh
 
 The command creates `build/code-review-agent.jar`.
 
+## Generate a candidate knowledge base
+
+Repository onboarding starts with a read-only scan of a fixed Git revision. The command inventories every tracked file, groups supported source, documentation, test, schema, and configuration files into evidence chunks, and asks the configured agent to produce a candidate knowledge base for human review:
+
+```bash
+java -jar build/code-review-agent.jar knowledge generate \
+  --repo /path/to/repo \
+  --ref main \
+  --language en \
+  --output-dir ./knowledge-output \
+  --agent-command claude \
+  --agent-arg -p
+```
+
+Use `--prepare-only` to create the immutable scope, complete file inventory, evidence chunks, and prompts without invoking an agent:
+
+```bash
+java -jar build/code-review-agent.jar knowledge generate \
+  --repo /path/to/repo \
+  --ref main \
+  --prepare-only
+```
+
+The generated `candidate-knowledge.md` is explicitly unconfirmed. The CLI does not approve, update, or publish a human-maintained knowledge base.
+
+Use `--language en` or `--language zh-CN` to select the language of chunk observations and the generated knowledge base. English is the default.
+
 ## Usage
 
 Review a single commit. The default scope is `HEAD^..HEAD`:
