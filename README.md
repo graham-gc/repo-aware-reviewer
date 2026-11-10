@@ -31,14 +31,18 @@ The command creates `build/code-review-agent.jar`.
 
 Repository onboarding starts with a read-only scan of a fixed Git revision. The command inventories every tracked file, groups supported source, documentation, test, schema, and configuration files into evidence chunks, and asks the configured agent to produce a candidate knowledge base for human review:
 
+Claude Code CLI is the default reasoning harness. Authentication and model routing are resolved by Claude Code itself, including its environment and the `env` block in `~/.claude/settings.json`. For a direct Anthropic API setup, a dedicated key can be exposed through the environment:
+
+```bash
+export ANTHROPIC_API_KEY='your-api-key'
+```
+
 ```bash
 java -jar build/code-review-agent.jar knowledge generate \
   --repo /path/to/repo \
   --ref main \
   --language en \
-  --output-dir ./knowledge-output \
-  --agent-command claude \
-  --agent-arg -p
+  --output-dir ./knowledge-output
 ```
 
 Use `--prepare-only` to create the immutable scope, complete file inventory, evidence chunks, and prompts without invoking an agent:
@@ -54,6 +58,8 @@ The generated `candidate-knowledge.md` is explicitly unconfirmed. The CLI does n
 
 Use `--language en` or `--language zh-CN` to select the language of chunk observations and the generated knowledge base. English is the default.
 
+Use `--agent-command` and repeated `--agent-arg` options only when overriding the default Claude Code harness with another CLI or a local model. repo-aware-reviewer does not read, copy, log, or store credentials from Claude settings. The actual provider and model may differ from Anthropic Claude when `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, or model overrides route Claude Code through a compatible gateway.
+
 ## Usage
 
 Review a single commit. The default scope is `HEAD^..HEAD`:
@@ -63,9 +69,7 @@ java -jar build/code-review-agent.jar review \
   --repo /path/to/repo \
   --commit HEAD \
   --requirement /path/to/requirement.md \
-  --knowledge /path/to/knowledge.md \
-  --agent-command claude \
-  --agent-arg -p
+  --knowledge /path/to/knowledge.md
 ```
 
 Review a branch from its merge base with another branch:
@@ -74,9 +78,7 @@ Review a branch from its merge base with another branch:
 java -jar build/code-review-agent.jar review \
   --repo /path/to/repo \
   --branch feature/example \
-  --base main \
-  --agent-command claude \
-  --agent-arg -p
+  --base main
 ```
 
 Review an explicit revision range:
@@ -84,9 +86,7 @@ Review an explicit revision range:
 ```bash
 java -jar build/code-review-agent.jar review \
   --repo /path/to/repo \
-  --range origin/main..feature/example \
-  --agent-command claude \
-  --agent-arg -p
+  --range origin/main..feature/example
 ```
 
 Prepare evidence without invoking a model:

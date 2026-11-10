@@ -21,9 +21,11 @@ public final class AllTests {
                 "knowledge", "generate", "--repo", ".", "--prepare-only", "--language", "zh-CN"
         });
         equal("zh-CN", chinese.language());
-        throwsArgument(() -> KnowledgeOptions.parse(new String[]{
+        KnowledgeOptions defaultBackend = KnowledgeOptions.parse(new String[]{
                 "knowledge", "generate", "--repo", "."
-        }));
+        });
+        equal("claude", defaultBackend.agentCommand());
+        equal(java.util.List.of("-p"), defaultBackend.agentArgs());
     }
 
     private static void testRangeParsing() {

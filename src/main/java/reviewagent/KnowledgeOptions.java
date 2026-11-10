@@ -43,7 +43,8 @@ record KnowledgeOptions(Path repo, String ref, Path outputDir, String agentComma
             throw new IllegalArgumentException("--repo is required");
         }
         if (!prepareOnly && agentCommand == null) {
-            throw new IllegalArgumentException("--agent-command is required unless --prepare-only is used");
+            agentCommand = "claude";
+            agentArgs.add("-p");
         }
         if (chunkBytes < 20_000 || maxFileBytes < 10_000 || maxTotalBytes < chunkBytes) {
             throw new IllegalArgumentException("Invalid scan byte limits");
