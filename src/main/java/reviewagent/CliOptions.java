@@ -6,9 +6,20 @@ import java.util.ArrayList;
 import java.util.List;
 
 record CliOptions(Path repo, String commit, String branch, String base, String range,
-                  Path requirement, Path knowledge, Path outputDir,
+                  Path requirement, Path knowledge, KnowledgeMode knowledgeMode, Path outputDir,
                   String agentCommand, List<String> agentArgs,
                   boolean prepareOnly, int maxEvidenceBytes, Duration agentTimeout) {
+    enum KnowledgeMode {
+        FULL, SCOPED;
+
+        static KnowledgeMode parse(String value) {
+            return switch (value) {
+                case "full" -> FULL;
+                case "scoped" -> SCOPED;
+                default -> throw new IllegalArgumentException("--knowledge-mode must be full or scoped");
+            };
+        }
+    }
 
     static CliOptions parse(String[] args) {
         if (args.length == 0 || !"review".equals(args[0])) {
@@ -21,6 +32,7 @@ record CliOptions(Path repo, String commit, String branch, String base, String r
         String range = null;
         Path requirement = null;
         Path knowledge = null;
+        KnowledgeMode knowledgeMode = KnowledgeMode.FULL;
         Path outputDir = Path.of("review-output");
         String agentCommand = null;
         List<String> agentArgs = new ArrayList<>();
@@ -37,6 +49,7 @@ record CliOptions(Path repo, String commit, String branch, String base, String r
                 case "--range" -> range = value(args, ++i, "--range");
                 case "--requirement" -> requirement = Path.of(value(args, ++i, "--requirement"));
                 case "--knowledge" -> knowledge = Path.of(value(args, ++i, "--knowledge"));
+                case "--knowledge-mode" -> knowledgeMode = KnowledgeMode.parse(value(args, ++i, "--knowledge-mode"));
                 case "--output-dir" -> outputDir = Path.of(value(args, ++i, "--output-dir"));
                 case "--agent-command" -> agentCommand = value(args, ++i, "--agent-command");
                 case "--agent-arg" -> agentArgs.add(value(args, ++i, "--agent-arg"));
@@ -50,6 +63,9 @@ record CliOptions(Path repo, String commit, String branch, String base, String r
         if (repo == null) {
             throw new IllegalArgumentException("--repo is required");
         }
+        if (knowledgeMode == KnowledgeMode.SCOPED && knowledge == null) {
+            throw new IllegalArgumentException("--knowledge-mode scoped requires --knowledge");
+        }
         int scopes = (commit != null ? 1 : 0) + (branch != null ? 1 : 0) + (range != null ? 1 : 0);
         if (scopes > 1) {
             throw new IllegalArgumentException("Use only one of --commit, --branch, or --range");
@@ -62,7 +78,7 @@ record CliOptions(Path repo, String commit, String branch, String base, String r
             throw new IllegalArgumentException("--max-evidence-bytes must be at least 10000");
         }
         return new CliOptions(repo.toAbsolutePath().normalize(), commit, branch, base, range,
-                absolute(requirement), absolute(knowledge), outputDir.toAbsolutePath().normalize(),
+                absolute(requirement), absolute(knowledge), knowledgeMode, outputDir.toAbsolutePath().normalize(),
                 agentCommand, List.copyOf(agentArgs), prepareOnly, maxEvidenceBytes, timeout);
     }
 

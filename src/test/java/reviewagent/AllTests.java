@@ -68,7 +68,11 @@ public final class AllTests {
                 "review", "--repo", ".", "--prepare-only"
         });
         equal(null, options.commit());
+        equal(CliOptions.KnowledgeMode.FULL, options.knowledgeMode());
         equal(1_000_000, options.maxEvidenceBytes());
+        throwsArgument(() -> CliOptions.parse(new String[]{
+                "review", "--repo", ".", "--knowledge-mode", "scoped"
+        }));
     }
 
     private static void testMutuallyExclusiveScopes() {
@@ -79,7 +83,7 @@ public final class AllTests {
 
     private static void testPromptPolicy() {
         ReviewScope scope = new ReviewScope(ReviewScope.Mode.COMMIT, "a", "b", "a", "b", "a..b");
-        EvidenceBundle evidence = new EvidenceBundle(scope, java.util.List.of(), "evidence", "coverage", 2_000);
+        EvidenceBundle evidence = new EvidenceBundle(scope, java.util.List.of(), "evidence", "coverage", 2_000, null);
         String prompt = new PromptFactory().verification(evidence, "candidate", "supplement");
         check(prompt.contains("No verified findings"));
         check(prompt.contains("INSUFFICIENT_EVIDENCE"));

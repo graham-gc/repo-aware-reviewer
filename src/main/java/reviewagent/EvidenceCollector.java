@@ -19,7 +19,8 @@ final class EvidenceCollector {
     }
 
     EvidenceBundle collect(ReviewScope scope, InputDocument requirement, InputDocument knowledge,
-                           int maxEvidenceBytes) throws IOException, InterruptedException {
+                           CliOptions.KnowledgeMode knowledgeMode, int maxEvidenceBytes)
+            throws IOException, InterruptedException {
         List<GitClient.Change> changes = git.changes(scope);
         int supplementBudget = maxEvidenceBytes / 5;
         int initialBudget = maxEvidenceBytes - supplementBudget;
@@ -33,7 +34,12 @@ final class EvidenceCollector {
                 .append("- Diff: `").append(scope.diffExpression()).append("`\n\n");
 
         appendDocument(out, "External requirement", requirement);
-        appendDocument(out, "Human-maintained knowledge base", knowledge);
+        ScopedKnowledge scopedKnowledge = null;
+        if (knowledgeMode == CliOptions.KnowledgeMode.SCOPED) {
+            scopedKnowledge = new ScopedKnowledge(knowledge);
+        } else {
+            appendDocument(out, "Human-maintained knowledge base", knowledge);
+        }
 
         out.append("## Review instructions from trusted base\n\n");
         boolean foundRule = false;
@@ -52,6 +58,13 @@ final class EvidenceCollector {
         if (remaining < 512) {
             throw new IllegalArgumentException("Required documents and baseline rules leave too little room for code evidence; "
                     + "increase --max-evidence-bytes or use smaller input documents");
+        }
+        String knowledgeCoverage = "";
+        if (scopedKnowledge != null) {
+            ScopedKnowledge.Result selection = scopedKnowledge.initial(changes, remaining / 4);
+            out.append(selection.markdown());
+            knowledgeCoverage = selection.coverage();
+            remaining -= EvidenceText.bytes(selection.markdown());
         }
         out.append("## Dependency manifests\n\n");
         int manifestBudget = Math.min(remaining / 8, 48_000);
@@ -135,9 +148,9 @@ final class EvidenceCollector {
                 + "`coverage.md` lists file-level inclusion. Missing evidence does not establish correct behavior.\n"
                 + "No build, test, static analyzer, code generator, or repository program was run by the CLI.\n";
         out.append(summary);
-        coverage.append('\n').append(summary);
+        coverage.append('\n').append(summary).append(knowledgeCoverage);
         return new EvidenceBundle(scope, changes.stream().map(GitClient.Change::path).toList(),
-                out.toString(), coverage.toString(), supplementBudget);
+                out.toString(), coverage.toString(), supplementBudget, scopedKnowledge);
     }
 
     private String readBlock(String commit, String file, int quota) throws IOException, InterruptedException {

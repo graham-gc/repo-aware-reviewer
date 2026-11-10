@@ -8,6 +8,7 @@ import java.time.Clock;
 import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.Locale;
 
 final class ReviewPipeline {
     private final ProcessExecutor executor;
@@ -34,7 +35,7 @@ final class ReviewPipeline {
         InputDocument requirement = InputDocument.read(options.requirement());
         InputDocument knowledge = InputDocument.read(options.knowledge());
         EvidenceBundle evidence = new EvidenceCollector(git).collect(
-                scope, requirement, knowledge, options.maxEvidenceBytes());
+                scope, requirement, knowledge, options.knowledgeMode(), options.maxEvidenceBytes());
         Path runDirectory = createRunDirectory(options.outputDir(), scope.targetCommit());
 
         write(runDirectory.resolve("scope.md"), scopeMarkdown(options, scope, requirement, knowledge));
@@ -58,7 +59,7 @@ final class ReviewPipeline {
         String candidates = agent.invoke(discoveryPrompt);
         write(runDirectory.resolve("candidates.md"), candidates);
 
-        progress.step(3, totalSteps, "Loading requested Git and dependency evidence");
+        progress.step(3, totalSteps, "Loading requested evidence");
         MavenEvidence maven = new MavenEvidence(git, executor, SupplementalEvidence.defaultMavenCache());
         SupplementalEvidence.Result supplemental = new SupplementalEvidence(git, maven).collect(evidence, candidates);
         write(runDirectory.resolve("supplemental-evidence.md"), supplemental.markdown());
@@ -95,9 +96,11 @@ final class ReviewPipeline {
                 - Diff: `%s`
                 - Requirement: %s
                 - Knowledge base: %s
+                - Knowledge mode: %s
                 - Dynamic verification: not run
                 """.formatted(options.repo(), scope.mode(), scope.requestedBase(), scope.requestedTarget(),
-                scope.baseCommit(), scope.targetCommit(), scope.diffExpression(), describe(requirement), describe(knowledge));
+                scope.baseCommit(), scope.targetCommit(), scope.diffExpression(), describe(requirement), describe(knowledge),
+                options.knowledgeMode().name().toLowerCase(Locale.ROOT));
     }
 
     private static String describe(InputDocument document) {

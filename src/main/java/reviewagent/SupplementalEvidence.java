@@ -40,10 +40,13 @@ final class SupplementalEvidence {
             requests.putIfAbsent(List.of(fields[0], fields[1], fields[2], fields[3]), fields);
         }
 
+        ScopedKnowledge.Result knowledge = evidence.scopedKnowledge() == null
+                ? new ScopedKnowledge.Result("", "")
+                : evidence.scopedKnowledge().supplemental(candidates, evidence.supplementBudget() / 2);
         String heading = "\n## Supplemental evidence requested during discovery\n\n";
         StringBuilder coverage = new StringBuilder(heading);
         StringBuilder prompt = new StringBuilder(heading);
-        int remaining = evidence.supplementBudget() - EvidenceText.bytes(heading) - 220;
+        int remaining = evidence.supplementBudget() - EvidenceText.bytes(heading + knowledge.markdown()) - 220;
         int processed = 0;
         int total = Math.min(requests.size(), MAX_REQUESTS);
         int included = 0;
@@ -82,7 +85,8 @@ final class SupplementalEvidence {
         }
         String summary = "\nSupplemental requests included: " + included + "/" + processed + ". Invalid: " + invalid
                 + ". Skipped by request limit: " + (requests.size() - processed) + ". See `coverage.md` for details.\n";
-        return new Result(prompt.append(summary).toString(), coverage.append(summary).toString());
+        return new Result(prompt.append(summary).append(knowledge.markdown()).toString(),
+                coverage.append(summary).append(knowledge.coverage()).toString());
     }
 
     private String repositoryFile(String revision, String path, String range, int quota)
