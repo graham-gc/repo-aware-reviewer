@@ -9,6 +9,7 @@ public final class AllTests {
     public static void main(String[] args) throws Exception {
         testRangeParsing();
         testCliDefaults();
+        testReviewLanguage();
         testMutuallyExclusiveScopes();
         testPromptPolicy();
         testKnowledgeOptions();
@@ -79,6 +80,32 @@ public final class AllTests {
         throwsArgument(() -> CliOptions.parse(new String[]{
                 "review", "--repo", ".", "--commit", "HEAD", "--branch", "main", "--prepare-only"
         }));
+    }
+
+    private static void testReviewLanguage() {
+        equal("en", CliOptions.parse(new String[]{"review", "--repo", "."}).language());
+        equal("zh-CN", CliOptions.parse(new String[]{
+                "review", "--repo", ".", "--language", "zh-CN"
+        }).language());
+        equal("en", CliOptions.parse(new String[]{
+                "review", "--repo", ".", "--language", "EN-US"
+        }).language());
+        throwsArgument(() -> CliOptions.parse(new String[]{
+                "review", "--repo", ".", "--language", "fr"
+        }));
+        var scope = new ReviewScope(ReviewScope.Mode.COMMIT, "a", "b", "a", "b", "a..b");
+        var evidence = new EvidenceBundle(scope, List.of(), "中文需求原文", "coverage", 2_000, null);
+        var chinese = new PromptFactory("zh-CN");
+        String prompt = chinese.verification(evidence, "candidate", "supplement");
+        check(prompt.contains("Output language: Simplified Chinese (zh-CN)"));
+        check(prompt.contains("# 审查范围\n") && prompt.contains("# 需求验收\n"));
+        check(prompt.contains("满足、部分满足、未满足、证据不足"));
+        check(prompt.contains("严重、高、中、低"));
+        check(!prompt.contains("# Review scope\n"));
+        check(chinese.discovery(evidence).contains("Output language: Simplified Chinese (zh-CN)"));
+        String english = new PromptFactory().verification(evidence, "candidate", "");
+        check(english.contains("Output language: English (en)"));
+        check(english.contains("# Review scope\n") && english.contains("Translate business statements"));
     }
 
     private static void testPromptPolicy() {

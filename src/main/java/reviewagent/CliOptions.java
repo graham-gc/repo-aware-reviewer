@@ -8,7 +8,7 @@ import java.util.List;
 record CliOptions(Path repo, String commit, String branch, String base, String range,
                   Path requirement, Path knowledge, KnowledgeMode knowledgeMode, Path outputDir,
                   String agentCommand, List<String> agentArgs,
-                  boolean prepareOnly, int maxEvidenceBytes, Duration agentTimeout) {
+                  boolean prepareOnly, int maxEvidenceBytes, Duration agentTimeout, String language) {
     enum KnowledgeMode {
         FULL, SCOPED;
 
@@ -39,6 +39,7 @@ record CliOptions(Path repo, String commit, String branch, String base, String r
         boolean prepareOnly = false;
         int maxEvidenceBytes = 1_000_000;
         Duration timeout = Duration.ofMinutes(15);
+        String language = "en";
 
         for (int i = 1; i < args.length; i++) {
             switch (args[i]) {
@@ -56,6 +57,7 @@ record CliOptions(Path repo, String commit, String branch, String base, String r
                 case "--prepare-only" -> prepareOnly = true;
                 case "--max-evidence-bytes" -> maxEvidenceBytes = Integer.parseInt(value(args, ++i, "--max-evidence-bytes"));
                 case "--agent-timeout-seconds" -> timeout = Duration.ofSeconds(Long.parseLong(value(args, ++i, "--agent-timeout-seconds")));
+                case "--language" -> language = OutputLanguage.parse(value(args, ++i, "--language")).code();
                 default -> throw new IllegalArgumentException("Unknown option: " + args[i]);
             }
         }
@@ -79,7 +81,7 @@ record CliOptions(Path repo, String commit, String branch, String base, String r
         }
         return new CliOptions(repo.toAbsolutePath().normalize(), commit, branch, base, range,
                 absolute(requirement), absolute(knowledge), knowledgeMode, outputDir.toAbsolutePath().normalize(),
-                agentCommand, List.copyOf(agentArgs), prepareOnly, maxEvidenceBytes, timeout);
+                agentCommand, List.copyOf(agentArgs), prepareOnly, maxEvidenceBytes, timeout, language);
     }
 
     private static Path absolute(Path path) {

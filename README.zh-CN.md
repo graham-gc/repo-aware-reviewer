@@ -45,6 +45,8 @@ java -jar build/code-review-agent.jar review \
 
 `--knowledge` 接收一份 UTF-8 Markdown，无需固定排版。`--requirement` 接收单独的 UTF-8 需求文件，用于逐条验收。两个参数都可选，使用显式文件路径。
 
+审查报告默认使用英语。加上 `--language zh-CN` 生成简体中文报告，`--language en` 生成英文报告。报告标题、说明、严重程度和需求验收状态使用所选语言，代码与源码路径保留原文。
+
 加上 `--knowledge-mode scoped` 可按需加载主知识库。CLI 按 Markdown 标题保留完整章节，先匹配改动的文件路径和代码标识符，并加载标题为 `全局规则` 或 `Global rules` 的章节。初审识别出行为变化后，CLI 再在本地检索，把预算内的匹配章节交给第二轮复核。`coverage.md` 会记录选中的章节和覆盖缺口。默认的 `full` 模式会传入整份知识库。
 
 - `--commit <ref>` 审查指定提交相对第一父提交的变更，默认目标是 `HEAD`。第一父提交须在本地可用。
@@ -58,6 +60,8 @@ java -jar build/code-review-agent.jar review \
 把[示例工作流](examples/github-review.yml)复制到待审查仓库的 `.github/workflows/`，配置 `ANTHROPIC_API_KEY` Actions Secret，并将 Action 引用固定到可信版本。同仓库的 PR 创建或更新时会自动触发。有仓库写权限的人也可以在 PR 评论 `/review`。报告会回贴到 PR，报告、审查范围和覆盖情况也会保存为 Actions artifact。
 
 把仓库变量 `REVIEW_KNOWLEDGE_PATH` 指向已跟踪的文件，例如 `docs/business-knowledge.md`，即可启用按需知识库。Action 从 PR 基线提交读取这份文件。可用 `requirement-path` 传入同一提交的需求文件，也可设 `publish-comment: 'false'`，只保存 artifact。工作流获取 base 和 head 的 Git 对象，在空工作树中运行 CLI，并关闭 Claude Code 工具。
+
+Action 的 `language` 参数默认是 `en`。示例工作流从可选仓库变量 `REVIEW_LANGUAGE` 读取，也支持设为 `zh-CN`。
 
 ## 输出与限制
 
