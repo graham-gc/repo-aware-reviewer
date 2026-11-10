@@ -2,7 +2,7 @@
 
 [简体中文](README.zh-CN.md)
 
-A read-only, evidence-driven code review CLI prototype. Its review pipeline follows the core ideas behind Anthropic Code Review: discover candidate issues, independently verify them, deduplicate the surviving findings, and rank them by severity. It extends that workflow with requirement-by-requirement assessment and repository-specific business knowledge.
+An evidence-driven code review CLI prototype. Inspired by Anthropic Code Review, it finds candidate issues and checks them against the evidence in a separate pass before deduplicating and ranking the findings. It also assesses individual requirements against the code and can use a human-maintained business knowledge base.
 
 ## Current capabilities
 
@@ -10,17 +10,17 @@ A read-only, evidence-driven code review CLI prototype. Its review pipeline foll
 - Uses the first parent as the default baseline for a single commit.
 - Uses the merge base when reviewing a branch against a baseline branch.
 - Resolves and records immutable base and target commit SHAs.
-- Reads repository review instructions from the base commit so the reviewed change cannot rewrite its own rules.
+- Reads the repository review instructions included in the evidence bundle from the base commit.
 - Loads external requirement and human-maintained knowledge files and records their SHA-256 hashes.
 - Budgets expanded Git diff context by changed file and records any partial or omitted evidence.
 - Loads requested tracked source and exact cached Maven evidence between discovery and verification.
-- Runs two agent stages: candidate discovery followed by independent verification and final reporting.
-- Does not build, test, execute, or modify the reviewed repository by default.
+- Runs separate model calls for candidate discovery and verification.
+- Collects evidence from Git and cached dependency artifacts without building or running the reviewed project.
 - Supports `--prepare-only` to generate the evidence bundle and prompts without invoking an agent.
 
 ## Build
 
-JDK 21 or later is required. Maven and Gradle are not required:
+Build with JDK 21 or later by running the following command from the project directory. The script uses the JDK tools directly.
 
 ```bash
 bash scripts/build.sh
@@ -28,15 +28,21 @@ bash scripts/build.sh
 
 The command creates `build/code-review-agent.jar`.
 
-## Generate a candidate knowledge base
+## Set up the model backend
 
-Repository onboarding starts with a read-only scan of a fixed Git revision. The command inventories every tracked file, groups supported source, documentation, test, schema, and configuration files into evidence chunks, and asks the configured agent to produce a candidate knowledge base for human review:
-
-Claude Code CLI is the default reasoning harness. Authentication and model routing are resolved by Claude Code itself, including its environment and the `env` block in `~/.claude/settings.json`. For a direct Anthropic API setup, a dedicated key can be exposed through the environment:
+Both commands default to `claude -p`. The `claude` executable must be available on `PATH` in the environment that launches the JAR. Verify that it accepts a prompt from standard input and prints a reply in the same terminal.
 
 ```bash
-export ANTHROPIC_API_KEY='your-api-key'
+printf '%s\n' 'Reply with OK.' | claude -p
 ```
+
+If it returns `OK`, the project can reuse the authentication and model routing already configured in Claude Code, whether that is a Claude subscription, an Anthropic API key, or a compatible gateway such as MiniMax. Direct API users can provide `ANTHROPIC_API_KEY` to Claude Code through the environment. For a different executable, use `--agent-command` and one `--agent-arg` per argument. The executable must read its prompt from stdin and write a plain-text response to stdout.
+
+The CLI starts the external agent in the reviewed checkout. Its tool permissions come from its own configuration, and prompts containing collected evidence go to its configured model backend. Use `--prepare-only` to collect evidence without starting the external agent.
+
+## Generate a candidate knowledge base
+
+Scan a fixed Git revision to prepare a draft for human review. The command inventories every tracked file and groups supported source, documentation, test, schema, and configuration files into evidence chunks.
 
 ```bash
 java -jar build/code-review-agent.jar knowledge generate \
@@ -46,7 +52,7 @@ java -jar build/code-review-agent.jar knowledge generate \
   --output-dir ./knowledge-output
 ```
 
-Use `--prepare-only` to create the immutable scope, complete file inventory, evidence chunks, and prompts without invoking an agent:
+Add `--prepare-only` to write the scope, file inventory, chunks, and prompts locally.
 
 ```bash
 java -jar build/code-review-agent.jar knowledge generate \
@@ -55,25 +61,23 @@ java -jar build/code-review-agent.jar knowledge generate \
   --prepare-only
 ```
 
-The generated `candidate-knowledge.md` is explicitly unconfirmed. The CLI does not approve, update, or publish a human-maintained knowledge base.
-
-Use `--language en` or `--language zh-CN` to select the language of chunk observations and the generated knowledge base. English is the default.
-
-Use `--agent-command` and repeated `--agent-arg` options only when overriding the default Claude Code harness with another CLI or a local model. repo-aware-reviewer does not read, copy, log, or store credentials from Claude settings. The actual provider and model may differ from Anthropic Claude when `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, or model overrides route Claude Code through a compatible gateway.
+Review `candidate-knowledge.md` before using it as the main knowledge base. Pass the human-approved version to `review` with `--knowledge`. Use `--language en` or `--language zh-CN` to choose the language of the observations and draft. The default is English.
 
 ## Usage
 
-Review a single commit. The default scope is `HEAD^..HEAD`:
+Review a single commit with optional business inputs. Without an explicit target, the default scope is `HEAD^..HEAD`.
 
 ```bash
 java -jar build/code-review-agent.jar review \
   --repo /path/to/repo \
   --commit HEAD \
-  --requirement /path/to/requirement.md \
-  --knowledge /path/to/knowledge.md
+  --requirement /path/outside-repo/requirement.md \
+  --knowledge /path/outside-repo/knowledge.md
 ```
 
-Review a branch from its merge base with another branch:
+Both document options are optional. Keep actual review inputs outside the checkout and pass their paths explicitly. `--knowledge` takes one human-maintained UTF-8 Markdown file in any layout. `--requirement` takes a separate UTF-8 file with the requirements for this change. If you omit the requirement file, the review can still report code findings.
+
+Review a branch from its merge base with another branch.
 
 ```bash
 java -jar build/code-review-agent.jar review \
@@ -82,7 +86,7 @@ java -jar build/code-review-agent.jar review \
   --base main
 ```
 
-Review an explicit revision range:
+Review an explicit revision range.
 
 ```bash
 java -jar build/code-review-agent.jar review \
@@ -90,7 +94,7 @@ java -jar build/code-review-agent.jar review \
   --range origin/main..feature/example
 ```
 
-Prepare evidence without invoking a model:
+Prepare evidence without invoking a model.
 
 ```bash
 java -jar build/code-review-agent.jar review \
@@ -100,26 +104,21 @@ java -jar build/code-review-agent.jar review \
   --output-dir ./review-output
 ```
 
-The agent command must read its prompt from standard input and write a plain-text response to standard output. The CLI does not invoke a shell: `--agent-command` and every `--agent-arg` value are passed directly to `ProcessBuilder` as separate arguments.
-
 The discovery pass can request tracked text from the pinned base or target and individual Java types or `.proto` entries from `~/.m2/repository`. Maven requests must match a fixed direct JAR dependency in the root `pom.xml` for the selected revision. The CLI records artifact hashes, uses `javap` for public Java signatures, and performs no build or dependency download. Requested evidence is included in the prompt to the configured backend during verification.
 
 ## Output
 
-Each run creates a separate directory containing:
+Both commands show progress on stderr, including elapsed time during long waits. On success, stdout contains the path to the run directory. The default output directories are `review-output/` and `knowledge-output/`. Override either with `--output-dir`.
 
-- `scope.md`: resolved review scope and input summary;
-- `evidence.md`: diff, target files, instructions, requirements, and knowledge evidence;
-- `coverage.md`: per-file patch coverage and the outcome of supplemental requests;
-- `discover-prompt.md`: candidate discovery prompt;
-- `candidates.md`: candidate findings;
-- `supplemental-evidence.md`: additional evidence supplied to verification;
-- `verify-prompt.md`: independent verification prompt;
-- `report.md`: final review report.
+- `review` saves `scope.md`, `evidence.md`, `coverage.md`, and `discover-prompt.md`. A full review also saves `candidates.md`, `supplemental-evidence.md`, `verify-prompt.md`, and `report.md`. With `--prepare-only`, it writes `verify-prompt-template.md` instead of the model results.
+- `knowledge generate` saves `scope.md`, `inventory.md`, evidence in `chunks/`, and prompts in `prompts/`. A full run also saves per-chunk observations and `candidate-knowledge.md`. With `--prepare-only`, it writes a synthesis prompt template without generating the candidate.
+
+## Repository documentation
+
+Root-level Markdown is reserved for filenames starting with `README`, regardless of case. Put other project documentation in a subdirectory such as `docs/`.
 
 ## Prototype limitations
 
 - Dependency inspection covers cached direct Maven JARs only. Parent/BOM, profiles, transitive resolution, other package managers, and downloads are not implemented.
-- It does not yet run builds, tests, or static analyzers.
 - Repository registration, knowledge-base approval history, and Skill/MCP adapters are not yet implemented.
 - Agent output is currently Markdown; a structured findings schema is planned.
