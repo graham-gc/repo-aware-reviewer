@@ -93,7 +93,7 @@ final class KnowledgePipeline {
         out.append("| Status | Bytes | Path | Reason |\n|---|---:|---|---|\n");
         for (KnowledgeFile file : snapshot.files()) {
             out.append('|').append(file.status()).append('|').append(file.size()).append("|`")
-                    .append(file.path().replace("|", "\\|")).append("`|")
+                    .append(EvidenceText.oneLine(file.path()).replace("|", "\\|")).append("`|")
                     .append(file.reason()).append("|\n");
         }
         return out.toString();
