@@ -60,6 +60,21 @@ final class GitClient {
         return truncate(result.stdout(), maxBytes);
     }
 
+    String resolveCommit(String ref) throws IOException, InterruptedException {
+        requireRepository();
+        return commit(ref);
+    }
+
+    List<String> trackedFiles(String commit) throws IOException, InterruptedException {
+        String output = run("ls-tree", "-r", "--name-only", commit);
+        return output.lines().filter(line -> !line.isBlank()).sorted().toList();
+    }
+
+    long fileSizeAt(String commit, String path) throws IOException, InterruptedException {
+        String value = oneLine("cat-file", "-s", commit + ":" + path);
+        return Long.parseLong(value);
+    }
+
     boolean existsAt(String commit, String path) throws IOException, InterruptedException {
         return execute(List.of("git", "cat-file", "-e", commit + ":" + path)).exitCode() == 0;
     }

@@ -1,6 +1,8 @@
 /build/
 /outputs/
 /review-output/
+/knowledge-output/
+/node_modules/
 /.idea/
 *.iml
 .DS_Store

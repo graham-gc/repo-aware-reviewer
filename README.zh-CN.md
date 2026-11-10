@@ -27,6 +27,33 @@ bash scripts/build.sh
 
 生成 `build/code-review-agent.jar`。
 
+## 生成候选知识库
+
+仓库接入从固定 Git 版本的只读扫描开始。该命令会枚举全部 tracked files，将支持的源码、文档、测试、Schema 和配置文件分成证据块，再调用指定 Agent 生成供人工审核的候选知识库：
+
+```bash
+java -jar build/code-review-agent.jar knowledge generate \
+  --repo /path/to/repo \
+  --ref main \
+  --language zh-CN \
+  --output-dir ./knowledge-output \
+  --agent-command claude \
+  --agent-arg -p
+```
+
+使用 `--prepare-only` 可以只生成固定范围、完整文件清单、证据分块和提示词，不调用 Agent：
+
+```bash
+java -jar build/code-review-agent.jar knowledge generate \
+  --repo /path/to/repo \
+  --ref main \
+  --prepare-only
+```
+
+生成的 `candidate-knowledge.md` 明确处于未确认状态。CLI 不负责审批、更新或发布人工维护的正式知识库。
+
+使用 `--language en` 或 `--language zh-CN` 可以切换分块观察和最终候选知识库的语言，缺省为英文。
+
 ## 使用
 
 单 commit，缺省审查 `HEAD^..HEAD`：
