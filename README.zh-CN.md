@@ -53,7 +53,7 @@ java -jar build/code-review-agent.jar review \
 
 ## 输出与限制
 
-两个命令都把进度写到 stderr，成功后把本次运行目录写到 stdout。默认输出目录是 `review-output/` 和 `knowledge-output/`，可用 `--output-dir` 更改。任一命令加上 `--prepare-only`，即可在本地保存证据和提示词，无需调用模型。
+进度写到 stderr，在交互式终端中原地刷新一行，重定向时按普通日志逐行输出。两个命令成功后把本次运行目录写到 stdout。默认输出目录是 `review-output/` 和 `knowledge-output/`，可用 `--output-dir` 更改。任一命令加上 `--prepare-only`，即可在本地保存证据和提示词，无需调用模型。
 
 - `review` 把模型报告保存为 `report.md`。可查看 `scope.md` 核对实际提交和输入哈希，查看 `evidence.md` 核对证据，查看 `coverage.md` 了解变更截断、跳过或补证失败的情况。
 - `knowledge generate` 生成 `candidate-knowledge.md`。可查看 `inventory.md` 了解哪些文件被纳入或跳过。两种流程都会在本地保存各自的证据。
