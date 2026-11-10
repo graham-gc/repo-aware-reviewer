@@ -55,7 +55,8 @@ record CliOptions(Path repo, String commit, String branch, String base, String r
             throw new IllegalArgumentException("Use only one of --commit, --branch, or --range");
         }
         if (!prepareOnly && agentCommand == null) {
-            throw new IllegalArgumentException("--agent-command is required unless --prepare-only is used");
+            agentCommand = "claude";
+            agentArgs.add("-p");
         }
         if (maxEvidenceBytes < 10_000) {
             throw new IllegalArgumentException("--max-evidence-bytes must be at least 10000");

@@ -31,14 +31,18 @@ bash scripts/build.sh
 
 仓库接入从固定 Git 版本的只读扫描开始。该命令会枚举全部 tracked files，将支持的源码、文档、测试、Schema 和配置文件分成证据块，再调用指定 Agent 生成供人工审核的候选知识库：
 
+Claude Code CLI 是默认推理执行器。认证和模型路由由 Claude Code 自己解析，包括进程环境以及 `~/.claude/settings.json` 的 `env` 配置。若直接使用 Anthropic 官方 API，可以通过环境变量提供专用 Key：
+
+```bash
+export ANTHROPIC_API_KEY='your-api-key'
+```
+
 ```bash
 java -jar build/code-review-agent.jar knowledge generate \
   --repo /path/to/repo \
   --ref main \
   --language zh-CN \
-  --output-dir ./knowledge-output \
-  --agent-command claude \
-  --agent-arg -p
+  --output-dir ./knowledge-output
 ```
 
 使用 `--prepare-only` 可以只生成固定范围、完整文件清单、证据分块和提示词，不调用 Agent：
@@ -54,6 +58,8 @@ java -jar build/code-review-agent.jar knowledge generate \
 
 使用 `--language en` 或 `--language zh-CN` 可以切换分块观察和最终候选知识库的语言，缺省为英文。
 
+只有覆盖默认 Claude Code 执行器、改用其他 CLI 或本地模型时，才需要传入 `--agent-command` 和可重复的 `--agent-arg`。repo-aware-reviewer 不读取、复制、记录或保存 Claude settings 中的凭据。如果配置了 `ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN` 或模型覆盖项，Claude Code 可能实际使用兼容网关和非 Claude 模型。
+
 ## 使用
 
 单 commit，缺省审查 `HEAD^..HEAD`：
@@ -63,9 +69,7 @@ java -jar build/code-review-agent.jar review \
   --repo /path/to/repo \
   --commit HEAD \
   --requirement /path/to/requirement.md \
-  --knowledge /path/to/knowledge.md \
-  --agent-command claude \
-  --agent-arg -p
+  --knowledge /path/to/knowledge.md
 ```
 
 分支相对共同祖先：
@@ -74,9 +78,7 @@ java -jar build/code-review-agent.jar review \
 java -jar build/code-review-agent.jar review \
   --repo /path/to/repo \
   --branch feature/example \
-  --base main \
-  --agent-command claude \
-  --agent-arg -p
+  --base main
 ```
 
 显式范围：
@@ -84,9 +86,7 @@ java -jar build/code-review-agent.jar review \
 ```bash
 java -jar build/code-review-agent.jar review \
   --repo /path/to/repo \
-  --range origin/main..feature/example \
-  --agent-command claude \
-  --agent-arg -p
+  --range origin/main..feature/example
 ```
 
 只准备证据，不调用模型：
