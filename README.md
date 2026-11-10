@@ -1,33 +1,35 @@
 # repo-aware-reviewer
 
-一个只读、证据驱动的代码审查 CLI 原型。流程参考 Anthropic Code Review 的核心方法：先发现候选问题，再用独立上下文复核、去重并按严重度输出；在此基础上增加需求逐条验收和人工知识库对照。
+[简体中文](README.zh-CN.md)
 
-## 当前能力
+A read-only, evidence-driven code review CLI prototype. Its review pipeline follows the core ideas behind Anthropic Code Review: discover candidate issues, independently verify them, deduplicate the surviving findings, and rank them by severity. It extends that workflow with requirement-by-requirement assessment and repository-specific business knowledge.
 
-- 支持单 commit、分支和显式 revision range 三种范围。
-- 单 commit 缺省使用第一父提交作为基线。
-- 分支使用目标分支与基线分支的 merge-base。
-- 固定并报告准确的 base/target commit SHA。
-- 从 base commit 读取仓库审查规则，避免采用目标改动篡改的规则。
-- 读取外部需求文件和人工知识库，并记录 SHA-256。
-- 收集 diff、变更文件的目标版本内容和依赖清单作为证据。
-- 两阶段 Agent 调用：发现候选问题，再独立复核并生成最终报告。
-- 默认不构建、不测试、不运行被审查仓库代码，也不修改被审查仓库。
-- `--prepare-only` 可只生成证据包和两阶段提示词，不调用 Agent。
+## Current capabilities
 
-## 构建
+- Supports a single commit, a branch comparison, or an explicit Git revision range.
+- Uses the first parent as the default baseline for a single commit.
+- Uses the merge base when reviewing a branch against a baseline branch.
+- Resolves and records immutable base and target commit SHAs.
+- Reads repository review instructions from the base commit so the reviewed change cannot rewrite its own rules.
+- Loads external requirement and human-maintained knowledge files and records their SHA-256 hashes.
+- Collects the Git diff, target-version contents of changed files, and dependency manifests as review evidence.
+- Runs two agent stages: candidate discovery followed by independent verification and final reporting.
+- Does not build, test, execute, or modify the reviewed repository by default.
+- Supports `--prepare-only` to generate the evidence bundle and prompts without invoking an agent.
 
-需要 JDK 21 或以上，不需要 Maven 或 Gradle：
+## Build
+
+JDK 21 or later is required. Maven and Gradle are not required:
 
 ```bash
 bash scripts/build.sh
 ```
 
-生成 `build/code-review-agent.jar`。
+The command creates `build/code-review-agent.jar`.
 
-## 使用
+## Usage
 
-单 commit，缺省审查 `HEAD^..HEAD`：
+Review a single commit. The default scope is `HEAD^..HEAD`:
 
 ```bash
 java -jar build/code-review-agent.jar review \
@@ -39,7 +41,7 @@ java -jar build/code-review-agent.jar review \
   --agent-arg -p
 ```
 
-分支相对共同祖先：
+Review a branch from its merge base with another branch:
 
 ```bash
 java -jar build/code-review-agent.jar review \
@@ -50,7 +52,7 @@ java -jar build/code-review-agent.jar review \
   --agent-arg -p
 ```
 
-显式范围：
+Review an explicit revision range:
 
 ```bash
 java -jar build/code-review-agent.jar review \
@@ -60,7 +62,7 @@ java -jar build/code-review-agent.jar review \
   --agent-arg -p
 ```
 
-只准备证据，不调用模型：
+Prepare evidence without invoking a model:
 
 ```bash
 java -jar build/code-review-agent.jar review \
@@ -70,22 +72,22 @@ java -jar build/code-review-agent.jar review \
   --output-dir ./review-output
 ```
 
-Agent 命令必须从标准输入读取 prompt，并把纯文本结果写到标准输出。CLI 不通过 shell 执行命令；`--agent-command` 和每个 `--agent-arg` 都作为独立参数传给 `ProcessBuilder`。
+The agent command must read its prompt from standard input and write a plain-text response to standard output. The CLI does not invoke a shell: `--agent-command` and every `--agent-arg` value are passed directly to `ProcessBuilder` as separate arguments.
 
-## 输出
+## Output
 
-每次运行创建独立目录，其中包含：
+Each run creates a separate directory containing:
 
-- `scope.md`：解析后的审查范围和输入摘要；
-- `evidence.md`：diff、目标文件内容、规则与需求证据；
-- `discover-prompt.md`：候选发现阶段提示词；
-- `candidates.md`：候选问题；
-- `verify-prompt.md`：复核阶段提示词；
-- `report.md`：最终报告。
+- `scope.md`: resolved review scope and input summary;
+- `evidence.md`: diff, target files, instructions, requirements, and knowledge evidence;
+- `discover-prompt.md`: candidate discovery prompt;
+- `candidates.md`: candidate findings;
+- `verify-prompt.md`: independent verification prompt;
+- `report.md`: final review report.
 
-## 当前原型边界
+## Prototype limitations
 
-- 已识别 Java imports 和 Maven `pom.xml` 坐标，但尚未实现精确的按符号依赖源码加载循环。
-- 尚未执行构建、测试或静态检查命令。
-- 尚未实现持久化仓库注册、知识库版本审批和 Skill/MCP 包装。
-- Agent 输出当前为 Markdown；后续应增加结构化 findings schema。
+- The prototype identifies Java imports and Maven coordinates, but does not yet implement precise, symbol-driven dependency source loading.
+- It does not yet run builds, tests, or static analyzers.
+- Repository registration, knowledge-base approval history, and Skill/MCP adapters are not yet implemented.
+- Agent output is currently Markdown; a structured findings schema is planned.
