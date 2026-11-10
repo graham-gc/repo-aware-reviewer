@@ -1,4 +1,4 @@
-# Code Review Agent CLI
+# repo-aware-reviewer
 
 一个只读、证据驱动的代码审查 CLI 原型。流程参考 Anthropic Code Review 的核心方法：先发现候选问题，再用独立上下文复核、去重并按严重度输出；在此基础上增加需求逐条验收和人工知识库对照。
 
@@ -89,4 +89,3 @@ Agent 命令必须从标准输入读取 prompt，并把纯文本结果写到标�
 - 尚未执行构建、测试或静态检查命令。
 - 尚未实现持久化仓库注册、知识库版本审批和 Skill/MCP 包装。
 - Agent 输出当前为 Markdown；后续应增加结构化 findings schema。
-
