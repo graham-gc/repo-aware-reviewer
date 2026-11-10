@@ -94,6 +94,7 @@ review() {
     local jar directory
     local -a arguments=(review --repo "$REVIEW_ROOT/repo" --branch "$REVIEW_HEAD" --base "$REVIEW_BASE"
         --output-dir "$REVIEW_ROOT/output" --knowledge-mode "$REVIEW_KNOWLEDGE_MODE"
+        --language "${REVIEW_LANGUAGE:-en}"
         --agent-command claude --agent-arg -p --agent-arg --bare --agent-arg --tools --agent-arg ''
         --agent-arg --strict-mcp-config --agent-arg --mcp-config --agent-arg '{"mcpServers":{}}'
         --agent-arg --no-session-persistence)
@@ -111,7 +112,7 @@ review() {
 }
 
 publish() {
-    local pr report run_url
+    local pr report run_url title revisions artifact_label oversized
     pr=$(api "repos/$GITHUB_REPOSITORY/pulls/$REVIEW_NUMBER")
     if ! eligible_pr <<< "$pr" || ! jq -e --arg base "$REVIEW_BASE" --arg head "$REVIEW_HEAD" \
         '.base.sha == $base and .head.sha == $head' <<< "$pr" >/dev/null; then
@@ -121,13 +122,26 @@ publish() {
 
     report="$REVIEW_DIRECTORY/report.md"
     run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+    title='Repo-aware review'
+    revisions='PR base `%s` · head `%s`'
+    artifact_label='Review report and coverage artifact'
+    oversized='The full report exceeds the comment size limit. Download it from the workflow run.'
+    case "$(printf '%s' "${REVIEW_LANGUAGE:-en}" | tr '[:upper:]' '[:lower:]')" in
+        zh|zh-cn|chinese|简体中文)
+            title='代码审查报告'
+            revisions='PR 基线 `%s` · 目标 `%s`'
+            artifact_label='完整报告与覆盖记录'
+            oversized='完整报告超出评论长度限制，请从工作流运行记录下载。'
+            ;;
+    esac
     {
-        printf '## Repo-aware review\n\nPR base `%s` · head `%s`\n\n' "$REVIEW_BASE" "$REVIEW_HEAD"
-        printf '[Review report and coverage artifact](%s)\n\n' "$run_url"
+        printf '## %s\n\n' "$title"
+        printf "$revisions\n\n" "$REVIEW_BASE" "$REVIEW_HEAD"
+        printf '[%s](%s)\n\n' "$artifact_label" "$run_url"
         if (( $(wc -c < "$report") <= 60000 )); then
             cat "$report"
         else
-            printf 'The full report exceeds the comment size limit. Download it from the workflow run.\n'
+            printf '%s\n' "$oversized"
         fi
     } > "$REVIEW_ROOT/comment.md"
     jq -n --rawfile body "$REVIEW_ROOT/comment.md" '{body: $body}' > "$REVIEW_ROOT/comment.json"

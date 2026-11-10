@@ -45,6 +45,8 @@ java -jar build/code-review-agent.jar review \
 
 `--knowledge` accepts one UTF-8 Markdown file in any layout. `--requirement` accepts a separate UTF-8 requirements file and enables requirement assessment. Both options are optional and take explicit file paths.
 
+Review reports default to English. Add `--language zh-CN` for Simplified Chinese or `--language en` for English. The selected language applies to report headings, explanations, severity labels, and requirement assessments. Code and source paths keep their original spelling.
+
 Add `--knowledge-mode scoped` to load relevant sections from the supplied knowledge base. The CLI uses Markdown headings to keep each section intact, matches changed paths and identifiers, and includes sections titled `Global rules` or `全局规则`. Discovery then describes observable behavior changes and requests rules for those impacts. The CLI looks up the requests locally and supplies matching sections for verification within the evidence budget. `coverage.md` records selected sections and gaps. The default mode, `full`, supplies the whole document.
 
 - `--commit <ref>` reviews a commit against its first parent. It defaults to `HEAD` and requires that parent to be available locally.
@@ -58,6 +60,8 @@ The evidence bundle takes repository review rules from the resolved base commit.
 Copy the [example workflow](examples/github-review.yml) into `.github/workflows/` in the repository to review. Set the `ANTHROPIC_API_KEY` Actions secret and point the action reference at a trusted revision. The workflow runs on new or updated same-repository pull requests and on `/review` comments from users with write access. It posts the report and uploads the report, scope, and coverage as an Actions artifact.
 
 Set the `REVIEW_KNOWLEDGE_PATH` repository variable to a tracked file such as `docs/business-knowledge.md` to enable scoped knowledge. The action reads that file from the PR base commit. Use the optional `requirement-path` input for a requirements file from the same commit, or `publish-comment: 'false'` for artifact-only reviews. The workflow fetches the base and head Git objects and runs the CLI with an empty worktree and Claude Code tools disabled.
+
+The Action's `language` input defaults to `en`. The example workflow reads it from the optional `REVIEW_LANGUAGE` repository variable, which also accepts `zh-CN`.
 
 ## Output and limits
 

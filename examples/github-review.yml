@@ -35,5 +35,6 @@ jobs:
         with:
           knowledge-path: ${{ vars.REVIEW_KNOWLEDGE_PATH }}
           knowledge-mode: ${{ vars.REVIEW_KNOWLEDGE_PATH != '' && 'scoped' || 'full' }}
+          language: ${{ vars.REVIEW_LANGUAGE || 'en' }}
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

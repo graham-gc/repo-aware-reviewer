@@ -35,7 +35,7 @@ record KnowledgeOptions(Path repo, String ref, Path outputDir, String agentComma
                 case "--max-file-bytes" -> maxFileBytes = Integer.parseInt(value(args, ++i, "--max-file-bytes"));
                 case "--agent-timeout-seconds" -> timeout = Duration.ofSeconds(
                         Long.parseLong(value(args, ++i, "--agent-timeout-seconds")));
-                case "--language" -> language = normalizeLanguage(value(args, ++i, "--language"));
+                case "--language" -> language = OutputLanguage.parse(value(args, ++i, "--language")).code();
                 default -> throw new IllegalArgumentException("Unknown knowledge option: " + args[i]);
             }
         }
@@ -52,14 +52,6 @@ record KnowledgeOptions(Path repo, String ref, Path outputDir, String agentComma
         return new KnowledgeOptions(repo.toAbsolutePath().normalize(), ref,
                 outputDir.toAbsolutePath().normalize(), agentCommand, List.copyOf(agentArgs),
                 prepareOnly, chunkBytes, maxTotalBytes, maxFileBytes, timeout, language);
-    }
-
-    private static String normalizeLanguage(String language) {
-        return switch (language.toLowerCase(java.util.Locale.ROOT)) {
-            case "en", "en-us", "english" -> "en";
-            case "zh", "zh-cn", "chinese", "简体中文" -> "zh-CN";
-            default -> throw new IllegalArgumentException("--language must be en or zh-CN");
-        };
     }
 
     private static String value(String[] args, int index, String option) {

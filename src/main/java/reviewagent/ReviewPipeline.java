@@ -42,7 +42,7 @@ final class ReviewPipeline {
         write(runDirectory.resolve("evidence.md"), evidence.markdown());
         write(runDirectory.resolve("coverage.md"), evidence.coverage());
 
-        PromptFactory prompts = new PromptFactory();
+        PromptFactory prompts = new PromptFactory(options.language());
         String discoveryPrompt = prompts.discovery(evidence);
         write(runDirectory.resolve("discover-prompt.md"), discoveryPrompt);
         if (options.prepareOnly()) {
@@ -97,10 +97,11 @@ final class ReviewPipeline {
                 - Requirement: %s
                 - Knowledge base: %s
                 - Knowledge mode: %s
+                - Output language: %s
                 - Dynamic verification: not run
                 """.formatted(options.repo(), scope.mode(), scope.requestedBase(), scope.requestedTarget(),
                 scope.baseCommit(), scope.targetCommit(), scope.diffExpression(), describe(requirement), describe(knowledge),
-                options.knowledgeMode().name().toLowerCase(Locale.ROOT));
+                options.knowledgeMode().name().toLowerCase(Locale.ROOT), options.language());
     }
 
     private static String describe(InputDocument document) {

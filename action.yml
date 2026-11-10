@@ -11,6 +11,9 @@ inputs:
   knowledge-mode:
     description: Knowledge evidence mode (full or scoped)
     default: full
+  language:
+    description: Report language (en or zh-CN)
+    default: en
   publish-comment:
     description: Publish the report as a pull request comment
     default: 'true'
@@ -42,6 +45,7 @@ runs:
         REVIEW_BASE: ${{ steps.prepare.outputs.base }}
         REVIEW_HEAD: ${{ steps.prepare.outputs.head }}
         REVIEW_KNOWLEDGE_MODE: ${{ inputs.knowledge-mode }}
+        REVIEW_LANGUAGE: ${{ inputs.language }}
       run: bash "$GITHUB_ACTION_PATH/scripts/github-review.sh" review
 
     - name: Upload review report and coverage
@@ -66,4 +70,5 @@ runs:
         REVIEW_BASE: ${{ steps.prepare.outputs.base }}
         REVIEW_HEAD: ${{ steps.prepare.outputs.head }}
         REVIEW_DIRECTORY: ${{ steps.review.outputs.directory }}
+        REVIEW_LANGUAGE: ${{ inputs.language }}
       run: bash "$GITHUB_ACTION_PATH/scripts/github-review.sh" publish
