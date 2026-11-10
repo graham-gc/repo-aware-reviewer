@@ -3,8 +3,10 @@
 /review-output/
 /knowledge-output/
 /node_modules/
-/Brick_Platform_Candidate_Knowledge_Base.md
-/Code_Review_Platform_Handoff.md
 /.idea/
 *.iml
 .DS_Store
+
+# Keep README variants at the root and put other project documentation in subdirectories.
+/*.[mM][dD]
+!/[rR][eE][aA][dD][mM][eE]*.[mM][dD]
