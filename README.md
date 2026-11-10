@@ -20,7 +20,7 @@ Both commands default to `claude -p` and reuse your local Claude Code setup. Mak
 printf '%s\n' 'Reply with OK.' | claude -p
 ```
 
-The CLI starts the external agent in the reviewed checkout. Its configuration controls tool permissions and where prompts containing collected evidence are sent. To use another executable, pass `--agent-command` and one `--agent-arg` per argument. It must read the prompt from stdin and write its reply to stdout.
+The CLI starts the external agent in the reviewed checkout. Its configuration controls tool permissions and where prompts containing collected evidence are sent. To use another executable, pass `--agent-command` and one `--agent-arg` per argument. It must read a UTF-8 prompt from stdin and write a UTF-8 reply to stdout.
 
 ## Generate a candidate knowledge base
 
