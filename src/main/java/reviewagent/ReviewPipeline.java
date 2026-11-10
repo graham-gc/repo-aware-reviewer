@@ -19,8 +19,18 @@ final class ReviewPipeline {
     }
 
     Path run(CliOptions options) throws IOException, InterruptedException {
+        try (var progress = new CommandProgress("review", System.err)) {
+            return run(options, progress);
+        }
+    }
+
+    private Path run(CliOptions options, CommandProgress progress) throws IOException, InterruptedException {
+        int totalSteps = options.prepareOnly() ? 3 : 4;
+        progress.step(0, totalSteps, "Resolving Git review scope");
         GitClient git = new GitClient(options.repo(), executor);
         ReviewScope scope = git.resolve(options);
+
+        progress.step(1, totalSteps, "Collecting Git diff and review evidence");
         InputDocument requirement = InputDocument.read(options.requirement());
         InputDocument knowledge = InputDocument.read(options.knowledge());
         EvidenceBundle evidence = new EvidenceCollector(git).collect(
@@ -34,20 +44,25 @@ final class ReviewPipeline {
         String discoveryPrompt = prompts.discovery(evidence);
         write(runDirectory.resolve("discover-prompt.md"), discoveryPrompt);
         if (options.prepareOnly()) {
+            progress.step(2, totalSteps, "Preparing verification prompt");
             write(runDirectory.resolve("verify-prompt-template.md"),
                     prompts.verification(evidence, "[candidate findings will be inserted here]"));
+            progress.finish(totalSteps, "Evidence and prompts ready");
             return runDirectory;
         }
 
+        progress.step(2, totalSteps, "Finding candidate issues");
         AgentRunner agent = new AgentRunner(executor, options.agentCommand(), options.agentArgs(),
                 options.repo(), options.agentTimeout());
         String candidates = agent.invoke(discoveryPrompt);
         write(runDirectory.resolve("candidates.md"), candidates);
 
+        progress.step(3, totalSteps, "Verifying findings and preparing the report");
         String verifyPrompt = prompts.verification(evidence, candidates);
         write(runDirectory.resolve("verify-prompt.md"), verifyPrompt);
         String report = agent.invoke(verifyPrompt);
         write(runDirectory.resolve("report.md"), report);
+        progress.finish(totalSteps, "Wrote report.md");
         return runDirectory;
     }
 
