@@ -53,7 +53,7 @@ The evidence bundle takes repository review rules from the resolved base commit.
 
 ## Output and limits
 
-Both commands show progress on stderr and print the run directory on stdout on success. The defaults are `review-output/` and `knowledge-output/`, configurable with `--output-dir`. Add `--prepare-only` to either command to save the local evidence and prompt templates without making model calls.
+Progress uses one updating line on an interactive stderr and plain log lines when redirected. Both commands print the run directory on stdout on success. The defaults are `review-output/` and `knowledge-output/`, configurable with `--output-dir`. Add `--prepare-only` to either command to save the local evidence and prompt templates without making model calls.
 
 - `review` writes the model's `report.md`. Use `scope.md` to check the resolved commits and input hashes, `evidence.md` to inspect the supplied material, and `coverage.md` to see truncated or omitted changes and failed evidence requests.
 - `knowledge generate` writes `candidate-knowledge.md`. Use `inventory.md` to check which files were included or skipped. Both modes save their supporting evidence locally.
