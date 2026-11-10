@@ -1,0 +1,6 @@
+/build/
+/outputs/
+/review-output/
+/.idea/
+*.iml
+.DS_Store
