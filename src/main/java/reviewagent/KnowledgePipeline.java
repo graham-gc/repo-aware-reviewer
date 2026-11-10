@@ -21,9 +21,20 @@ final class KnowledgePipeline {
     }
 
     Path run(KnowledgeOptions options) throws IOException, InterruptedException {
+        try (var progress = new CommandProgress("knowledge", System.err)) {
+            return run(options, progress);
+        }
+    }
+
+    private Path run(KnowledgeOptions options, CommandProgress progress) throws IOException, InterruptedException {
+        progress.start("Scanning Git revision " + options.ref());
         GitClient git = new GitClient(options.repo(), executor);
         KnowledgeSnapshot snapshot = new RepositorySnapshotCollector(git).collect(
                 options.ref(), options.chunkBytes(), options.maxTotalBytes(), options.maxFileBytes());
+        int chunks = snapshot.chunks().size();
+        int totalSteps = chunks + 1;
+        progress.start("Scanned " + snapshot.files().size() + " tracked files and prepared " + chunks
+                + " evidence chunks. Writing the scan inventory");
         Path runDir = createRunDirectory(options.outputDir(), snapshot.commit());
         Path chunksDir = Files.createDirectories(runDir.resolve("chunks"));
         Path promptsDir = Files.createDirectories(runDir.resolve("prompts"));
@@ -36,10 +47,12 @@ final class KnowledgePipeline {
         List<String> observations = new ArrayList<>();
         AgentRunner agent = options.prepareOnly() ? null : new AgentRunner(executor,
                 options.agentCommand(), options.agentArgs(), options.repo(), options.agentTimeout());
-        for (int i = 0; i < snapshot.chunks().size(); i++) {
+        for (int i = 0; i < chunks; i++) {
+            String label = "chunk " + (i + 1) + "/" + chunks;
+            progress.step(i, totalSteps, (agent == null ? "Preparing " : "Analyzing ") + label);
             String number = "%04d".formatted(i + 1);
             String chunk = snapshot.chunks().get(i);
-            String prompt = prompts.extract(i + 1, snapshot.chunks().size(), snapshot.commit(), chunk,
+            String prompt = prompts.extract(i + 1, chunks, snapshot.commit(), chunk,
                     options.language());
             write(chunksDir.resolve("chunk-" + number + ".txt"), chunk);
             write(promptsDir.resolve("extract-" + number + ".md"), prompt);
@@ -51,15 +64,19 @@ final class KnowledgePipeline {
         }
 
         if (options.prepareOnly()) {
+            progress.step(chunks, totalSteps, "Preparing synthesis prompt");
             write(promptsDir.resolve("synthesis-template.md"), prompts.synthesize(snapshot, inventory,
                     "[chunk observations will be inserted here]", options.language()));
+            progress.finish(totalSteps, "Evidence and prompts ready");
             return runDir;
         }
+        progress.step(chunks, totalSteps, "Synthesizing the candidate knowledge base");
         String combined = String.join("", observations);
         String synthesisPrompt = prompts.synthesize(snapshot, inventory, combined, options.language());
         write(promptsDir.resolve("synthesis.md"), synthesisPrompt);
         String candidate = agent.invoke(synthesisPrompt);
         write(runDir.resolve("candidate-knowledge.md"), candidate);
+        progress.finish(totalSteps, "Wrote candidate-knowledge.md");
         return runDir;
     }
 
