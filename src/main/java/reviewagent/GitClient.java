@@ -41,7 +41,7 @@ final class GitClient {
                 base, target, base + ".." + target);
     }
 
-    record Change(String path, boolean deleted, String patch) {
+    record Change(String path, String previousPath, boolean deleted, String patch) {
     }
 
     private record ChangedPath(char status, String previousPath, String path) {
@@ -71,7 +71,7 @@ final class GitClient {
             ChangedPath path = paths.get(i);
             String patch = needsPathLookup ? reviewDiff(scope, path.previousPath() == null ? List.of(path.path())
                     : List.of(path.previousPath(), path.path()), "--patch", "--unified=8") : patches[i];
-            changes.add(new Change(path.path(), path.status() == 'D', patch));
+            changes.add(new Change(path.path(), path.previousPath(), path.status() == 'D', patch));
         }
         return List.copyOf(changes);
     }

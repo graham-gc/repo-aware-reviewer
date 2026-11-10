@@ -3,6 +3,6 @@ package reviewagent;
 import java.util.List;
 
 record EvidenceBundle(ReviewScope scope, List<String> changedFiles, String markdown,
-                      String coverage, int supplementBudget) {
+                      String coverage, int supplementBudget, ScopedKnowledge scopedKnowledge) {
 }
 

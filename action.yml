@@ -1,0 +1,69 @@
+name: Repo-aware review
+description: Review a GitHub pull request with the repo-aware-reviewer CLI
+
+inputs:
+  knowledge-path:
+    description: Optional path to the approved Markdown knowledge base in the PR base commit
+    required: false
+  requirement-path:
+    description: Optional path to a requirements file in the PR base commit
+    required: false
+  knowledge-mode:
+    description: Knowledge evidence mode (full or scoped)
+    default: full
+  publish-comment:
+    description: Publish the report as a pull request comment
+    default: 'true'
+
+outputs:
+  review-directory:
+    description: Directory containing the local review output, empty when the event is skipped
+    value: ${{ steps.review.outputs.directory }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve pull request and fetch review commits
+      id: prepare
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GH_ENTERPRISE_TOKEN: ${{ github.token }}
+        REVIEW_KNOWLEDGE_PATH: ${{ inputs.knowledge-path }}
+        REVIEW_REQUIREMENT_PATH: ${{ inputs.requirement-path }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/github-review.sh" prepare
+
+    - name: Run static review
+      id: review
+      if: steps.prepare.outputs.root != ''
+      shell: bash
+      env:
+        REVIEW_ROOT: ${{ steps.prepare.outputs.root }}
+        REVIEW_BASE: ${{ steps.prepare.outputs.base }}
+        REVIEW_HEAD: ${{ steps.prepare.outputs.head }}
+        REVIEW_KNOWLEDGE_MODE: ${{ inputs.knowledge-mode }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/github-review.sh" review
+
+    - name: Upload review report and coverage
+      if: steps.review.outputs.directory != ''
+      uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+      with:
+        name: repo-aware-review-pr-${{ steps.prepare.outputs.number }}-${{ github.run_attempt }}
+        if-no-files-found: error
+        path: |
+          ${{ steps.review.outputs.directory }}/report.md
+          ${{ steps.review.outputs.directory }}/scope.md
+          ${{ steps.review.outputs.directory }}/coverage.md
+
+    - name: Comment on the pull request
+      if: steps.review.outputs.directory != '' && inputs.publish-comment == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GH_ENTERPRISE_TOKEN: ${{ github.token }}
+        REVIEW_ROOT: ${{ steps.prepare.outputs.root }}
+        REVIEW_NUMBER: ${{ steps.prepare.outputs.number }}
+        REVIEW_BASE: ${{ steps.prepare.outputs.base }}
+        REVIEW_HEAD: ${{ steps.prepare.outputs.head }}
+        REVIEW_DIRECTORY: ${{ steps.review.outputs.directory }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/github-review.sh" publish
