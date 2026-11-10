@@ -28,7 +28,7 @@ final class ProcessExecutor {
                 process.waitFor();
                 throw new IOException("Command timed out after " + timeout + ": " + command.get(0));
             }
-            String stdout = new String(stdoutReader.get(), StandardCharsets.UTF_8);
+            byte[] stdout = stdoutReader.get();
             String stderr = new String(stderrReader.get(), StandardCharsets.UTF_8);
             return new CommandResult(process.exitValue(), stdout, stderr);
         } catch (java.util.concurrent.ExecutionException failure) {

@@ -1,6 +1,7 @@
 package reviewagent;
 
 import java.io.IOException;
+import java.nio.charset.CharacterCodingException;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -28,10 +29,19 @@ final class AgentRunner {
             throw new IOException("Agent command failed with exit code " + result.exitCode()
                     + System.lineSeparator() + result.stderr());
         }
-        if (result.stdout().isBlank()) {
+        String response;
+        try {
+            response = result.strictUtf8Stdout();
+        } catch (CharacterCodingException error) {
+            throw new IOException("Agent command returned invalid UTF-8 on stdout", error);
+        }
+        if (response.indexOf('\uFFFD') >= 0) {
+            throw new IOException("Agent response contains U+FFFD (Unicode replacement character)");
+        }
+        if (response.isBlank()) {
             throw new IOException("Agent command returned no output");
         }
-        return result.stdout();
+        return response;
     }
 }
 

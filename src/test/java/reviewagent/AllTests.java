@@ -1,5 +1,10 @@
 package reviewagent;
 
+import java.io.IOException;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.util.List;
+
 public final class AllTests {
     public static void main(String[] args) throws Exception {
         testRangeParsing();
@@ -7,8 +12,30 @@ public final class AllTests {
         testMutuallyExclusiveScopes();
         testPromptPolicy();
         testKnowledgeOptions();
+        testAgentResponseEncoding();
         EvidenceTests.run();
         System.out.println("All tests passed");
+    }
+
+    private static void testAgentResponseEncoding() throws Exception {
+        String markdown = "> **性质说明**：供人工评审的候选知识库 `&#x662F;`\n";
+        equal(markdown, shellAgent("cat").invoke(markdown));
+        expectAgentOutputError("printf '\\303'", "invalid UTF-8");
+        expectAgentOutputError("printf '\\357\\277\\275'", "U+FFFD");
+    }
+
+    private static AgentRunner shellAgent(String command) {
+        return new AgentRunner(new ProcessExecutor(), "/bin/sh", List.of("-c", command),
+                Path.of("."), Duration.ofSeconds(5));
+    }
+
+    private static void expectAgentOutputError(String command, String message) throws Exception {
+        try {
+            shellAgent(command).invoke("");
+            throw new AssertionError("Expected agent response encoding error: " + message);
+        } catch (IOException error) {
+            check(error.getMessage().contains(message));
+        }
     }
 
     private static void testKnowledgeOptions() {

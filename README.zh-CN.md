@@ -20,7 +20,7 @@ bash scripts/build.sh
 printf '%s\n' '只回复 OK' | claude -p
 ```
 
-CLI 在被审查仓库的工作目录启动外部 Agent。它的配置决定工具权限和含证据的提示词会发往哪个模型后端。换用其他 Agent 时，用 `--agent-command` 指定可执行文件，每个参数各传一次 `--agent-arg`。该命令需要从 stdin 读取提示词，并把回复写到 stdout。
+CLI 在被审查仓库的工作目录启动外部 Agent。它的配置决定工具权限和含证据的提示词会发往哪个模型后端。换用其他 Agent 时，用 `--agent-command` 指定可执行文件，每个参数各传一次 `--agent-arg`。该命令从 stdin 读取 UTF-8 提示词，并把 UTF-8 回复写到 stdout。
 
 ## 生成候选知识库
 
