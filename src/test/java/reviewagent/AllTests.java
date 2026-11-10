@@ -1,12 +1,13 @@
 package reviewagent;
 
 public final class AllTests {
-    public static void main(String[] args) {
+    public static void main(String[] args) throws Exception {
         testRangeParsing();
         testCliDefaults();
         testMutuallyExclusiveScopes();
         testPromptPolicy();
         testKnowledgeOptions();
+        EvidenceTests.run();
         System.out.println("All tests passed");
     }
 
@@ -51,11 +52,12 @@ public final class AllTests {
 
     private static void testPromptPolicy() {
         ReviewScope scope = new ReviewScope(ReviewScope.Mode.COMMIT, "a", "b", "a", "b", "a..b");
-        EvidenceBundle evidence = new EvidenceBundle(scope, java.util.List.of(), "evidence");
-        String prompt = new PromptFactory().verification(evidence, "candidate");
+        EvidenceBundle evidence = new EvidenceBundle(scope, java.util.List.of(), "evidence", "coverage", 2_000);
+        String prompt = new PromptFactory().verification(evidence, "candidate", "supplement");
         check(prompt.contains("No verified findings"));
         check(prompt.contains("INSUFFICIENT_EVIDENCE"));
         check(prompt.contains("never promoted"));
+        check(prompt.contains("supplement"));
     }
 
     private static void equal(Object expected, Object actual) {

@@ -2,6 +2,7 @@ package reviewagent;
 
 import java.util.List;
 
-record EvidenceBundle(ReviewScope scope, List<String> changedFiles, String markdown) {
+record EvidenceBundle(ReviewScope scope, List<String> changedFiles, String markdown,
+                      String coverage, int supplementBudget) {
 }
 

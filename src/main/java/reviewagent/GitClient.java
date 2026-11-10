@@ -41,15 +41,48 @@ final class GitClient {
                 base, target, base + ".." + target);
     }
 
-    String diff(ReviewScope scope, int maxBytes) throws IOException, InterruptedException {
-        return truncate(run("diff", "--no-ext-diff", "--find-renames", "--find-copies",
-                scope.baseCommit(), scope.targetCommit(), "--"), maxBytes);
+    record Change(String path, boolean deleted, String patch) {
     }
 
-    List<String> changedFiles(ReviewScope scope) throws IOException, InterruptedException {
-        String output = run("diff", "--name-only", "--diff-filter=ACMRTUXB",
-                scope.baseCommit(), scope.targetCommit(), "--");
-        return output.lines().filter(line -> !line.isBlank()).toList();
+    private record ChangedPath(char status, String previousPath, String path) {
+    }
+
+    List<Change> changes(ReviewScope scope) throws IOException, InterruptedException {
+        String listing = reviewDiff(scope, List.of(), "--name-status", "-z");
+        if (listing.isEmpty()) {
+            return List.of();
+        }
+        String[] fields = listing.split("\0");
+        List<ChangedPath> paths = new ArrayList<>();
+        for (int i = 0; i < fields.length; ) {
+            char status = fields[i++].charAt(0);
+            String path = fields[i++];
+            if (status == 'R' || status == 'C') {
+                paths.add(new ChangedPath(status, path, fields[i++]));
+            } else {
+                paths.add(new ChangedPath(status, null, path));
+            }
+        }
+        String[] patches = reviewDiff(scope, List.of(), "--patch", "--unified=8").split("(?m)(?=^diff --git )");
+        // Git can emit separate deletion and addition patches for one file type change.
+        boolean needsPathLookup = paths.size() != patches.length || paths.stream().anyMatch(path -> path.status() == 'T');
+        List<Change> changes = new ArrayList<>(paths.size());
+        for (int i = 0; i < paths.size(); i++) {
+            ChangedPath path = paths.get(i);
+            String patch = needsPathLookup ? reviewDiff(scope, path.previousPath() == null ? List.of(path.path())
+                    : List.of(path.previousPath(), path.path()), "--patch", "--unified=8") : patches[i];
+            changes.add(new Change(path.path(), path.status() == 'D', patch));
+        }
+        return List.copyOf(changes);
+    }
+
+    private String reviewDiff(ReviewScope scope, List<String> paths, String... flags) throws IOException, InterruptedException {
+        List<String> args = new ArrayList<>(List.of("--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv",
+                "--no-color", "--no-relative", "--submodule=short", "--ignore-submodules=none", "--find-renames"));
+        args.addAll(List.of(flags));
+        args.addAll(List.of(scope.baseCommit(), scope.targetCommit(), "--"));
+        args.addAll(paths);
+        return run(args.toArray(String[]::new));
     }
 
     String fileAt(String commit, String path, int maxBytes) throws IOException, InterruptedException {
@@ -79,6 +112,24 @@ final class GitClient {
         return execute(List.of("git", "cat-file", "-e", commit + ":" + path)).exitCode() == 0;
     }
 
+    String regularBlobAt(String commit, String path, int maxBytes) throws IOException, InterruptedException {
+        String entry = run("--literal-pathspecs", "ls-tree", "--full-tree", "-z", commit, "--", path);
+        int tab = entry.indexOf('\t');
+        if (tab < 0 || !entry.substring(tab + 1).equals(path + "\0")
+                || !(entry.startsWith("100644 blob ") || entry.startsWith("100755 blob "))) {
+            throw new IOException("No regular tracked file at that revision");
+        }
+        String oid = entry.substring("100644 blob ".length(), tab);
+        if (Long.parseLong(oneLine("cat-file", "-s", oid)) > maxBytes) {
+            throw new IOException("File exceeds the available byte budget");
+        }
+        String content = run("cat-file", "blob", oid);
+        if (content.indexOf('\0') >= 0) {
+            throw new IOException("File is not text");
+        }
+        return content;
+    }
+
     private void requireRepository() throws IOException, InterruptedException {
         if (!"true".equals(oneLine("rev-parse", "--is-inside-work-tree"))) {
             throw new IllegalArgumentException("Not a Git work tree: " + repository);
@@ -86,7 +137,7 @@ final class GitClient {
     }
 
     private String commit(String ref) throws IOException, InterruptedException {
-        return oneLine("rev-parse", "--verify", ref + "^{commit}");
+        return oneLine("rev-parse", "--verify", "--end-of-options", ref + "^{commit}");
     }
 
     private String oneLine(String... args) throws IOException, InterruptedException {
