@@ -14,14 +14,19 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
 final class ReviewTasks {
-    record Task(String id, String prompt) {
+    @FunctionalInterface
+    interface Validator {
+        void validate(String response) throws IOException;
+    }
+
+    record Task(String id, String prompt, Validator validator) {
     }
 
     private record Reply(String id, String response) {
     }
 
     static Map<String, String> run(List<Task> tasks, AgentRunner agent, Path directory, int parallelism,
-                                   CommandProgress progress, int stage, int stages, String description)
+                                   CommandProgress progress, int stage, int stages, String description, boolean resume)
             throws IOException, InterruptedException {
         Files.createDirectories(directory);
         if (tasks.isEmpty()) {
@@ -32,11 +37,10 @@ final class ReviewTasks {
             var futures = new ArrayList<Future<Reply>>();
             try {
                 for (Task task : tasks) {
-                    Files.writeString(directory.resolve(task.id() + "-prompt.md"), task.prompt(), StandardCharsets.UTF_8);
                     futures.add(completions.submit(() -> {
                         try {
-                            String response = agent.invoke(task.prompt());
-                            Files.writeString(directory.resolve(task.id() + "-response.md"), response, StandardCharsets.UTF_8);
+                            String response = invoke(task, agent, directory, resume);
+                            Files.deleteIfExists(directory.resolve(task.id() + "-error.txt"));
                             return new Reply(task.id(), response);
                         } catch (IOException failure) {
                             Files.writeString(directory.resolve(task.id() + "-error.txt"), failure.getMessage(), StandardCharsets.UTF_8);
@@ -54,11 +58,48 @@ final class ReviewTasks {
                 tasks.forEach(task -> ordered.put(task.id(), replies.get(task.id())));
                 return ordered;
             } catch (ExecutionException failure) {
-                throw new IOException(description + " failed. See task artifacts in " + directory, failure.getCause());
+                throw new IOException(description + " failed: " + failure.getCause().getMessage()
+                        + ". See task artifacts in " + directory, failure.getCause());
             } finally {
                 futures.forEach(future -> future.cancel(true));
                 workers.shutdownNow();
             }
+        }
+    }
+
+    private static String invoke(Task task, AgentRunner agent, Path directory, boolean resume)
+            throws IOException, InterruptedException {
+        Path responseFile = directory.resolve(task.id() + "-response.md");
+        String response;
+        if (resume && Files.isRegularFile(responseFile)) {
+            response = Files.readString(responseFile, StandardCharsets.UTF_8);
+        } else {
+            Files.writeString(directory.resolve(task.id() + "-prompt.md"), task.prompt(), StandardCharsets.UTF_8);
+            response = agent.invoke(task.prompt());
+            Files.writeString(responseFile, response, StandardCharsets.UTF_8);
+        }
+        try {
+            AgentRunner.validateResponse(response);
+            task.validator().validate(response);
+            return response;
+        } catch (IOException invalid) {
+            Files.writeString(directory.resolve(task.id() + "-invalid-response.md"), response, StandardCharsets.UTF_8);
+            String repairPrompt = task.prompt() + "\n\nOUTPUT FORMAT CORRECTION\n"
+                    + "The previous response failed structural validation. Correct only its serialization and comply with the response schema above. "
+                    + "Preserve the evidence-based decisions and reasoning. Do not invent facts or promote an unconfirmed finding. "
+                    + "Return the complete corrected response.\nValidation error: " + EvidenceText.oneLine(invalid.getMessage())
+                    + "\n\nPREVIOUS RESPONSE\n" + response;
+            Files.writeString(directory.resolve(task.id() + "-repair-prompt.md"), repairPrompt, StandardCharsets.UTF_8);
+            String repaired = agent.invoke(repairPrompt);
+            Files.writeString(directory.resolve(task.id() + "-repair-response.md"), repaired, StandardCharsets.UTF_8);
+            try {
+                task.validator().validate(repaired);
+            } catch (IOException stillInvalid) {
+                throw new IOException("Task " + task.id() + " returned invalid structured output after format correction: "
+                        + stillInvalid.getMessage(), stillInvalid);
+            }
+            Files.writeString(responseFile, repaired, StandardCharsets.UTF_8);
+            return repaired;
         }
     }
 }

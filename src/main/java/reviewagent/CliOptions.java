@@ -6,7 +6,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 record CliOptions(Path repo, String commit, String branch, String base, String range,
-                  Path requirement, Path knowledge, KnowledgeMode knowledgeMode, Path outputDir,
+                  Path requirement, Path knowledge, KnowledgeMode knowledgeMode, Path outputDir, Path resumeDirectory,
                   String agentCommand, List<String> agentArgs,
                   boolean prepareOnly, int maxEvidenceBytes, int maxSupplementalRequests, int maxKnowledgeQueries,
                   int reviewParallelism, Duration agentTimeout, String language) {
@@ -35,6 +35,7 @@ record CliOptions(Path repo, String commit, String branch, String base, String r
         Path knowledge = null;
         KnowledgeMode knowledgeMode = KnowledgeMode.FULL;
         Path outputDir = Path.of("review-output");
+        Path resumeDirectory = null;
         String agentCommand = null;
         List<String> agentArgs = new ArrayList<>();
         boolean prepareOnly = false;
@@ -56,6 +57,7 @@ record CliOptions(Path repo, String commit, String branch, String base, String r
                 case "--knowledge" -> knowledge = Path.of(value(args, ++i, "--knowledge"));
                 case "--knowledge-mode" -> knowledgeMode = KnowledgeMode.parse(value(args, ++i, "--knowledge-mode"));
                 case "--output-dir" -> outputDir = Path.of(value(args, ++i, "--output-dir"));
+                case "--resume" -> resumeDirectory = Path.of(value(args, ++i, "--resume"));
                 case "--agent-command" -> agentCommand = value(args, ++i, "--agent-command");
                 case "--agent-arg" -> agentArgs.add(value(args, ++i, "--agent-arg"));
                 case "--prepare-only" -> prepareOnly = true;
@@ -93,7 +95,7 @@ record CliOptions(Path repo, String commit, String branch, String base, String r
             throw new IllegalArgumentException("--review-parallelism must be at least 1");
         }
         return new CliOptions(repo.toAbsolutePath().normalize(), commit, branch, base, range,
-                absolute(requirement), absolute(knowledge), knowledgeMode, outputDir.toAbsolutePath().normalize(),
+                absolute(requirement), absolute(knowledge), knowledgeMode, outputDir.toAbsolutePath().normalize(), absolute(resumeDirectory),
                 agentCommand, List.copyOf(agentArgs), prepareOnly, maxEvidenceBytes,
                 maxSupplementalRequests, maxKnowledgeQueries, reviewParallelism, timeout, language);
     }

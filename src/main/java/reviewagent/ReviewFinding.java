@@ -3,7 +3,17 @@ package reviewagent;
 record ReviewFinding(String id, String title, Severity severity, String path, int line, int endLine,
                      String trigger, String impact, String evidence, String diffRelation) {
     enum Severity {
-        CRITICAL, HIGH, MEDIUM, LOW
+        CRITICAL, HIGH, MEDIUM, LOW;
+
+        static Severity parse(String value) {
+            return switch (value.strip().toUpperCase(java.util.Locale.ROOT)) {
+                case "CRITICAL", "严重" -> CRITICAL;
+                case "HIGH", "高" -> HIGH;
+                case "MEDIUM", "中" -> MEDIUM;
+                case "LOW", "低" -> LOW;
+                default -> throw new IllegalArgumentException("Unknown finding severity");
+            };
+        }
     }
 
     String markdown(OutputLanguage language) {

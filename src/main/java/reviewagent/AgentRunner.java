@@ -35,6 +35,10 @@ final class AgentRunner {
         } catch (CharacterCodingException error) {
             throw new IOException("Agent command returned invalid UTF-8 on stdout", error);
         }
+        return validateResponse(response);
+    }
+
+    static String validateResponse(String response) throws IOException {
         if (response.indexOf('\uFFFD') >= 0) {
             throw new IOException("Agent response contains U+FFFD (Unicode replacement character)");
         }

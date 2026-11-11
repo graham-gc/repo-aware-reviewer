@@ -38,11 +38,22 @@ final class ReviewPipeline {
         InputDocument knowledge = InputDocument.read(options.knowledge());
         EvidenceBundle evidence = new EvidenceCollector(git).collect(
                 scope, requirement, knowledge, options.knowledgeMode(), options.maxEvidenceBytes());
-        Path runDirectory = createRunDirectory(options.outputDir(), scope.targetCommit());
+        String scopeText = scopeMarkdown(options, scope, requirement, knowledge);
+        Path runDirectory;
+        boolean resume = options.resumeDirectory() != null;
+        if (resume) {
+            runDirectory = options.resumeDirectory();
+            requireMatchingResumeFile(runDirectory.resolve("scope.md"), scopeText, true);
+            requireMatchingResumeFile(runDirectory.resolve("evidence.md"), evidence.markdown(), true);
+        } else {
+            runDirectory = createRunDirectory(options.outputDir(), scope.targetCommit());
+        }
 
-        write(runDirectory.resolve("scope.md"), scopeMarkdown(options, scope, requirement, knowledge));
-        write(runDirectory.resolve("evidence.md"), evidence.markdown());
-        write(runDirectory.resolve("coverage.md"), evidence.coverage());
+        if (!resume || options.prepareOnly()) {
+            write(runDirectory.resolve("scope.md"), scopeText);
+            write(runDirectory.resolve("evidence.md"), evidence.markdown());
+            write(runDirectory.resolve("coverage.md"), evidence.coverage());
+        }
 
         PromptFactory prompts = new PromptFactory(
                 options.language(), options.maxSupplementalRequests(), options.maxKnowledgeQueries());
@@ -50,8 +61,10 @@ final class ReviewPipeline {
         write(runDirectory.resolve("discover-prompt.md"), discoveryPrompt);
         List<ReviewTasks.Task> discoveries = new ArrayList<>();
         for (int i = 0; i < PromptFactory.REVIEW_FOCUSES.size(); i++) {
-            discoveries.add(new ReviewTasks.Task("R" + (i + 1),
-                    prompts.independentDiscovery(evidence, PromptFactory.REVIEW_FOCUSES.get(i))));
+            String reviewer = "R" + (i + 1);
+            discoveries.add(new ReviewTasks.Task(reviewer,
+                    prompts.independentDiscovery(evidence, PromptFactory.REVIEW_FOCUSES.get(i)),
+                    reply -> ReviewOutput.discovery(reply, reviewer, evidence.changedFiles())));
         }
         if (options.prepareOnly()) {
             progress.step(2, totalSteps, "Preparing verification prompt");
@@ -74,7 +87,7 @@ final class ReviewPipeline {
         AgentRunner agent = new AgentRunner(executor, options.agentCommand(), options.agentArgs(),
                 options.repo(), options.agentTimeout());
         var responses = ReviewTasks.run(discoveries, agent, runDirectory.resolve("discovery"), options.reviewParallelism(),
-                progress, 2, totalSteps, "Independent reviewers");
+                progress, 2, totalSteps, "Independent reviewers", resume);
         var findings = new ArrayList<ReviewFinding>();
         StringBuilder discoveryNotes = new StringBuilder();
         StringBuilder rawCandidates = new StringBuilder();
@@ -85,12 +98,16 @@ final class ReviewPipeline {
             rawCandidates.append("\n## ").append(response.getKey()).append("\n\n").append(response.getValue()).append('\n');
         }
         String candidates = rawCandidates.toString();
-        write(runDirectory.resolve("candidates.md"), candidates);
 
         progress.step(3, totalSteps, "Loading requested evidence");
         MavenEvidence maven = new MavenEvidence(git, executor, SupplementalEvidence.defaultMavenCache());
         SupplementalEvidence.Result supplemental = new SupplementalEvidence(git, maven).collect(
                 evidence, candidates, options.maxSupplementalRequests(), options.maxKnowledgeQueries());
+        if (resume) {
+            requireMatchingResumeFile(runDirectory.resolve("supplemental-evidence.md"), supplemental.markdown(), false);
+        }
+        write(runDirectory.resolve("scope.md"), scopeText);
+        write(runDirectory.resolve("candidates.md"), candidates);
         write(runDirectory.resolve("supplemental-evidence.md"), supplemental.markdown());
         StringBuilder coverage = new StringBuilder(evidence.coverage()).append(supplemental.coverage());
         write(runDirectory.resolve("coverage.md"), coverage.toString());
@@ -104,9 +121,10 @@ final class ReviewPipeline {
                     This pass runs after evidence collection. Use the material already supplied and record remaining
                     evidence gaps in prose. Do not issue additional evidence requests in this pass.
                     """);
-            var followup = ReviewTasks.run(List.of(new ReviewTasks.Task("S1", prompt)), agent,
+            var followup = ReviewTasks.run(List.of(new ReviewTasks.Task("S1", prompt,
+                    reply -> ReviewOutput.discovery(reply, "S1", evidence.changedFiles()))), agent,
                     runDirectory.resolve("discovery"), options.reviewParallelism(), progress, 4, totalSteps,
-                    "Supplemental evidence reviewer");
+                    "Supplemental evidence reviewer", resume);
             String response = followup.get("S1");
             ReviewOutput.Discovery parsed = ReviewOutput.discovery(response, "S1", evidence.changedFiles());
             findings.addAll(parsed.findings());
@@ -120,9 +138,10 @@ final class ReviewPipeline {
         progress.step(5, totalSteps, findings.isEmpty() ? "No candidate findings to verify"
                 : "Verifying candidate issues 0/" + findings.size());
         var verificationTasks = findings.stream().map(finding -> new ReviewTasks.Task(finding.id(),
-                prompts.verifyFinding(evidence, finding, supplemental.markdown()))).toList();
+                prompts.verifyFinding(evidence, finding, supplemental.markdown()),
+                reply -> ReviewOutput.verification(reply, finding, evidence.changedFiles()))).toList();
         var verificationReplies = ReviewTasks.run(verificationTasks, agent, runDirectory.resolve("verification"),
-                options.reviewParallelism(), progress, 5, totalSteps, "Verifying candidate issues");
+                options.reviewParallelism(), progress, 5, totalSteps, "Verifying candidate issues", resume);
         var confirmed = new ArrayList<ReviewFinding>();
         StringBuilder verificationCoverage = new StringBuilder("\n## Individual candidate verification\n\n");
         for (ReviewFinding finding : findings) {
@@ -148,12 +167,32 @@ final class ReviewPipeline {
         String reportPrompt = prompts.finalizeReport(evidence, confirmed, discoveryNotes.toString(),
                 supplemental.markdown(), verificationCoverage.toString());
         write(runDirectory.resolve("verify-prompt.md"), reportPrompt);
-        String response = agent.invoke(reportPrompt);
-        write(runDirectory.resolve("report-response.md"), response);
+        var reportReplies = ReviewTasks.run(List.of(new ReviewTasks.Task("report", reportPrompt,
+                reply -> ReviewOutput.finalReport(reply, confirmed, language))), agent, runDirectory,
+                options.reviewParallelism(), progress, 6, totalSteps, "Finalizing report", resume);
+        String response = reportReplies.get("report");
         String report = ReviewOutput.finalReport(response, confirmed, language);
         write(runDirectory.resolve("report.md"), report);
         progress.finish(totalSteps, "Wrote report.md");
         return runDirectory;
+    }
+
+    private static void requireMatchingResumeFile(Path path, String expected, boolean required) throws IOException {
+        if (!Files.isRegularFile(path)) {
+            if (required) {
+                throw new IOException("Cannot resume without " + path);
+            }
+            return;
+        }
+        String previous = Files.readString(path, StandardCharsets.UTF_8);
+        if (path.getFileName().toString().equals("scope.md")) {
+            previous = previous.replaceAll("(?m)^- Review parallelism:.*\\R?", "");
+            expected = expected.replaceAll("(?m)^- Review parallelism:.*\\R?", "");
+        }
+        if (!previous.equals(expected)) {
+            throw new IOException("Cannot resume because " + path.getFileName()
+                    + " differs from the saved run. Use the original revisions, documents and evidence settings.");
+        }
     }
 
     private Path createRunDirectory(Path root, String targetCommit) throws IOException {

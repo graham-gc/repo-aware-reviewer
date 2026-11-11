@@ -24,6 +24,21 @@ final class ReviewOutputTests {
         String verdict = "<verification><status>CONFIRMED</status><reason>Concrete source evidence.</reason>"
                 + ReviewOutput.findingXml(first) + "</verification>";
         require(ReviewOutput.verification(xml(verdict), first, List.of("a.cpp")).confirmed().equals(first), "confirmed verdict");
+        for (String wrapped : List.of(verdict, "Decision follows.\n" + verdict + "\nEnd.",
+                "> Example <verification/>\n" + verdict,
+                "```XML\n" + verdict + "\n```", "```\n" + verdict + "\n```", "~~~xml\n" + verdict + "\n~~~")) {
+            require(ReviewOutput.verification(wrapped, first, List.of("a.cpp")).confirmed().equals(first),
+                    "equivalent XML responses are accepted independently of Markdown wrapping");
+        }
+        String cdata = "<verification><status>REJECTED</status><reason><![CDATA[The literal </verification> in source is data.]]></reason></verification>";
+        require(ReviewOutput.verification(cdata, first, List.of("a.cpp")).status() == ReviewOutput.Status.REJECTED,
+                "XML-like source text inside CDATA does not terminate the response");
+        fails(() -> ReviewOutput.verification(verdict + "\n" + verdict, first, List.of("a.cpp")));
+        String localized = verdict.replace("<finding id=\"R1-1\">", "<finding><id>R1-1</id>")
+                .replace("<severity>HIGH</severity>", "<severity>高</severity>");
+        require(ReviewOutput.verification(localized, first, List.of("a.cpp")).confirmed().equals(first),
+                "equivalent child ID and localized severity preserve the verified finding");
+        fails(() -> ReviewOutput.verification(localized.replace("<id>R1-1</id>", "<id>other</id>"), first, List.of("a.cpp")));
         for (String status : List.of("REJECTED", "INSUFFICIENT_EVIDENCE")) {
             var result = ReviewOutput.verification(xml("<verification><status>" + status
                     + "</status><reason>The guard or missing contract changes the conclusion.</reason></verification>"), first, List.of("a.cpp"));
@@ -37,6 +52,8 @@ final class ReviewOutputTests {
         String groups = "<finding-groups><group><id>R1-1</id><id>R2-1</id></group>"
                 + "<group><id>R3-1</id></group></finding-groups>";
         String report = ReviewOutput.finalReport(body + "\n\n" + xml(groups), List.of(other, duplicate, first), OutputLanguage.EN);
+        require(report.equals(ReviewOutput.finalReport(body + "\n\n" + groups,
+                List.of(other, duplicate, first), OutputLanguage.EN)), "raw final grouping produces the same report");
         require(report.contains("[HIGH] First failure") && report.contains("[LOW] Independent failure"), "severity rendering");
         require(!report.contains("Same failure") && !report.contains("fabricated"), "duplicates and unverified model text excluded");
         require(report.indexOf("First failure") < report.indexOf("Independent failure"), "findings ordered by severity");
