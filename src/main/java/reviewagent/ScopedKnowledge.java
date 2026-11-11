@@ -15,8 +15,6 @@ import java.util.stream.Collectors;
 
 final class ScopedKnowledge {
     private static final int MAX_BYTES_PER_PASS = 24_000;
-    private static final int MAX_SECTIONS_PER_PASS = 8;
-    private static final int MAX_QUERIES = 8;
     private static final int MAX_MATCHES_PER_QUERY = 3;
     private static final String REQUEST = "REQUEST_KNOWLEDGE|";
     private static final Pattern LINE = Pattern.compile("[^\\r\\n]*(?:\\r\\n|\\r|\\n|$)");
@@ -39,7 +37,7 @@ final class ScopedKnowledge {
     private static final Set<String> GENERIC_TERMS = Set.of("run", "running", "status", "request", "response", "data",
             "result", "运行", "状态", "请求", "响应", "数据", "结果", "流程", "通过");
 
-    record Result(String markdown, String coverage) {
+    record Result(String markdown, String coverage, int suppliedSections) {
     }
 
     private record Heading(int level, String title, int line, int offset) {
@@ -144,10 +142,10 @@ final class ScopedKnowledge {
         }
         String summary = "\nInitial rule excerpts supplied: " + selection.count
                 + ". Review coverage is limited to supplied excerpts.\n\n";
-        return new Result(selection.markdown(summary), coverage.append(summary).toString());
+        return new Result(selection.markdown(summary), coverage.append(summary).toString(), selection.count);
     }
 
-    Result supplemental(List<EvidenceRequest> requests, int budget) {
+    Result supplemental(List<EvidenceRequest> requests, int budget, int maxQueries) {
         var queries = new LinkedHashMap<String, String>();
         var invalidLines = new ArrayList<Integer>();
         for (EvidenceRequest parsed : requests) {
@@ -167,7 +165,7 @@ final class ScopedKnowledge {
         Selection selection = new Selection(heading, budget);
         StringBuilder coverage = new StringBuilder(heading);
         StringBuilder notes = new StringBuilder("\n### Knowledge lookup outcomes\n\n");
-        List<Lookup> lookups = queries.entrySet().stream().limit(MAX_QUERIES)
+        List<Lookup> lookups = queries.entrySet().stream().limit(maxQueries == 0 ? Long.MAX_VALUE : maxQueries)
                 .map(query -> new Lookup(query.getKey(), query.getValue(), search(query.getKey()))).toList();
         var outcomes = new LinkedHashMap<String, String>();
         // Give each behavior a chance to supply its best match before loading alternatives.
@@ -206,7 +204,7 @@ final class ScopedKnowledge {
         if (lookups.isEmpty()) {
             summary += "No usable behavior queries. Rule coverage is limited to initial matches.\n";
         }
-        return new Result(selection.markdown(summary + notes), coverage.append(summary).toString());
+        return new Result(selection.markdown(summary + notes), coverage.append(summary).toString(), selection.count);
     }
 
     private List<Match> search(String query) {
@@ -277,8 +275,8 @@ final class ScopedKnowledge {
             }
             String block = "### " + section.label() + "\n\n" + section.original() + "\n\n";
             int bytes = EvidenceText.bytes(block);
-            if (count == MAX_SECTIONS_PER_PASS || bytes > remaining) {
-                return "OMITTED (section or byte limit)";
+            if (bytes > remaining) {
+                return "OMITTED (byte limit)";
             }
             output.append(block);
             remaining -= bytes;

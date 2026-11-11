@@ -2,7 +2,7 @@
 
 [简体中文](README.zh-CN.md)
 
-An evidence-driven CLI for reviewing committed Git changes against the code, requirements, and a human-maintained business knowledge base. Inspired by Anthropic Code Review, it uses two model calls and asks the second pass to verify, deduplicate, and rank the first pass's findings against the evidence.
+An evidence-driven CLI for reviewing committed Git changes against the code, requirements, and a human-maintained business knowledge base. Inspired by Anthropic Code Review, it uses independent reviewers, individual finding verification, and consolidation of confirmed findings.
 
 ## Build
 
@@ -55,6 +55,10 @@ Add `--knowledge-mode scoped` to load relevant sections from the supplied knowle
 
 The evidence bundle takes repository review rules from the resolved base commit.
 
+Three independent reviewers examine correctness and regressions, requirements and business contracts, and boundary conditions and security. Their evidence requests are combined and deduplicated. When new evidence is supplied, another pass checks it for additional candidates. Each candidate then receives a separate verification call. Confirmed findings are grouped by defect and ranked by severity. The CLI renders the final findings from those verified records and checks that consolidation accounts for every confirmed candidate.
+
+`--review-parallelism` controls concurrent review and verification calls and defaults to `3`. Set it to `1` to run the same tasks sequentially. Each call uses the configured agent command and timeout. Review time and model usage grow with the number of candidates. Evidence collection currently has one supplemental round. Remaining gaps are recorded for the report.
+
 ## GitHub pull request reviews
 
 Copy the [example workflow](examples/github-review.yml) into `.github/workflows/` in the repository to review. Set the `ANTHROPIC_API_KEY` Actions secret and point the action reference at a trusted revision. The workflow runs on new or updated same-repository pull requests and on `/review` comments from users with write access. It posts the report and uploads the report, scope, and coverage as an Actions artifact.
@@ -67,10 +71,12 @@ The Action's `language` input defaults to `en`. The example workflow reads it fr
 
 Progress uses one updating line on an interactive stderr and plain log lines when redirected. Both commands print the run directory on stdout on success. The defaults are `review-output/` and `knowledge-output/`, configurable with `--output-dir`. Add `--prepare-only` to either command to save the local evidence and prompt templates without making model calls.
 
-- `review` writes the model's `report.md`. Use `scope.md` to check the resolved commits and input hashes, `evidence.md` to inspect the supplied material, and `coverage.md` to see truncated or omitted changes and failed evidence requests.
+- `review` writes `report.md`. Use `scope.md` to check resolved commits, input hashes, and concurrency settings, `evidence.md` to inspect supplied material, and `coverage.md` to see evidence gaps and each candidate's verification status. `discovery/` and `verification/` save individual prompts and responses. `verified-findings.md` contains confirmed candidates before deduplication, and `report-response.md` preserves the consolidation response. Malformed or incomplete structured results fail the run.
 - `knowledge generate` writes `candidate-knowledge.md`. Use `inventory.md` to check which files were included or skipped. Both modes save their supporting evidence locally.
 
 Before verification, the collector can load requested tracked text from either pinned commit. For Java, it can locate a unique method declaration by name and records the lines it supplies. Dependency evidence is limited to public Java signatures and `.proto` files from cached, fixed-version direct JAR dependencies in the selected revision's root `pom.xml`. Evidence collection does not run the target project's build or tests. For large inputs, `review` exposes `--max-evidence-bytes` and `knowledge generate` exposes `--max-file-bytes` and `--max-total-bytes`.
+
+Supplemental file/dependency requests and knowledge queries default to unlimited counts. Knowledge excerpts also have no section-count limit. Evidence byte budgets still apply. Set `--max-supplemental-requests <count>` to cap combined file and Maven requests, or `--max-knowledge-queries <count>` to cap scoped knowledge queries. Both default to `0`, meaning unlimited. Positive limits count distinct attempted requests, including unavailable results. `scope.md` records the limits and `coverage.md` records skipped counts.
 
 ## Repository documentation
 

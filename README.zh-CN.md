@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-一个根据代码、需求和人工维护的业务知识库审查 Git 提交的 CLI。流程参考 Anthropic Code Review，先调用模型找出候选问题，再请模型对照证据复核、去重和分级。
+一个根据代码、需求和人工维护的业务知识库审查 Git 提交的 CLI。流程参考 Anthropic Code Review，由多个 Agent 独立审查，再逐条复核候选问题，汇总确认成立的问题。
 
 ## 构建
 
@@ -55,6 +55,10 @@ java -jar build/code-review-agent.jar review \
 
 证据包中的仓库审查规则来自实际解析出的基线提交。
 
+三个独立审查 Agent 分别侧重正确性与回归、需求与业务契约、边界条件与安全。程序合并并去重它们的补证请求。取得新证据后，增加一次检查以发现新的候选问题。每个候选问题随后单独调用模型复核，确认成立的问题按同一缺陷归并、按严重程度排序。最终问题清单由程序从已确认记录生成，汇总时会核对所有已确认候选都已归组。
+
+`--review-parallelism` 控制审查和复核的并行调用数，默认是 `3`。设为 `1` 时，同样的任务依次执行。每次调用都使用已配置的 Agent 命令和超时，耗时及模型用量会随候选数量增加。证据采集目前只有一轮补读，未解决的缺口会记录下来供报告说明。
+
 ## GitHub PR 审查
 
 把[示例工作流](examples/github-review.yml)复制到待审查仓库的 `.github/workflows/`，配置 `ANTHROPIC_API_KEY` Actions Secret，并将 Action 引用固定到可信版本。同仓库的 PR 创建或更新时会自动触发。有仓库写权限的人也可以在 PR 评论 `/review`。报告会回贴到 PR，报告、审查范围和覆盖情况也会保存为 Actions artifact。
@@ -67,10 +71,12 @@ Action 的 `language` 参数默认是 `en`。示例工作流从可选仓库变�
 
 进度写到 stderr，在交互式终端中原地刷新一行，重定向时按普通日志逐行输出。两个命令成功后把本次运行目录写到 stdout。默认输出目录是 `review-output/` 和 `knowledge-output/`，可用 `--output-dir` 更改。任一命令加上 `--prepare-only`，即可在本地保存证据和提示词，无需调用模型。
 
-- `review` 把模型报告保存为 `report.md`。可查看 `scope.md` 核对实际提交和输入哈希，查看 `evidence.md` 核对证据，查看 `coverage.md` 了解变更截断、跳过或补证失败的情况。
+- `review` 生成 `report.md`。`scope.md` 记录实际提交、输入哈希和并行设置，`evidence.md` 保存证据，`coverage.md` 记录证据缺口及每个候选的复核状态。`discovery/` 和 `verification/` 保存各次调用的提示词及回复，`verified-findings.md` 保存去重前的已确认候选，`report-response.md` 保留汇总原文。结构化结果格式错误或不完整时，本轮审查会报错。
 - `knowledge generate` 生成 `candidate-knowledge.md`。可查看 `inventory.md` 了解哪些文件被纳入或跳过。两种流程都会在本地保存各自的证据。
 
 复核前，采集器可按请求读取基线或目标提交中已跟踪的文本。Java 文件支持按唯一的方法名定位声明，并记录实际提供的行号。依赖补证只读取所选版本根 `pom.xml` 中声明了固定版本且已缓存的直接 JAR 依赖，提取 Java 公开签名和 `.proto` 文件。采集过程无需运行目标项目的构建或测试。输入较大时，`review` 可用 `--max-evidence-bytes`，`knowledge generate` 可用 `--max-file-bytes` 和 `--max-total-bytes` 调整预算。
+
+代码和依赖补证请求、知识库查询默认不限条数，知识库摘录也不限制章节数量，证据仍受字节预算约束。可用 `--max-supplemental-requests <数量>` 限制文件与 Maven 补证请求的合计条数，用 `--max-knowledge-queries <数量>` 限制按需知识库查询条数。两个参数默认均为 `0`，表示不限条数。正数上限按去重后实际尝试的请求计数，包含读取失败或未匹配的请求。`scope.md` 记录生效配置，`coverage.md` 记录跳过数量。
 
 ## 项目文档
 

@@ -9,11 +9,13 @@ public final class AllTests {
     public static void main(String[] args) throws Exception {
         testRangeParsing();
         testCliDefaults();
+        testRequestLimits();
         testReviewLanguage();
         testMutuallyExclusiveScopes();
         testPromptPolicy();
         testKnowledgeOptions();
         testAgentResponseEncoding();
+        ReviewOutputTests.run();
         EvidenceTests.run();
         System.out.println("All tests passed");
     }
@@ -71,9 +73,26 @@ public final class AllTests {
         equal(null, options.commit());
         equal(CliOptions.KnowledgeMode.FULL, options.knowledgeMode());
         equal(1_000_000, options.maxEvidenceBytes());
+        equal(0, options.maxSupplementalRequests());
+        equal(0, options.maxKnowledgeQueries());
         throwsArgument(() -> CliOptions.parse(new String[]{
                 "review", "--repo", ".", "--knowledge-mode", "scoped"
         }));
+    }
+
+    private static void testRequestLimits() {
+        CliOptions options = CliOptions.parse(new String[]{
+                "review", "--repo", ".", "--max-supplemental-requests", "3", "--max-knowledge-queries", "5"
+        });
+        equal(3, options.maxSupplementalRequests());
+        equal(5, options.maxKnowledgeQueries());
+        for (String option : List.of("--max-supplemental-requests", "--max-knowledge-queries")) {
+            CliOptions unlimited = CliOptions.parse(new String[]{"review", "--repo", ".", option, "0"});
+            equal(0, unlimited.maxSupplementalRequests());
+            equal(0, unlimited.maxKnowledgeQueries());
+            throwsArgument(() -> CliOptions.parse(new String[]{"review", "--repo", ".", option, "-1"}));
+            throwsArgument(() -> CliOptions.parse(new String[]{"review", "--repo", ".", option}));
+        }
     }
 
     private static void testMutuallyExclusiveScopes() {
@@ -96,14 +115,14 @@ public final class AllTests {
         var scope = new ReviewScope(ReviewScope.Mode.COMMIT, "a", "b", "a", "b", "a..b");
         var evidence = new EvidenceBundle(scope, List.of(), "中文需求原文", "coverage", 2_000, null);
         var chinese = new PromptFactory("zh-CN");
-        String prompt = chinese.verification(evidence, "candidate", "supplement");
+        String prompt = chinese.finalizeReport(evidence, List.of(), "candidate", "supplement", "coverage");
         check(prompt.contains("Output language: Simplified Chinese (zh-CN)"));
         check(prompt.contains("# 审查范围\n") && prompt.contains("# 需求验收\n"));
         check(prompt.contains("满足、部分满足、未满足、证据不足"));
         check(prompt.contains("严重、高、中、低"));
         check(!prompt.contains("# Review scope\n"));
         check(chinese.discovery(evidence).contains("Output language: Simplified Chinese (zh-CN)"));
-        String english = new PromptFactory().verification(evidence, "candidate", "");
+        String english = new PromptFactory().finalizeReport(evidence, List.of(), "candidate", "", "coverage");
         check(english.contains("Output language: English (en)"));
         check(english.contains("# Review scope\n") && english.contains("Translate business statements"));
     }
@@ -111,11 +130,14 @@ public final class AllTests {
     private static void testPromptPolicy() {
         ReviewScope scope = new ReviewScope(ReviewScope.Mode.COMMIT, "a", "b", "a", "b", "a..b");
         EvidenceBundle evidence = new EvidenceBundle(scope, java.util.List.of(), "evidence", "coverage", 2_000, null);
-        String prompt = new PromptFactory().verification(evidence, "candidate", "supplement");
+        String prompt = new PromptFactory().finalizeReport(evidence, List.of(), "candidate", "supplement", "coverage");
         check(prompt.contains("No verified findings"));
         check(prompt.contains("INSUFFICIENT_EVIDENCE"));
         check(prompt.contains("never promoted"));
         check(prompt.contains("supplement"));
+        equal(3, CliOptions.parse(new String[]{"review", "--repo", "."}).reviewParallelism());
+        equal(1, CliOptions.parse(new String[]{"review", "--repo", ".", "--review-parallelism", "1"}).reviewParallelism());
+        throwsArgument(() -> CliOptions.parse(new String[]{"review", "--repo", ".", "--review-parallelism", "0"}));
         String discovery = new PromptFactory().discovery(evidence);
         for (String stage : List.of(discovery, prompt)) {
             check(stage.contains("UI counts, lists, navigation and confirmation"));
