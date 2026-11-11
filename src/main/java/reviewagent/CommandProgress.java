@@ -16,6 +16,9 @@ final class CommandProgress implements AutoCloseable {
             Thread.ofPlatform().daemon().name("command-progress").factory());
     private ScheduledFuture<?> heartbeat;
     private long stageStartedAt;
+    private long updateVersion;
+    private int activeStep = -1;
+    private int activeTotal = -1;
     private boolean lineOpen;
 
     CommandProgress(String command, PrintStream output) {
@@ -24,36 +27,47 @@ final class CommandProgress implements AutoCloseable {
         terminalColumns = stderrTerminalColumns();
     }
 
-    void start(String message) {
-        start("", message);
+    synchronized void start(String message) {
+        activeStep = -1;
+        activeTotal = -1;
+        start("", message, true);
     }
 
-    void step(int completed, int total, String message) {
-        start(bar(completed, total), message);
+    synchronized void step(int completed, int total, String message) {
+        boolean newStage = activeStep != completed || activeTotal != total;
+        activeStep = completed;
+        activeTotal = total;
+        start(bar(completed, total), message, newStage);
     }
 
-    private synchronized void start(String bar, String message) {
+    private synchronized void start(String bar, String message, boolean newStage) {
         stopHeartbeat();
-        render(bar + message, false);
-        long startedAt = System.nanoTime();
-        stageStartedAt = startedAt;
+        if (newStage) {
+            stageStartedAt = System.nanoTime();
+        }
+        long version = ++updateVersion;
+        render(bar + (newStage ? message : elapsedMessage(message)), false);
         int interval = terminalColumns > 0 ? 1 : 10;
-        heartbeat = scheduler.scheduleWithFixedDelay(() -> reportWaiting(bar, message, startedAt),
+        heartbeat = scheduler.scheduleWithFixedDelay(() -> reportWaiting(bar, message, version),
                 interval, interval, TimeUnit.SECONDS);
     }
 
     synchronized void finish(int total, String message) {
         stopHeartbeat();
+        activeStep = -1;
         render(bar(total, total) + message, true);
     }
 
-    private synchronized void reportWaiting(String bar, String message, long startedAt) {
-        if (heartbeat != null && stageStartedAt == startedAt) {
-            long seconds = TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - startedAt);
-            String status = terminalColumns > 0 ? "(" + seconds + "s) " + message
-                    : message + " (still working, " + seconds + "s elapsed)";
-            render(bar + status, false);
+    private synchronized void reportWaiting(String bar, String message, long version) {
+        if (heartbeat != null && updateVersion == version) {
+            render(bar + elapsedMessage(message), false);
         }
+    }
+
+    private String elapsedMessage(String message) {
+        long seconds = TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - stageStartedAt);
+        return terminalColumns > 0 ? "(" + seconds + "s) " + message
+                : message + " (still working, " + seconds + "s elapsed)";
     }
 
     private void render(String message, boolean finished) {

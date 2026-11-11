@@ -75,7 +75,7 @@ final class ReviewTasks {
             response = Files.readString(responseFile, StandardCharsets.UTF_8);
         } else {
             Files.writeString(directory.resolve(task.id() + "-prompt.md"), task.prompt(), StandardCharsets.UTF_8);
-            response = agent.invoke(task.prompt());
+            response = agent.invoke(task.prompt(), directory.resolve(task.id()));
             Files.writeString(responseFile, response, StandardCharsets.UTF_8);
         }
         try {
@@ -90,7 +90,7 @@ final class ReviewTasks {
                     + "Return the complete corrected response.\nValidation error: " + EvidenceText.oneLine(invalid.getMessage())
                     + "\n\nPREVIOUS RESPONSE\n" + response;
             Files.writeString(directory.resolve(task.id() + "-repair-prompt.md"), repairPrompt, StandardCharsets.UTF_8);
-            String repaired = agent.invoke(repairPrompt);
+            String repaired = agent.invoke(repairPrompt, directory.resolve(task.id() + "-repair"));
             Files.writeString(directory.resolve(task.id() + "-repair-response.md"), repaired, StandardCharsets.UTF_8);
             try {
                 task.validator().validate(repaired);

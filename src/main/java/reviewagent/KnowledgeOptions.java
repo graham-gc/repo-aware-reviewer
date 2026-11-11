@@ -44,10 +44,13 @@ record KnowledgeOptions(Path repo, String ref, Path outputDir, String agentComma
         }
         if (!prepareOnly && agentCommand == null) {
             agentCommand = "claude";
-            agentArgs.add("-p");
+            agentArgs.addAll(AgentRunner.defaultArguments());
         }
         if (chunkBytes < 20_000 || maxFileBytes < 10_000 || maxTotalBytes < chunkBytes) {
             throw new IllegalArgumentException("Invalid scan byte limits");
+        }
+        if (timeout.isZero() || timeout.isNegative()) {
+            throw new IllegalArgumentException("--agent-timeout-seconds must be positive");
         }
         return new KnowledgeOptions(repo.toAbsolutePath().normalize(), ref,
                 outputDir.toAbsolutePath().normalize(), agentCommand, List.copyOf(agentArgs),

@@ -20,7 +20,7 @@ Both commands default to `claude -p` and reuse your local Claude Code setup. Mak
 printf '%s\n' 'Reply with OK.' | claude -p
 ```
 
-The CLI starts the external agent in the reviewed checkout. Its configuration controls tool permissions and where prompts containing collected evidence are sent. To use another executable, pass `--agent-command` and one `--agent-arg` per argument. It must read a UTF-8 prompt from stdin and write a UTF-8 reply to stdout.
+The default Claude process has built-in tools and MCP tools disabled. The CLI supplies evidence from pinned Git revisions and handles requests for more material. Authentication and model routing use the local Claude Code configuration. To use another executable, pass `--agent-command` and one `--agent-arg` per argument. That command controls its own tool access, reads a UTF-8 prompt from stdin, and writes a UTF-8 reply to stdout.
 
 ## Generate a candidate knowledge base
 
@@ -58,6 +58,8 @@ The evidence bundle takes repository review rules from the resolved base commit.
 Three independent reviewers examine correctness and regressions, requirements and business contracts, and boundary conditions and security. Their evidence requests are combined and deduplicated. When new evidence is supplied, another pass checks it for additional candidates. Each candidate then receives a separate verification call. Confirmed findings are grouped by defect and ranked by severity. The CLI renders the final findings from those verified records and checks that consolidation accounts for every confirmed candidate.
 
 `--review-parallelism` controls concurrent review and verification calls and defaults to `3`. Set it to `1` to run the same tasks sequentially. Each call uses the configured agent command and timeout. Review time and model usage grow with the number of candidates. Evidence collection currently has one supplemental round. Remaining gaps are recorded for the report.
+
+Each model process has a default timeout of 900 seconds, configurable with `--agent-timeout-seconds`. Review task artifacts include `*-stdout.log`, `*-stderr.log`, and `*-execution.log` with elapsed time and exit status. Output logs are preserved when a command times out. Progress elapsed time covers the current stage across completed subtasks.
 
 Structured replies accept raw XML and fenced XML. Invalid structured replies get one format-correction attempt, with the original and corrected responses saved. To continue an interrupted run, repeat its review command with `--resume /path/to/run-directory`. Valid saved results are reused and missing or invalid tasks are continued. The resolved scope, input documents, and collected evidence must match the saved run. Concurrency may be changed when resuming.
 
