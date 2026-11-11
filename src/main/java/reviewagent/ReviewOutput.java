@@ -34,6 +34,16 @@ final class ReviewOutput {
     record Verification(ReviewFinding candidate, Status status, String reason, ReviewFinding confirmed) {
     }
 
+    enum Relation { INTRODUCED, EXPOSED_BY_CHANGE, UNMET_REQUIREMENT, PRE_EXISTING, UNRESOLVED }
+
+    record Decision(Verification verdict, Relation relation, String baseline, String contract,
+                    List<EvidenceIndex.Citation> citations) { }
+
+    enum AssessmentStatus { SATISFIED, NOT_SATISFIED, INSUFFICIENT_EVIDENCE }
+
+    record AssessmentItem(String id, String requirement, String requirementText, String behavior, AssessmentStatus status,
+                          String reasoning, String boundaries, String gap, List<EvidenceIndex.Citation> citations) { }
+
     record Discovery(List<ReviewFinding> findings, String notes) {
     }
 
@@ -54,7 +64,7 @@ final class ReviewOutput {
 
     static Verification verification(String response, ReviewFinding candidate, List<String> changedFiles) throws IOException {
         Element root = xml(response, "verification").root();
-        Map<String, Element> fields = fields(root, Set.of("status", "reason", "finding"));
+        Map<String, Element> fields = fields(root, Set.of("status", "reason", "finding", "relation", "baseline", "contract", "citations"));
         Status status;
         try {
             status = Status.valueOf(text(fields, "status"));
@@ -72,6 +82,148 @@ final class ReviewOutput {
             throw new IOException("Unconfirmed verification contains a finding");
         }
         return new Verification(candidate, status, reason, confirmed);
+    }
+
+    static Decision groundedVerification(String response, ReviewFinding candidate, EvidenceBundle evidence,
+                                         EvidenceIndex index) throws IOException {
+        Verification verdict = verification(response, candidate, evidence.changedFiles());
+        Map<String, Element> fields = fields(xml(response, "verification").root(),
+                Set.of("status", "reason", "finding", "relation", "baseline", "contract", "citations"));
+        Relation relation = Relation.UNRESOLVED;
+        if (fields.containsKey("relation")) {
+            try { relation = Relation.valueOf(text(fields, "relation")); }
+            catch (IllegalArgumentException invalid) { throw new IOException("Unknown finding relationship", invalid); }
+        }
+        List<EvidenceIndex.Citation> citations = citations(fields.get("citations"));
+        index.validate(citations);
+        String baseline = fields.containsKey("baseline") ? text(fields, "baseline") : "";
+        String contract = fields.containsKey("contract") ? text(fields, "contract") : "";
+        if (verdict.status() == Status.CONFIRMED) {
+            if (!EvidenceRequest.parse(requestText(response, "verification")).isEmpty()) {
+                throw new IOException("A finding with unresolved evidence requests must be INSUFFICIENT_EVIDENCE");
+            }
+            if (relation == Relation.UNRESOLVED || relation == Relation.PRE_EXISTING || baseline.isEmpty() || contract.isEmpty()) {
+                throw new IOException("Confirmed findings require explicit change attribution, baseline comparison and applicable contract");
+            }
+            if (!index.hasImplementation(citations) || !index.hasTarget(citations)) {
+                throw new IOException("Confirmed findings require quotations from included implementation evidence at the target revision");
+            }
+            if (relation != Relation.UNMET_REQUIREMENT && !index.hasBaseline(citations)) {
+                throw new IOException("Introduced or exposed findings require baseline or diff evidence");
+            }
+            if (relation == Relation.UNMET_REQUIREMENT && !index.hasContract(citations)) {
+                throw new IOException("An unmet requirement requires a quotation from a supplied requirement or trusted rule");
+            }
+        }
+        return new Decision(verdict, relation, baseline, contract, citations);
+    }
+
+    static List<List<String>> candidateGroups(String response, List<ReviewFinding> candidates) throws IOException {
+        var expected = candidates.stream().map(ReviewFinding::id).collect(java.util.stream.Collectors.toSet());
+        var seen = new HashSet<String>();
+        var groups = new ArrayList<List<String>>();
+        for (Element group : children(xml(response, "candidate-groups").root(), "group")) {
+            var ids = new ArrayList<String>();
+            for (Element id : children(group, "id")) {
+                String value = id.getTextContent().strip();
+                if (!expected.contains(value) || !seen.add(value)) throw new IOException("Unknown or repeated candidate in reconciliation");
+                ids.add(value);
+            }
+            if (ids.isEmpty()) throw new IOException("Empty candidate reconciliation group");
+            groups.add(List.copyOf(ids));
+        }
+        if (!seen.equals(expected)) throw new IOException("Reconciliation omitted candidates, including negative verdicts");
+        return List.copyOf(groups);
+    }
+
+    static List<AssessmentItem> assessment(String response, InputDocument requirement, EvidenceIndex index,
+                                           List<AssessmentItem> previous) throws IOException {
+        var items = new ArrayList<AssessmentItem>();
+        var ids = new HashSet<String>();
+        for (Element element : children(xml(response, "assessment").root(), "item")) {
+            Map<String, Element> fields = fields(element, Set.of("id", "requirement", "requirementText", "behavior", "status", "reasoning", "boundaries", "gap", "citations"));
+            String id = text(fields, "id");
+            if (!id.matches("A[1-9][0-9]*") || !ids.add(id)) throw new IOException("Invalid or repeated requirement assessment ID");
+            String quote = text(fields, "requirement");
+            if (!EvidenceIndex.normalize(requirement.content()).contains(EvidenceIndex.normalize(quote))) {
+                throw new IOException("Assessment requirement must quote the supplied requirements document verbatim");
+            }
+            AssessmentStatus status;
+            try { status = AssessmentStatus.valueOf(text(fields, "status")); }
+            catch (IllegalArgumentException invalid) { throw new IOException("Unknown atomic requirement status", invalid); }
+            var citations = citations(fields.get("citations"));
+            index.validate(citations);
+            if (status != AssessmentStatus.INSUFFICIENT_EVIDENCE && (!index.hasImplementation(citations) || !index.hasTarget(citations))) {
+                throw new IOException("A conclusive requirement assessment requires implementation quotations");
+            }
+            items.add(new AssessmentItem(id, quote, text(fields, "requirementText"), text(fields, "behavior"), status, text(fields, "reasoning"),
+                    text(fields, "boundaries"), text(fields, "gap"), citations));
+        }
+        if (items.isEmpty()) throw new IOException("Supplied requirements require a nonempty assessment");
+        for (AssessmentItem old : previous) {
+            if (items.stream().noneMatch(item -> item.id().equals(old.id()) && item.requirement().equals(old.requirement()))) {
+                throw new IOException("Requirement audit omitted or remapped an existing assessment item: " + old.id());
+            }
+        }
+        if (!EvidenceRequest.parse(requestText(response, "assessment")).isEmpty() && items.stream().noneMatch(item -> item.status() == AssessmentStatus.INSUFFICIENT_EVIDENCE)) {
+            throw new IOException("Unresolved requirement evidence requests require an INSUFFICIENT_EVIDENCE item");
+        }
+        return List.copyOf(items);
+    }
+
+    static String requestText(String response, String rootName) throws IOException {
+        // Quoted source inside structured decisions is evidence, not a request to the collector.
+        return xml(response, rootName).remainder();
+    }
+
+    private static List<EvidenceIndex.Citation> citations(Element element) throws IOException {
+        if (element == null) return List.of();
+        var citations = new ArrayList<EvidenceIndex.Citation>();
+        for (Element citation : children(element, "citation")) {
+            var fields = fields(citation, Set.of("source", "quote"));
+            citations.add(new EvidenceIndex.Citation(text(fields, "source"), text(fields, "quote")));
+        }
+        return List.copyOf(citations);
+    }
+
+    static String assessmentMarkdown(List<AssessmentItem> items, OutputLanguage language) {
+        if (items.isEmpty()) return language.text("No requirements document was supplied; acceptance was not assessed.",
+                "未提供需求文档，未进行需求验收。") + "\n";
+        StringBuilder out = new StringBuilder();
+        for (AssessmentItem item : items) {
+            String status = language.text(item.status().name(), switch (item.status()) {
+                case SATISFIED -> "满足";
+                case NOT_SATISFIED -> "未满足";
+                case INSUFFICIENT_EVIDENCE -> "证据不足";
+            });
+            out.append("### ").append(item.id()).append(" — ").append(EvidenceText.oneLine(item.behavior())).append("\n\n")
+                    .append("- ").append(language.text("Assessment", "结论")).append(": ").append(status).append('\n')
+                    .append("- ").append(language.text("Requirement", "需求")).append(": ").append(EvidenceText.oneLine(item.requirementText())).append('\n')
+                    .append("- ").append(language.text("Reasoning", "依据")).append(": ").append(EvidenceText.oneLine(item.reasoning())).append('\n')
+                    .append("- ").append(language.text("Boundary checks", "边界核查")).append(": ").append(EvidenceText.oneLine(item.boundaries())).append('\n')
+                    .append("- ").append(language.text("Gap or limitation", "缺口或限制")).append(": ").append(EvidenceText.oneLine(item.gap())).append('\n');
+            for (EvidenceIndex.Citation citation : item.citations()) {
+                out.append("- ").append(language.text("Source", "证据来源")).append(": ")
+                        .append('`').append(EvidenceText.oneLine(citationReference(citation.source(), language))).append("`\n");
+            }
+            out.append('\n');
+        }
+        return out.toString();
+    }
+
+    private static String citationReference(String source, OutputLanguage language) {
+        if (source.startsWith("KB-")) return source.split(" — ", 2)[0];
+        return source.replace("External requirement — ", language.text("Requirements: ", "需求文档："))
+                .replace("Human-maintained knowledge base — ", language.text("Knowledge base: ", "主知识库："));
+    }
+
+    static String finalReport(String response, List<ReviewFinding> confirmed, OutputLanguage language,
+                              String assessment) throws IOException {
+        String report = finalReport(response, confirmed, language);
+        var headings = headings(language);
+        int start = report.indexOf("\n" + headings.get(3) + "\n") + 1 + headings.get(3).length();
+        int end = report.indexOf("\n" + headings.get(4) + "\n", start) + 1;
+        return report.substring(0, start) + "\n\n" + assessment.strip() + "\n\n" + report.substring(end);
     }
 
     static String finalReport(String response, List<ReviewFinding> confirmed, OutputLanguage language) throws IOException {

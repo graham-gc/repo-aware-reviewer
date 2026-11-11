@@ -24,6 +24,7 @@ public final class AllTests {
         testProgressStageElapsed();
         ReviewOutputTests.run();
         EvidenceTests.run();
+        ReviewQualityTests.run();
         System.out.println("All tests passed");
     }
 
