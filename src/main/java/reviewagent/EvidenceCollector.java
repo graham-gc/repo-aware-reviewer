@@ -8,16 +8,16 @@ import java.util.Set;
 final class EvidenceCollector {
     private static final List<String> BASELINE_RULE_FILES = List.of("AGENTS.md", "CLAUDE.md", "REVIEW.md");
     private static final String SCOPED_DOCUMENT = "OMITTED (scoped knowledge document)";
-    private static final List<String> DEPENDENCY_FILES = List.of(
-            "pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts",
-            "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",
-            "requirements.txt", "pyproject.toml", "poetry.lock", "Pipfile.lock",
-            "*.csproj", "packages.lock.json", "vcpkg.json", "conanfile.txt");
-
     private final GitClient git;
+    private final LanguageRegistry languages;
 
     EvidenceCollector(GitClient git) {
+        this(git, LanguageRegistry.defaults());
+    }
+
+    EvidenceCollector(GitClient git, LanguageRegistry languages) {
         this.git = git;
+        this.languages = languages;
     }
 
     EvidenceBundle collect(ReviewScope scope, InputDocument requirement, InputDocument knowledge,
@@ -92,8 +92,13 @@ final class EvidenceCollector {
         out.append("## Dependency manifests\n\n");
         int manifestBudget = Math.min(remaining / 8, 48_000);
         List<String> omittedManifests = new ArrayList<>();
-        for (String file : DEPENDENCY_FILES) {
-            if (!scopedPaths.contains(file) && !file.contains("*") && git.existsAt(scope.targetCommit(), file)) {
+        LanguageModule.Repository repository = LanguageRegistry.repository(git);
+        List<String> changedPaths = reviewChanges.stream().map(GitClient.Change::path).toList();
+        Set<String> tracked = Set.copyOf(repository.paths(scope.targetCommit()));
+        LanguageRegistry.Manifests selectedManifests = languages.manifests(repository, scope.targetCommit(), changedPaths);
+        for (String gap : selectedManifests.gaps()) { out.append(gap).append('\n'); coverage.append(gap).append('\n'); }
+        for (String file : selectedManifests.paths()) {
+            if (!scopedPaths.contains(file) && tracked.contains(file)) {
                 String block;
                 try {
                     block = readBlock(scope.targetCommit(), file, manifestBudget);
@@ -109,6 +114,23 @@ final class EvidenceCollector {
         if (!omittedManifests.isEmpty()) {
             coverage.append("Manifest omitted by size or file type: ")
                     .append(String.join(", ", omittedManifests)).append(".\n\n");
+        }
+        int languageBudget = Math.min(remaining / 10, 24_000);
+        for (LanguageModule language : languages.modules()) {
+            try {
+                String context = language.context(repository, scope.targetCommit(), changedPaths, languageBudget);
+                int bytes = EvidenceText.bytes(context);
+                if (bytes > languageBudget) throw new IOException("Language context exceeds its byte budget");
+                if (!context.isEmpty()) {
+                    out.append(context);
+                    remaining -= bytes;
+                    languageBudget -= bytes;
+                    coverage.append("Language context ").append(language.id()).append(": INCLUDED (").append(bytes).append(" bytes).\n");
+                }
+            } catch (IOException unavailable) {
+                coverage.append("Language context ").append(language.id()).append(": UNAVAILABLE. ")
+                        .append(EvidenceText.oneLine(unavailable.getMessage())).append('\n');
+            }
         }
         out.append("## Git diff by changed file\n\n");
         out.append(scopedChanges);

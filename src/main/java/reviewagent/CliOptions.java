@@ -9,7 +9,7 @@ record CliOptions(Path repo, String commit, String branch, String base, String r
                   Path requirement, Path knowledge, KnowledgeMode knowledgeMode, Path outputDir, Path resumeDirectory,
                   String agentCommand, List<String> agentArgs,
                   boolean prepareOnly, int maxEvidenceBytes, int maxSupplementalRequests, int maxKnowledgeQueries,
-                  int reviewParallelism, Duration agentTimeout, String language) {
+                  int reviewParallelism, Duration agentTimeout, String language, java.util.Map<String, Path> languageCaches) {
     enum KnowledgeMode {
         FULL, SCOPED;
 
@@ -45,6 +45,7 @@ record CliOptions(Path repo, String commit, String branch, String base, String r
         int reviewParallelism = 3;
         Duration timeout = Duration.ofMinutes(15);
         String language = "en";
+        var languageCaches = new java.util.LinkedHashMap<String, Path>();
 
         for (int i = 1; i < args.length; i++) {
             switch (args[i]) {
@@ -67,6 +68,12 @@ record CliOptions(Path repo, String commit, String branch, String base, String r
                 case "--review-parallelism" -> reviewParallelism = Integer.parseInt(value(args, ++i, "--review-parallelism"));
                 case "--agent-timeout-seconds" -> timeout = Duration.ofSeconds(Long.parseLong(value(args, ++i, "--agent-timeout-seconds")));
                 case "--language" -> language = OutputLanguage.parse(value(args, ++i, "--language")).code();
+                case "--language-cache" -> {
+                    String[] cache = value(args, ++i, "--language-cache").split("=", 2);
+                    if (cache.length != 2 || !cache[0].matches("[a-z][a-z0-9-]*") || cache[1].isBlank())
+                        throw new IllegalArgumentException("--language-cache requires language-id=/path/to/cache");
+                    languageCaches.put(cache[0], Path.of(cache[1]).toAbsolutePath().normalize());
+                }
                 default -> throw new IllegalArgumentException("Unknown option: " + args[i]);
             }
         }
@@ -100,7 +107,8 @@ record CliOptions(Path repo, String commit, String branch, String base, String r
         return new CliOptions(repo.toAbsolutePath().normalize(), commit, branch, base, range,
                 absolute(requirement), absolute(knowledge), knowledgeMode, outputDir.toAbsolutePath().normalize(), absolute(resumeDirectory),
                 agentCommand, List.copyOf(agentArgs), prepareOnly, maxEvidenceBytes,
-                maxSupplementalRequests, maxKnowledgeQueries, reviewParallelism, timeout, language);
+                maxSupplementalRequests, maxKnowledgeQueries, reviewParallelism, timeout, language,
+                java.util.Collections.unmodifiableMap(languageCaches));
     }
 
     private static Path absolute(Path path) {

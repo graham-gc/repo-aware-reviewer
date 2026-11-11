@@ -5,7 +5,7 @@ import java.util.List;
 import java.util.regex.Pattern;
 
 record EvidenceRequest(int line, String text) {
-    private static final Pattern MARKER = Pattern.compile("REQUEST_(?:FILE|MAVEN|KNOWLEDGE)\\|");
+    private static final Pattern MARKER = Pattern.compile("REQUEST_[A-Z][A-Z_]*\\|");
 
     static List<EvidenceRequest> parse(String candidates) {
         var requests = new ArrayList<EvidenceRequest>();

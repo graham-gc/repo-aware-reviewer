@@ -29,10 +29,11 @@ final class EvidenceSession {
         int newQueries = 0;
         int repeated = 0;
         for (EvidenceRequest request : EvidenceRequest.parse(replies)) {
-            String[] parts = request.text().split("\\|", request.text().startsWith("REQUEST_KNOWLEDGE|") ? 3 : 5);
+            int fields = request.text().startsWith("REQUEST_KNOWLEDGE|") ? 3 : request.text().startsWith("REQUEST_LANGUAGE|") ? 7 : 5;
+            String[] parts = request.text().split("\\|", fields);
             boolean knowledge = parts[0].equals("REQUEST_KNOWLEDGE");
-            String key = knowledge && parts.length == 3 ? parts[0] + "|" + parts[1].strip().toLowerCase(Locale.ROOT)
-                    : parts.length == 5 ? String.join("|", parts[0], parts[1], parts[2], parts[3]) : request.text();
+            String key = knowledge && parts.length >= 3 ? parts[0] + "|" + parts[1].strip().toLowerCase(Locale.ROOT)
+                    : parts.length >= 5 ? String.join("|", java.util.Arrays.copyOf(parts, parts.length - 1)) : request.text();
             if (!seen.add(key)) {
                 repeated++;
                 continue;
@@ -51,7 +52,7 @@ final class EvidenceSession {
         if (fileLimit > 0 && files >= fileLimit) {
             requests = requests.lines().filter(line -> line.startsWith("REQUEST_KNOWLEDGE|"))
                     .collect(java.util.stream.Collectors.joining("\n"));
-            coverage.append("File/Maven request limit exhausted; skipped: ").append(newFiles).append(".\n");
+            coverage.append("File/language request limit exhausted; skipped: ").append(newFiles).append(".\n");
         }
         if (knowledgeLimit > 0 && queries >= knowledgeLimit) {
             requests = requests.lines().filter(line -> !line.startsWith("REQUEST_KNOWLEDGE|"))

@@ -108,8 +108,7 @@ final class ReviewPipeline {
         String candidates = rawCandidates.toString();
 
         progress.step(3, totalSteps, "Loading requested evidence");
-        MavenEvidence maven = new MavenEvidence(git, executor, SupplementalEvidence.defaultMavenCache());
-        EvidenceSession supplemental = new EvidenceSession(evidence, new SupplementalEvidence(git, maven),
+        EvidenceSession supplemental = new EvidenceSession(evidence, new SupplementalEvidence(git, executor, options.languageCaches()),
                 options.maxSupplementalRequests(), options.maxKnowledgeQueries());
         boolean discoveryMaterial = supplemental.load(discoveryNotes.toString(), "Discovery evidence requests");
         write(runDirectory.resolve("scope.md"), scopeText);
@@ -219,7 +218,7 @@ final class ReviewPipeline {
                 - Requirement: %s
                 - Knowledge base: %s
                 - Knowledge mode: %s
-                - File and Maven request count limit: %s
+                - File and language request count limit: %s
                 - Knowledge query count limit: %s
                 - Review parallelism: %s
                 - Output language: %s
@@ -229,7 +228,13 @@ final class ReviewPipeline {
                 options.knowledgeMode().name().toLowerCase(Locale.ROOT),
                 options.maxSupplementalRequests() == 0 ? "unlimited" : options.maxSupplementalRequests(),
                 options.maxKnowledgeQueries() == 0 ? "unlimited" : options.maxKnowledgeQueries(),
-                options.reviewParallelism(), options.language());
+                options.reviewParallelism(), options.language())
+                + "- Language modules: " + LanguageRegistry.defaults().modules().stream().map(LanguageModule::id)
+                        .collect(java.util.stream.Collectors.joining(", ")) + "\n"
+                + "- Language capabilities: " + LanguageRegistry.defaults().capabilitySummary() + "\n"
+                + "- Language cache overrides: " + options.languageCaches().entrySet().stream().sorted(java.util.Map.Entry.comparingByKey())
+                        .map(entry -> entry.getKey() + "=`" + entry.getValue() + "`")
+                        .collect(java.util.stream.Collectors.joining(", ")) + "\n";
     }
 
     private static String describe(InputDocument document) {

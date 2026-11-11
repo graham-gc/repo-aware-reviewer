@@ -200,7 +200,7 @@ final class ReviewQualityTests {
         GitClient client = new GitClient(repo, new ProcessExecutor());
         EvidenceBundle evidence = new EvidenceCollector(client).collect(client.resolve(options), null, null, CliOptions.KnowledgeMode.FULL, 20_000);
         EvidenceSession limited = new EvidenceSession(evidence,
-                new SupplementalEvidence(client, new MavenEvidence(client, new ProcessExecutor(), fixture.resolve("cache"))), 1, 0);
+                new SupplementalEvidence(client, new ProcessExecutor(), java.util.Map.of("java", fixture.resolve("cache"))), 1, 0);
         require(limited.load("REQUEST_FILE|target|Helper.java|symbol:parse|First call", "first"), "first finite request supplies material");
         require(!limited.load("REQUEST_FILE|target|Limits.java|symbol:limit|Second call", "second")
                 && !limited.markdown().contains("return 0;"), "finite request counts are shared across rounds");
