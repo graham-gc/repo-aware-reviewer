@@ -108,15 +108,20 @@ public final class AllTests {
         var captured = new ByteArrayOutputStream();
         try (var output = new PrintStream(captured, true, StandardCharsets.UTF_8);
              var progress = new CommandProgress("elapsed-test", output)) {
-            progress.step(2, 7, "Reviewers 0/3");
+            progress.step(0, 7, "Starting");
+            check(captured.toString(StandardCharsets.UTF_8).contains("[----------] 0% Starting"));
+            progress.step(2, 7, "Reviewers (0 of 3 complete)");
             Thread.sleep(1100);
-            progress.step(2, 7, "Reviewers 1/3");
+            progress.step(2, 7, "Reviewers (1 of 3 complete)");
             String text = captured.toString(StandardCharsets.UTF_8);
-            check(text.matches("(?s).*(\\([1-9][0-9]*s\\) Reviewers 1/3|Reviewers 1/3 \\(still working, [1-9][0-9]*s elapsed\\)).*"));
+            check(text.contains("[##--------] 28% ") && !text.contains("2/7"));
+            check(text.matches("(?s).*(\\([1-9][0-9]*s\\) Reviewers \\(1 of 3 complete\\)|Reviewers \\(1 of 3 complete\\) \\(still working, [1-9][0-9]*s elapsed\\)).*"));
             int previousLength = captured.size();
             progress.step(3, 7, "Collecting evidence");
             String nextStage = captured.toString(StandardCharsets.UTF_8).substring(previousLength);
             check(nextStage.contains("Collecting evidence") && !nextStage.contains("s elapsed"));
+            progress.finish(7, "Done");
+            check(captured.toString(StandardCharsets.UTF_8).contains("[##########] 100% Done"));
         }
     }
 

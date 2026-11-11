@@ -91,7 +91,7 @@ final class ReviewPipeline {
             return runDirectory;
         }
 
-        progress.step(2, totalSteps, "Independent reviewers 0/" + discoveries.size());
+        progress.step(2, totalSteps, "Independent reviewers (0 of " + discoveries.size() + " complete)");
         AgentRunner agent = new AgentRunner(executor, options.agentCommand(), options.agentArgs(),
                 options.repo(), options.agentTimeout());
         var responses = ReviewTasks.run(discoveries, agent, runDirectory.resolve("discovery"), options.reviewParallelism(),
@@ -141,7 +141,7 @@ final class ReviewPipeline {
         }
 
         progress.step(5, totalSteps, findings.isEmpty() ? "No candidate findings to verify"
-                : "Verifying candidate issues 0/" + findings.size());
+                : "Verifying candidate issues (0 of " + findings.size() + " complete)");
         List<ReviewOutput.Decision> preliminary = quality.verify(findings);
         String verificationCoverage = ReviewQuality.coverage("Individual candidate verification", preliminary);
         long preliminaryCount = preliminary.stream().filter(d -> d.verdict().status() == ReviewOutput.Status.CONFIRMED).count();

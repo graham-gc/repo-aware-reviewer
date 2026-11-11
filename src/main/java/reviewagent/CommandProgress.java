@@ -112,7 +112,8 @@ final class CommandProgress implements AutoCloseable {
 
     private static String bar(int completed, int total) {
         int filled = (int) (10L * completed / total);
-        return "[" + "#".repeat(filled) + "-".repeat(10 - filled) + "] " + completed + "/" + total + " ";
+        int percent = (int) (100L * completed / total);
+        return "[" + "#".repeat(filled) + "-".repeat(10 - filled) + "] " + percent + "% ";
     }
 
     private void stopHeartbeat() {

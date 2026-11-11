@@ -48,7 +48,7 @@ final class KnowledgePipeline {
         AgentRunner agent = options.prepareOnly() ? null : new AgentRunner(executor,
                 options.agentCommand(), options.agentArgs(), options.repo(), options.agentTimeout());
         for (int i = 0; i < chunks; i++) {
-            String label = "chunk " + (i + 1) + "/" + chunks;
+            String label = "chunk " + (i + 1) + " of " + chunks;
             progress.step(i, totalSteps, (agent == null ? "Preparing " : "Analyzing ") + label);
             String number = "%04d".formatted(i + 1);
             String chunk = snapshot.chunks().get(i);
