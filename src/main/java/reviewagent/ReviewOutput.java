@@ -138,6 +138,18 @@ final class ReviewOutput {
 
     private static ReviewFinding finding(Element element, String id, List<String> changedFiles, boolean checkCandidateId)
             throws IOException {
+        List<Element> contents = children(element, null);
+        while (contents.size() == 1 && contents.getFirst().getTagName().equals("finding")) {
+            if (element.getAttributes().getLength() > (element.hasAttribute("id") ? 1 : 0)) {
+                throw new IOException("Unexpected attributes in a finding wrapper");
+            }
+            String wrapperId = element.getAttribute("id");
+            if (checkCandidateId && !wrapperId.isEmpty() && !wrapperId.equals(id)) {
+                throw new IOException("Finding wrapper ID does not match the candidate being processed");
+            }
+            element = contents.getFirst();
+            contents = children(element, null);
+        }
         Map<String, Element> fields = fields(element, FINDING_FIELDS);
         String attributeId = element.getAttribute("id");
         if (checkCandidateId && ((!attributeId.isEmpty() && !attributeId.equals(id))
