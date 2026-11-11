@@ -116,6 +116,13 @@ public final class AllTests {
         check(prompt.contains("INSUFFICIENT_EVIDENCE"));
         check(prompt.contains("never promoted"));
         check(prompt.contains("supplement"));
+        String discovery = new PromptFactory().discovery(evidence);
+        for (String stage : List.of(discovery, prompt)) {
+            check(stage.contains("UI counts, lists, navigation and confirmation"));
+            check(stage.contains("absent from the evidence, mark that behavior INSUFFICIENT_EVIDENCE"));
+            check(stage.contains("syntactically valid null or wrong-shaped data"));
+            check(stage.contains("only when every\nrequired behavior is supported"));
+        }
     }
 
     private static void equal(Object expected, Object actual) {

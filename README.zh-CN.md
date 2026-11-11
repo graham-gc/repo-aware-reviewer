@@ -47,7 +47,7 @@ java -jar build/code-review-agent.jar review \
 
 审查报告默认使用英语。加上 `--language zh-CN` 生成简体中文报告，`--language en` 生成英文报告。报告标题、说明、严重程度和需求验收状态使用所选语言，代码与源码路径保留原文。
 
-加上 `--knowledge-mode scoped` 可按需加载主知识库。CLI 按 Markdown 标题保留完整章节，先匹配改动的文件路径和代码标识符，并加载标题为 `全局规则` 或 `Global rules` 的章节。初审识别出行为变化后，CLI 再在本地检索，把预算内的匹配章节交给第二轮复核。`coverage.md` 会记录选中的章节和覆盖缺口。默认的 `full` 模式会传入整份知识库。
+加上 `--knowledge-mode scoped` 可按需加载主知识库。CLI 按 Markdown 标题保留完整章节，优先匹配改动的仓库路径、API 路径和代码标识符，并加载标题为 `全局规则` 或 `Global rules` 的章节。初审可针对具体的行为变化请求补读章节。知识库可以放在仓库外。如果同一份文件出现在本次 Git 变更中，CLI 会在 `coverage.md` 保留变更记录，并通过按需章节提供正文。默认的 `full` 模式会传入整份知识库。
 
 - `--commit <ref>` 审查指定提交相对第一父提交的变更，默认目标是 `HEAD`。第一父提交须在本地可用。
 - `--branch <ref> --base <ref>` 审查目标分支从双方共同祖先起的变更。
@@ -70,7 +70,7 @@ Action 的 `language` 参数默认是 `en`。示例工作流从可选仓库变�
 - `review` 把模型报告保存为 `report.md`。可查看 `scope.md` 核对实际提交和输入哈希，查看 `evidence.md` 核对证据，查看 `coverage.md` 了解变更截断、跳过或补证失败的情况。
 - `knowledge generate` 生成 `candidate-knowledge.md`。可查看 `inventory.md` 了解哪些文件被纳入或跳过。两种流程都会在本地保存各自的证据。
 
-复核前，采集器可按请求读取基线或目标提交中已跟踪的文本。依赖补证只读取所选版本根 `pom.xml` 中声明了固定版本且已缓存的直接 JAR 依赖，提取 Java 公开签名和 `.proto` 文件。采集过程无需运行目标项目的构建或测试。输入较大时，`review` 可用 `--max-evidence-bytes`，`knowledge generate` 可用 `--max-file-bytes` 和 `--max-total-bytes` 调整预算。
+复核前，采集器可按请求读取基线或目标提交中已跟踪的文本。Java 文件支持按唯一的方法名定位声明，并记录实际提供的行号。依赖补证只读取所选版本根 `pom.xml` 中声明了固定版本且已缓存的直接 JAR 依赖，提取 Java 公开签名和 `.proto` 文件。采集过程无需运行目标项目的构建或测试。输入较大时，`review` 可用 `--max-evidence-bytes`，`knowledge generate` 可用 `--max-file-bytes` 和 `--max-total-bytes` 调整预算。
 
 ## 项目文档
 

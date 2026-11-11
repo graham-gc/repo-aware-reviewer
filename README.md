@@ -47,7 +47,7 @@ java -jar build/code-review-agent.jar review \
 
 Review reports default to English. Add `--language zh-CN` for Simplified Chinese or `--language en` for English. The selected language applies to report headings, explanations, severity labels, and requirement assessments. Code and source paths keep their original spelling.
 
-Add `--knowledge-mode scoped` to load relevant sections from the supplied knowledge base. The CLI uses Markdown headings to keep each section intact, matches changed paths and identifiers, and includes sections titled `Global rules` or `全局规则`. Discovery then describes observable behavior changes and requests rules for those impacts. The CLI looks up the requests locally and supplies matching sections for verification within the evidence budget. `coverage.md` records selected sections and gaps. The default mode, `full`, supplies the whole document.
+Add `--knowledge-mode scoped` to load relevant sections from the supplied knowledge base. The CLI keeps Markdown sections intact and prioritizes changed repository paths, API paths, and code identifiers. It also includes sections titled `Global rules` or `全局规则`. Discovery can request more sections for specific behavior changes. The file can live outside the repository. If the same file appears in the reviewed diff, the CLI records its change in `coverage.md` and supplies its content through scoped excerpts. The default mode, `full`, supplies the whole document.
 
 - `--commit <ref>` reviews a commit against its first parent. It defaults to `HEAD` and requires that parent to be available locally.
 - `--branch <ref> --base <ref>` reviews the branch from its merge base with the baseline.
@@ -70,7 +70,7 @@ Progress uses one updating line on an interactive stderr and plain log lines whe
 - `review` writes the model's `report.md`. Use `scope.md` to check the resolved commits and input hashes, `evidence.md` to inspect the supplied material, and `coverage.md` to see truncated or omitted changes and failed evidence requests.
 - `knowledge generate` writes `candidate-knowledge.md`. Use `inventory.md` to check which files were included or skipped. Both modes save their supporting evidence locally.
 
-Before verification, the collector can load requested tracked text from either pinned commit. Dependency evidence is limited to public Java signatures and `.proto` files from cached, fixed-version direct JAR dependencies in the selected revision's root `pom.xml`. Evidence collection does not run the target project's build or tests. For large inputs, `review` exposes `--max-evidence-bytes` and `knowledge generate` exposes `--max-file-bytes` and `--max-total-bytes`.
+Before verification, the collector can load requested tracked text from either pinned commit. For Java, it can locate a unique method declaration by name and records the lines it supplies. Dependency evidence is limited to public Java signatures and `.proto` files from cached, fixed-version direct JAR dependencies in the selected revision's root `pom.xml`. Evidence collection does not run the target project's build or tests. For large inputs, `review` exposes `--max-evidence-bytes` and `knowledge generate` exposes `--max-file-bytes` and `--max-total-bytes`.
 
 ## Repository documentation
 

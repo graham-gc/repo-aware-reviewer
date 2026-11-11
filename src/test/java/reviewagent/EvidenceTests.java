@@ -41,7 +41,20 @@ final class EvidenceTests {
                 </project>
                 """);
         Files.writeString(repo.resolve("A-large.md"), "old\n");
-        Files.writeString(repo.resolve("Stable.java"), "class Stable { int evidence = 42; }\n");
+        Files.writeString(repo.resolve("Stable.java"), """
+                class Stable {
+                    int evidence = 42;
+                    int caller() { return parseContract(); }
+                    // int parseContract() { return -1; }
+                """ + "\n".repeat(230) + """
+                    @Deprecated
+                    int parseContract() {
+                        return 73;
+                    }
+                    int overloaded() { return 1; }
+                    int overloaded(int value) { return value; }
+                }
+                """);
         Files.writeString(repo.resolve("old name.md"), "Rename evidence\n");
         Files.writeString(repo.resolve("removed.txt"), "Deletion evidence\n");
         git(executor, repo, "add", "--all");
@@ -70,7 +83,7 @@ final class EvidenceTests {
             archive.closeEntry();
         }
         var supplemental = new SupplementalEvidence(git, new MavenEvidence(git, executor, cache)).collect(evidence, """
-                REQUEST_FILE|base|Stable.java|1:1|Find a call contract
+                REQUEST_FILE|base|Stable.java|1:2|Find a call contract
                 REQUEST_MAVEN|target|test.contract:schema:1.2|contracts/order.proto|Check the field number
                 REQUEST_MAVEN|target|test.contract:schema:1.3|contracts/order.proto|Check a nonexistent version
                 REQUEST_FILE|target|../outside.txt|all|Check path restrictions
@@ -81,6 +94,17 @@ final class EvidenceTests {
         require(supplemental.coverage().contains("schema:1.3 contracts/order.proto: UNAVAILABLE"), "undeclared version");
         require(supplemental.coverage().contains("../outside.txt all: UNAVAILABLE"), "unsafe path");
         require(EvidenceText.bytes(evidence.markdown() + supplemental.markdown()) <= 10_000, "combined evidence budget");
+
+        var methods = new SupplementalEvidence(git, new MavenEvidence(git, executor, cache)).collect(evidence, """
+                REQUEST_FILE|base|Stable.java|symbol:parseContract|Trace the methodREQUEST_FILE|target|Stable.java|symbol:overloaded|Check ambiguity
+                REQUEST_FILE|target|Stable.java|symbol:missing|Check unavailable declarations
+                """);
+        require(methods.markdown().contains("@Deprecated\n    int parseContract() {\n        return 73;"),
+                "method selector finds the declaration after line 200, including its body and annotation");
+        require(!methods.markdown().contains("return parseContract();"), "method selector excludes the earlier call site");
+        require(methods.coverage().contains("symbol:parseContract: INCLUDED (lines 235–238)"), "method source lines recorded");
+        require(methods.coverage().contains("multiple declarations"), "ambiguous method request reported as unavailable");
+        require(methods.coverage().contains("Java method declaration not found"), "missing method reported as unavailable");
     }
 
     private static void checkKnowledgeSnapshot(Path fixture) throws Exception {
@@ -118,7 +142,9 @@ final class EvidenceTests {
         git(executor, repo, "add", "--all");
         git(executor, repo, "commit", "-qm", "base");
         Files.writeString(contract, "message SharedEvent { string owner_key = 1; }\n");
-        git(executor, repo, "commit", "-qam", "change field presence");
+        Files.writeString(repo.resolve("README.md"), "RuntimeOnlyRule documents 运行 and 状态.\n");
+        git(executor, repo, "add", "--all");
+        git(executor, repo, "commit", "-qm", "change field presence");
 
         Path knowledge = fixture.resolve("approved-rules.md");
         Files.writeString(knowledge, """
@@ -146,6 +172,12 @@ final class EvidenceTests {
                 ## 已保存流程解析
                 已保存流程解析事件时，历史记录继续按原格式解码。
 
+                ## 回调确认
+                `/events/ack` 必须允许重复确认。
+
+                ## 运行状态
+                RuntimeOnlyRule 的 events ack 状态记录保留一天。
+
                 发票结算
                 --------
                 发票在月末结算。
@@ -162,13 +194,14 @@ final class EvidenceTests {
                             *) exit 21 ;;
                         esac
                         case "$prompt" in
-                            *'保留原来的回退路径'*|*'历史记录继续按原格式解码'*|*'发票在月末结算'*) exit 22 ;;
+                            *'保留原来的回退路径'*|*'历史记录继续按原格式解码'*|*'发票在月末结算'*|*'状态记录保留一天'*) exit 22 ;;
                         esac
                         printf '%s\\n' 'No candidate findings.' \
-                            'REQUEST_KNOWLEDGE|旧客户端 缺省值|Removing field presence affects older consumers' \
-                            'REQUEST_KNOWLEDGE|已保存流程解析|Saved flows can deserialize historical events' \
+                            'REQUEST_KNOWLEDGE|旧客户端 缺省值|Removing field presence affects older consumersREQUEST_KNOWLEDGE|已保存流程解析|Saved flows can deserialize historical eventsREQUEST_KNOWLEDGE|malformed' \
                             'REQUEST_KNOWLEDGE|数字签名验签|Check a potential consumer with an unknown policy' \
-                            'REQUEST_KNOWLEDGE|账务审计超限|Check a rule that exceeds the section budget'
+                            'REQUEST_KNOWLEDGE|账务审计超限|Check a rule that exceeds the section budget' \
+                            'REQUEST_KNOWLEDGE|运行 状态 /events/ack|Check the acknowledgment contract' \
+                            'REQUEST_KNOWLEDGE|运行 状态|Generic terms alone do not establish coverage'
                         ;;
                     'You are the independent verification'*)
                         case "$prompt" in
@@ -176,7 +209,7 @@ final class EvidenceTests {
                             *) exit 23 ;;
                         esac
                         case "$prompt" in
-                            *'发票在月末结算'*|*'此段是超限证据标记'*) exit 24 ;;
+                            *'发票在月末结算'*|*'此段是超限证据标记'*|*'状态记录保留一天'*) exit 24 ;;
                         esac
                         printf '%s\\n' '# Findings' 'Field presence no longer distinguishes omitted values.'
                         ;;
@@ -189,16 +222,52 @@ final class EvidenceTests {
                 "--agent-command", "/bin/sh", "--agent-arg", "-c", "--agent-arg", stubAgent});
         Path run = new ReviewPipeline(executor, Clock.systemUTC()).run(options);
         String coverage = Files.readString(run.resolve("coverage.md"));
-        require(coverage.contains("Changed files: 1"), "shared contract is the only changed file");
+        require(coverage.contains("Changed files: 2"), "includes the contract and the README change");
         require(coverage.contains("Match: changed path contracts/shared.proto"), "initial rule found by path");
         require(coverage.contains("Match: changed identifier sharedevent"), "initial rule found by identifier");
         require(coverage.contains("数字签名验签: NO MATCH. Business rule coverage insufficient"),
                 "unmatched behavior is recorded");
         require(coverage.lines().anyMatch(line -> line.contains("账务审计超限")
                 && line.contains("OMITTED (section or byte limit)")), "oversized section is omitted whole");
-        require(coverage.contains("Supplemental rule excerpts supplied: 2"), "both downstream rule sections found");
+        require(coverage.contains("Behavior queries processed: 6. Without supplied rules: 3. Invalid: 1"),
+                "joined valid queries recovered and the malformed query counted separately");
+        require(coverage.contains("Invalid knowledge request on discovery output line 2"), "invalid query location recorded");
+        require(coverage.contains("Match: exact endpoint /events/ack") && coverage.contains("运行 状态: NO MATCH"),
+                "endpoint match outranks generic term overlap");
+        require(coverage.contains("Supplemental rule excerpts supplied: 3"), "three applicable rule sections found");
         require(Files.readString(run.resolve("report.md")).contains("Field presence no longer distinguishes"),
                 "verification can surface a business finding discovered after retrieval");
+
+        Path tracked = Files.createDirectories(repo.resolve("docs")).resolve("approved-rules.md");
+        Files.copy(knowledge, tracked);
+        git(executor, repo, "add", "--all");
+        git(executor, repo, "commit", "-qm", "add tracked rule input");
+        var git = new GitClient(repo, executor);
+        ReviewScope scope = git.resolve(options);
+        var collector = new EvidenceCollector(git);
+        InputDocument input = InputDocument.read(tracked);
+        EvidenceBundle scoped = collector.collect(scope, null, input, CliOptions.KnowledgeMode.SCOPED, 160_000);
+        require(scoped.markdown().contains("所有事件按租户隔离") && !scoped.markdown().contains("发票在月末结算"),
+                "tracked knowledge is only supplied through scoped excerpts");
+        require(scoped.coverage().contains("docs/approved-rules.md — diff: OMITTED (scoped knowledge document)"
+                + "; target file: OMITTED (scoped knowledge document)"), "excluded change remains in the coverage inventory");
+        var supplemental = new SupplementalEvidence(git, new MavenEvidence(git, executor, fixture.resolve("cache")))
+                .collect(scoped, "REQUEST_FILE|target|docs/approved-rules.md|all|Try reading the tracked knowledge file");
+        require(supplemental.coverage().contains("Use a knowledge query for the scoped knowledge document")
+                && !supplemental.markdown().contains("发票在月末结算"), "raw follow-up read cannot bypass scoped selection");
+
+        EvidenceBundle full = collector.collect(scope, null, input, CliOptions.KnowledgeMode.FULL, 160_000);
+        require(full.markdown().contains("发票在月末结算"), "full mode still supplies the complete document");
+
+        Path renamed = Files.move(tracked, repo.resolve("docs/renamed-rules.md"));
+        git(executor, repo, "add", "--all");
+        git(executor, repo, "commit", "-qm", "rename the knowledge input");
+        EvidenceBundle afterRename = collector.collect(git.resolve(options), null, InputDocument.read(renamed),
+                CliOptions.KnowledgeMode.SCOPED, 160_000);
+        var oldPath = new SupplementalEvidence(git, new MavenEvidence(git, executor, fixture.resolve("cache")))
+                .collect(afterRename, "REQUEST_FILE|base|docs/approved-rules.md|all|Try reading the previous path");
+        require(oldPath.coverage().contains("Use a knowledge query for the scoped knowledge document"),
+                "base file path stays scoped after a rename");
     }
 
     private static void git(ProcessExecutor executor, Path repo, String... arguments) throws Exception {

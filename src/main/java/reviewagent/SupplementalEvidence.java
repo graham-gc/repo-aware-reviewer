@@ -2,6 +2,7 @@ package reviewagent;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -15,6 +16,9 @@ final class SupplementalEvidence {
     record Result(String markdown, String coverage) {
     }
 
+    private record Excerpt(String markdown, String status) {
+    }
+
     private final GitClient git;
     private final MavenEvidence maven;
 
@@ -25,16 +29,17 @@ final class SupplementalEvidence {
 
     Result collect(EvidenceBundle evidence, String candidates) throws InterruptedException {
         var requests = new LinkedHashMap<List<String>, String[]>();
-        int invalid = 0;
-        for (String line : candidates.lines().toList()) {
-            String trimmed = line.strip();
-            if (!trimmed.startsWith("REQUEST_FILE|") && !trimmed.startsWith("REQUEST_MAVEN|")) {
+        var invalidLines = new ArrayList<Integer>();
+        List<EvidenceRequest> parsed = EvidenceRequest.parse(candidates);
+        for (EvidenceRequest request : parsed) {
+            String line = request.text();
+            if (!line.startsWith("REQUEST_FILE|") && !line.startsWith("REQUEST_MAVEN|")) {
                 continue;
             }
-            String[] fields = trimmed.split("\\|", 5);
+            String[] fields = line.split("\\|", 5);
             if (fields.length != 5 || !(fields[1].equals("base") || fields[1].equals("target"))
-                    || fields[2].isBlank() || fields[3].isBlank() || fields[4].isBlank() || trimmed.length() > 700) {
-                invalid++;
+                    || fields[2].isBlank() || fields[3].isBlank() || fields[4].isBlank() || line.length() > 700) {
+                invalidLines.add(request.line());
                 continue;
             }
             requests.putIfAbsent(List.of(fields[0], fields[1], fields[2], fields[3]), fields);
@@ -42,7 +47,7 @@ final class SupplementalEvidence {
 
         ScopedKnowledge.Result knowledge = evidence.scopedKnowledge() == null
                 ? new ScopedKnowledge.Result("", "")
-                : evidence.scopedKnowledge().supplemental(candidates, evidence.supplementBudget() / 2);
+                : evidence.scopedKnowledge().supplemental(parsed, evidence.supplementBudget() / 2);
         String heading = "\n## Supplemental evidence requested during discovery\n\n";
         StringBuilder coverage = new StringBuilder(heading);
         StringBuilder prompt = new StringBuilder(heading);
@@ -62,16 +67,23 @@ final class SupplementalEvidence {
                 if (quota < 256) {
                     throw new IOException("No room in the supplemental evidence budget");
                 }
-                String block = fields[0].equals("REQUEST_FILE")
-                        ? repositoryFile(revision, fields[2], fields[3], quota)
-                        : maven.load(revision, fields[2], fields[3], quota);
-                if (EvidenceText.bytes(block) > quota) {
+                Excerpt excerpt;
+                if (fields[0].equals("REQUEST_FILE")) {
+                    if (evidence.scopedKnowledge() != null && evidence.scopedKnowledge().isSourcePath(fields[2])) {
+                        throw new IOException("Use a knowledge query for the scoped knowledge document");
+                    }
+                    excerpt = repositoryFile(revision, fields[2], fields[3], quota);
+                } else {
+                    excerpt = new Excerpt(maven.load(revision, fields[2], fields[3], quota), "INCLUDED");
+                }
+                int bytes = EvidenceText.bytes(excerpt.markdown());
+                if (bytes > quota) {
                     throw new IOException("Requested material exceeds the supplemental evidence budget");
                 }
-                prompt.append(block);
-                remaining -= EvidenceText.bytes(block);
+                prompt.append(excerpt.markdown());
+                remaining -= bytes;
                 included++;
-                status = "INCLUDED";
+                status = excerpt.status();
             } catch (IOException unavailable) {
                 status = "UNAVAILABLE (" + EvidenceText.oneLine(unavailable.getMessage()) + ")";
                 String note = "- " + label + ": " + status + "\n";
@@ -83,40 +95,58 @@ final class SupplementalEvidence {
             coverage.append("- ").append(label).append(": ").append(status).append(". Reason: ")
                     .append(EvidenceText.oneLine(fields[4])).append('\n');
         }
-        String summary = "\nSupplemental requests included: " + included + "/" + processed + ". Invalid: " + invalid
+        for (int line : invalidLines) {
+            coverage.append("- Invalid file or Maven request on discovery output line ").append(line).append(".\n");
+        }
+        String summary = "\nSupplemental requests included: " + included + "/" + processed + ". Invalid: " + invalidLines.size()
                 + ". Skipped by request limit: " + (requests.size() - processed) + ". See `coverage.md` for details.\n";
         return new Result(prompt.append(summary).append(knowledge.markdown()).toString(),
                 coverage.append(summary).append(knowledge.coverage()).toString());
     }
 
-    private String repositoryFile(String revision, String path, String range, int quota)
+    private Excerpt repositoryFile(String revision, String path, String selector, int quota)
             throws IOException, InterruptedException {
         if (!eligiblePath(path)) {
             throw new IOException("Path is not eligible tracked source, test, schema, or documentation");
         }
-        String content;
         String title = path + " at " + revision;
-        if (range.equals("all")) {
-            content = git.regularBlobAt(revision, path, quota);
-        } else {
-            if (!range.matches("[1-9][0-9]{0,6}:[1-9][0-9]{0,6}")) {
-                throw new IOException("Expected all or a line range such as 10:90");
+        if (selector.equals("all")) {
+            return new Excerpt(EvidenceText.block(title, "text", git.regularBlobAt(revision, path, quota)), "INCLUDED");
+        }
+        int from;
+        int to;
+        String source;
+        boolean bySymbol = selector.startsWith("symbol:");
+        if (bySymbol) {
+            if (!path.endsWith(".java")) {
+                throw new IOException("Method lookup is available for Java source; request a line range instead");
             }
-            String[] endpoints = range.split(":");
-            int from = Integer.parseInt(endpoints[0]);
-            int to = Integer.parseInt(endpoints[1]);
+            source = git.regularBlobAt(revision, path, MAX_SOURCE_BYTES);
+            JavaMethodEvidence.Lines lines = JavaMethodEvidence.locate(source, selector.substring("symbol:".length()));
+            from = lines.first();
+            to = lines.last();
+        } else {
+            if (!selector.matches("[1-9][0-9]{0,6}:[1-9][0-9]{0,6}")) {
+                throw new IOException("Expected all, a line range such as 10:90, or symbol:methodName for Java");
+            }
+            String[] endpoints = selector.split(":");
+            from = Integer.parseInt(endpoints[0]);
+            to = Integer.parseInt(endpoints[1]);
             if (to < from || to - from >= 200) {
                 throw new IOException("Requested range must contain between 1 and 200 lines");
             }
-            List<String> lines = git.regularBlobAt(revision, path, MAX_SOURCE_BYTES).lines()
-                    .skip(from - 1L).limit(to - from + 1L).toList();
-            if (lines.isEmpty()) {
-                throw new IOException("Requested range is beyond the end of the file");
-            }
-            title += " (lines " + from + "–" + (from + lines.size() - 1) + ")";
-            content = String.join("\n", lines);
+            source = git.regularBlobAt(revision, path, MAX_SOURCE_BYTES);
         }
-        return EvidenceText.block(title, "text", content);
+        if (bySymbol && to - from >= 200) {
+            throw new IOException("Method spans more than 200 lines; request the relevant line range instead");
+        }
+        List<String> lines = source.lines().skip(from - 1L).limit(to - from + 1L).toList();
+        if (lines.isEmpty()) {
+            throw new IOException("Requested range is beyond the end of the file");
+        }
+        String location = "lines " + from + "–" + (from + lines.size() - 1);
+        String block = EvidenceText.block(title + " (" + location + ")", "text", String.join("\n", lines));
+        return new Excerpt(block, bySymbol ? "INCLUDED (" + location + ")" : "INCLUDED");
     }
 
     private static boolean eligiblePath(String path) {
