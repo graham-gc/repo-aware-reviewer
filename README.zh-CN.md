@@ -67,6 +67,26 @@ java -jar build/code-review-agent.jar review \
 
 结构化回复支持原始 XML 和带代码围栏的 XML。单条问题的多余外层包装会先被移除，再进行字段和 ID 校验。结构错误时会自动尝试一次格式纠正，并保留原回复和纠正记录。续跑中断的审查时，在原命令上增加 `--resume /path/to/run-directory`，程序会先检查原回复及已保存的纠正回复，复用有效结果，再调用模型继续缺失或无效的任务。实际审查范围和初始证据须与原运行一致；每个任务的提示词（含所提供的证据）也须一致才能复用，否则重新执行该任务。续跑时可以调整并行数。旧运行的证据格式不兼容时，需要重新运行。
 
+## 编程语言支持
+
+所有已识别的编程语言和文本类型均已独立模块化。程序根据源码及配置文件自动选择审查提示，混合语言变更可以同时启用多个模块；`--language` 仍表示报告的中英文语言。
+
+| 模块 | 当前能力 |
+| --- | --- |
+| Java、Go | 文件证据、声明定位及各自已实现的依赖补读；Go 还提供包和 import 导航。 |
+| Kotlin、Groovy、Scala、C#、F#、Python、JavaScript、TypeScript、Vue、Svelte、C/C++、Rust、Ruby、PHP | 基于文本的静态审查、相关项目配置、同目录文件导航和按范围补读源码。 |
+| SQL、GraphQL、Protobuf、Thrift、Avro | 查询、接口或数据契约的审查提示，以及文本和文件导航。 |
+| Shell、PowerShell、批处理、Make、CMake、Dockerfile | 脚本或构建配置的审查提示，以及文本和文件导航。 |
+| 文档、结构化配置、表格数据 | 分别归类的格式模块和证据角色。 |
+
+文本与导航模块尚未提供声明解析器、编译器类型检查、包或 import 解析、第三方依赖加载。缺少关键证据时保留审查缺口。`scope.md` 会记录已注册模块及其声明的能力。`CMakeLists.txt` 等明确文件名优先于通用 `.txt` 识别；导航元数据也不会当作实现证据。
+
+Go 支持加载相关 `go.mod`、`go.sum`、`go.work` 和 vendor 元数据，提供包与文件索引、函数／类型／接收者方法定位，以及按需查询 import 消费方。可读取工作区内的相关包、固定版本中的本地替换、与配置一致的已跟踪 vendor，以及经过版本选择的模块缓存源码，包括生成的 protobuf 实体类。元数据缺失或版本无法确定时，保留证据缺口。静态支持无需安装 Go，也不会下载依赖或执行 Go 命令。
+
+Go 缓存默认读取已导出的 `GOMODCACHE`，其次是已导出的 `GOPATH` 第一项下的 `pkg/mod`，最后使用 `~/go/pkg/mod`。可用 `--language-cache go=/path/to/pkg/mod` 指定。对于使用缓存的模块，可按已注册 ID 指定，例如 `--language-cache java=/path/to/maven-cache`。
+
+Go 声明提取采用词法分析，尚未提供编译器类型检查、cgo 展开、标准库源码解析或构建标签／平台选择。包索引会保留测试和平台变体，不假定这些文件同时参与编译。基础语言模块采用独立的 `.properties` 配置，在 `META-INF/reviewagent/text-languages` 中注册即可，无需新增 Java 代码。专用辅助能力通过公开的 `LanguageModule` 接口和 Java ServiceLoader 注册，也可用相同 ID 替换基础配置模块。扩展方式、能力边界和 Go 解析限制见[语言模块指南](docs/language-modules.md)。
+
 ## GitHub PR 审查
 
 把[示例工作流](examples/github-review.yml)复制到待审查仓库的 `.github/workflows/`，配置 `ANTHROPIC_API_KEY` Actions Secret，并将 Action 引用固定到可信版本。同仓库的 PR 创建或更新时会自动触发。有仓库写权限的人也可以在 PR 评论 `/review`。报告会回贴到 PR，报告、审查范围和覆盖情况也会保存为 Actions artifact。
@@ -82,9 +102,9 @@ Action 的 `language` 参数默认是 `en`。示例工作流从可选仓库变�
 - `review` 生成 `report.md`。`scope.md` 记录实际提交、输入哈希和并行设置，`evidence.md` 保存证据，`coverage.md` 记录证据缺口及每个候选的复核状态。`discovery/`、`verification/`、`adjudication/` 和 `assessment/` 保存各次调用的提示词及回复，追加轮次保存在子目录。`supplemental-evidence.md` 保存各轮补读材料；传入需求文档时，`requirement-assessment.md` 保存审计后的验收结论。`verified-findings.md` 保存通过发布裁决、尚未去重的候选，`report-response.md` 保留汇总原文。格式纠正后仍未通过结构校验时，本轮审查会报错。
 - `knowledge generate` 生成 `candidate-knowledge.md`。可查看 `inventory.md` 了解哪些文件被纳入或跳过。两种流程都会在本地保存各自的证据。
 
-初审、复核、发布裁决和需求评估期间，采集器均可按请求读取基线或目标提交中已跟踪的文本。Java 文件支持按唯一的方法名定位声明，并记录实际提供的行号。依赖补证只读取所选版本根 `pom.xml` 中声明了固定版本且已缓存的直接 JAR 依赖，提取 Java 公开签名和 `.proto` 文件。采集过程无需运行目标项目的构建或测试。输入较大时，`review` 可用 `--max-evidence-bytes`，`knowledge generate` 可用 `--max-file-bytes` 和 `--max-total-bytes` 调整预算。
+初审、复核、发布裁决和需求评估期间，采集器均可按请求读取基线或目标提交中已跟踪的文本。声明定位和依赖补证由已注册语言模块提供。Java 模块读取所选版本根 `pom.xml` 中声明了固定版本且已缓存的直接 JAR 依赖，提取公开签名和 `.proto` 文件；Go 模块按上述规则读取包源码。采集过程无需运行目标项目的构建或测试。输入较大时，`review` 可用 `--max-evidence-bytes`，`knowledge generate` 可用 `--max-file-bytes` 和 `--max-total-bytes` 调整预算。
 
-代码和依赖补证请求、知识库查询默认不限条数，知识库摘录也不限制章节数量，证据仍受字节预算约束。可用 `--max-supplemental-requests <数量>` 限制文件与 Maven 补证请求的合计条数，用 `--max-knowledge-queries <数量>` 限制按需知识库查询条数。两个参数默认均为 `0`，表示不限条数。正数上限在所有阶段和轮次之间共用，按去重后实际尝试的请求计数，包含读取失败或未匹配的请求。重复请求不会重试，所有补读材料共用证据字节预算。`scope.md` 记录生效配置，`coverage.md` 记录跳过数量。
+代码和依赖补证请求、知识库查询默认不限条数，知识库摘录也不限制章节数量，证据仍受字节预算约束。可用 `--max-supplemental-requests <数量>` 限制文件与语言模块补证请求的合计条数（包含旧版 Maven 请求），用 `--max-knowledge-queries <数量>` 限制按需知识库查询条数。两个参数默认均为 `0`，表示不限条数。正数上限在所有阶段和轮次之间共用，按去重后实际尝试的请求计数，包含读取失败或未匹配的请求。重复请求不会重试，所有补读材料共用证据字节预算。`scope.md` 记录生效配置，`coverage.md` 记录跳过数量。
 
 ## 项目文档
 

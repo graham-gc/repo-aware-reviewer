@@ -19,30 +19,38 @@ final class SupplementalEvidence {
     }
 
     private final GitClient git;
-    private final MavenEvidence maven;
+    private final ProcessExecutor executor;
+    private final LanguageRegistry languages;
+    private final LanguageModule.Repository repository;
+    private final java.util.Map<String, Path> caches;
+    private final java.util.Map<String, LanguageModule.Session> sessions = new java.util.LinkedHashMap<>();
 
-    SupplementalEvidence(GitClient git, MavenEvidence maven) {
+    SupplementalEvidence(GitClient git, ProcessExecutor executor, java.util.Map<String, Path> caches) {
+        this(git, executor, caches, LanguageRegistry.defaults());
+    }
+
+    SupplementalEvidence(GitClient git, ProcessExecutor executor, java.util.Map<String, Path> caches, LanguageRegistry languages) {
         this.git = git;
-        this.maven = maven;
+        this.executor = executor;
+        this.languages = languages;
+        this.repository = LanguageRegistry.repository(git);
+        this.caches = java.util.Map.copyOf(caches);
     }
 
     Result collect(EvidenceBundle evidence, String candidates, int maxRequests, int maxKnowledgeQueries)
             throws InterruptedException {
-        var requests = new LinkedHashMap<List<String>, String[]>();
+        var requests = new LinkedHashMap<List<String>, EvidenceQuery>();
         var invalidLines = new ArrayList<Integer>();
         List<EvidenceRequest> parsed = EvidenceRequest.parse(candidates);
         for (EvidenceRequest request : parsed) {
             String line = request.text();
-            if (!line.startsWith("REQUEST_FILE|") && !line.startsWith("REQUEST_MAVEN|")) {
-                continue;
-            }
-            String[] fields = line.split("\\|", 5);
-            if (fields.length != 5 || !(fields[1].equals("base") || fields[1].equals("target"))
-                    || fields[2].isBlank() || fields[3].isBlank() || fields[4].isBlank() || line.length() > 700) {
+            if (line.startsWith("REQUEST_KNOWLEDGE|")) continue;
+            try {
+                EvidenceQuery query = EvidenceQuery.parse(line, languages);
+                requests.putIfAbsent(query.key(), query);
+            } catch (IOException invalid) {
                 invalidLines.add(request.line());
-                continue;
             }
-            requests.putIfAbsent(List.of(fields[0], fields[1], fields[2], fields[3]), fields);
         }
 
         ScopedKnowledge.Result knowledge = evidence.scopedKnowledge() == null
@@ -55,27 +63,33 @@ final class SupplementalEvidence {
         int processed = 0;
         int total = maxRequests == 0 ? requests.size() : Math.min(requests.size(), maxRequests);
         int included = 0;
-        for (String[] fields : requests.values()) {
+        for (EvidenceQuery query : requests.values()) {
             if (processed == total) {
                 break;
             }
             int quota = Math.min(remaining, Math.max(256, remaining / (total - processed++)));
-            String revision = fields[1].equals("base") ? evidence.scope().baseCommit() : evidence.scope().targetCommit();
-            String label = fields[1] + " " + EvidenceText.oneLine(fields[2]) + " " + EvidenceText.oneLine(fields[3]);
+            String revision = query.side().equals("base") ? evidence.scope().baseCommit() : evidence.scope().targetCommit();
+            String label = EvidenceText.oneLine(query.label());
             String status;
             try {
                 if (quota < 256) {
                     throw new IOException("No room in the supplemental evidence budget");
                 }
                 Excerpt excerpt;
-                if (fields[0].equals("REQUEST_FILE")) {
-                    if (evidence.scopedKnowledge() != null && evidence.scopedKnowledge().isSourcePath(fields[2])) {
+                if (query.command().equals("REQUEST_FILE")) {
+                    if (evidence.scopedKnowledge() != null && evidence.scopedKnowledge().isSourcePath(query.resource())) {
                         throw new IOException("Use a knowledge query for the scoped knowledge document");
                     }
-                    excerpt = repositoryFile(revision, fields[2], fields[3], quota);
+                    excerpt = repositoryFile(revision, query.resource(), query.selector(), quota);
                 } else {
-                    excerpt = new Excerpt(maven.load(revision, fields[2], fields[3], quota), "INCLUDED");
+                    LanguageModule module = languages.module(query.language());
+                    Path cache = caches.getOrDefault(module.id(), module.defaultCache());
+                    LanguageModule.Session session = sessions.computeIfAbsent(module.id(), ignored ->
+                            module.open(LanguageRegistry.environment(repository, executor, cache)));
+                    LanguageModule.Evidence loaded = session.load(new LanguageModule.Request(revision, query.context(), query.resource(), query.selector()), quota);
+                    excerpt = new Excerpt(loaded.markdown(), EvidenceText.oneLine(loaded.status()));
                 }
+                if (excerpt.markdown().isBlank() || excerpt.status().isBlank()) throw new IOException("Language module returned empty evidence or coverage status");
                 int bytes = EvidenceText.bytes(excerpt.markdown());
                 if (bytes > quota) {
                     throw new IOException("Requested material exceeds the supplemental evidence budget");
@@ -93,10 +107,10 @@ final class SupplementalEvidence {
                 }
             }
             coverage.append("- ").append(label).append(": ").append(status).append(". Reason: ")
-                    .append(EvidenceText.oneLine(fields[4])).append('\n');
+                    .append(EvidenceText.oneLine(query.reason())).append('\n');
         }
         for (int line : invalidLines) {
-            coverage.append("- Invalid file or Maven request on discovery output line ").append(line).append(".\n");
+            coverage.append("- Invalid file or language request on reviewer output line ").append(line).append(".\n");
         }
         String summary = "\nSupplemental requests included: " + included + "/" + processed + ". Invalid: " + invalidLines.size()
                 + ". Skipped by request limit: " + (requests.size() - processed) + ". See `coverage.md` for details.\n";
@@ -118,16 +132,13 @@ final class SupplementalEvidence {
         String source;
         boolean bySymbol = selector.startsWith("symbol:");
         if (bySymbol) {
-            if (!path.endsWith(".java")) {
-                throw new IOException("Method lookup is available for Java source; request a line range instead");
-            }
             source = git.regularBlobAt(revision, path, MAX_SOURCE_BYTES);
-            JavaMethodEvidence.Lines lines = JavaMethodEvidence.locate(source, selector.substring("symbol:".length()));
+            LanguageModule.Lines lines = languages.forPath(path).locate(source, selector.substring("symbol:".length()));
             from = lines.first();
             to = lines.last();
         } else {
             if (!selector.matches("[1-9][0-9]{0,6}:[1-9][0-9]{0,6}")) {
-                throw new IOException("Expected all, a line range such as 10:90, or symbol:methodName for Java");
+                throw new IOException("Expected all, a line range such as 10:90, or a registered language's symbol selector");
             }
             String[] endpoints = selector.split(":");
             from = Integer.parseInt(endpoints[0]);
@@ -149,7 +160,7 @@ final class SupplementalEvidence {
         return new Excerpt(block, bySymbol ? "INCLUDED (" + location + ")" : "INCLUDED");
     }
 
-    private static boolean eligiblePath(String path) {
+    private boolean eligiblePath(String path) {
         if (path.indexOf('\\') >= 0 || path.chars().anyMatch(Character::isISOControl)) {
             return false;
         }
@@ -161,10 +172,8 @@ final class SupplementalEvidence {
         }
         String name = parts[parts.length - 1];
         return !name.equals(".npmrc") && !name.equals("credentials.json") && !name.startsWith("secrets.")
-                && RepositorySnapshotCollector.isKnowledgeText(path);
+                && RepositorySnapshotCollector.allowedTextLocation(path)
+                && (RepositorySnapshotCollector.isKnowledgeText(path) || languages.modules().stream().anyMatch(module -> module.isText(path)));
     }
 
-    static Path defaultMavenCache() {
-        return Path.of(System.getProperty("user.home"), ".m2", "repository");
-    }
 }

@@ -28,13 +28,13 @@ final class MavenEvidence {
     private static final Pattern JAVA_TYPE = Pattern.compile("(?:[A-Za-z_$][A-Za-z0-9_$]*\\.)+[A-Za-z_$][A-Za-z0-9_$]*");
     private static final Pattern PROTO_ENTRY = Pattern.compile("(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_.-]+\\.proto");
 
-    private final GitClient git;
-    private final ProcessExecutor executor;
+    private final LanguageModule.Repository repository;
+    private final LanguageModule.Commands commands;
     private final Path cache;
 
-    MavenEvidence(GitClient git, ProcessExecutor executor, Path cache) {
-        this.git = git;
-        this.executor = executor;
+    MavenEvidence(LanguageModule.Repository repository, LanguageModule.Commands commands, Path cache) {
+        this.repository = repository;
+        this.commands = commands;
         this.cache = cache;
     }
 
@@ -50,7 +50,7 @@ final class MavenEvidence {
         if (!proto && !JAVA_TYPE.matcher(symbol).matches()) {
             throw new IOException("Expected a fully qualified Java type or a .proto archive entry");
         }
-        String pom = git.regularBlobAt(revision, "pom.xml", 256_000);
+        String pom = repository.read(revision, "pom.xml", 256_000);
         if (!declaredDependency(pom, parts)) {
             throw new IOException("Coordinates are not an exact direct JAR dependency in the root POM at that revision");
         }
@@ -104,8 +104,8 @@ final class MavenEvidence {
             throw new IOException("JDK javap is unavailable");
         }
         String location = "jar:" + jar.toUri().toASCIIString() + "!/" + entry;
-        CommandResult result = executor.run(List.of(javap.toString(), "-public", location),
-                directory, null, Duration.ofSeconds(15));
+        LanguageModule.Result result = commands.run(List.of(javap.toString(), "-public", location),
+                directory, Duration.ofSeconds(15));
         if (result.exitCode() != 0 || result.stdout().isBlank()) {
             throw new IOException("Could not inspect the class signature with javap");
         }

@@ -5,31 +5,22 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
-import java.util.Set;
 
 final class RepositorySnapshotCollector {
-    private static final Set<String> TEXT_EXTENSIONS = Set.of(
-            "java", "kt", "kts", "groovy", "scala", "cs", "fs", "fsx",
-            "py", "pyi", "js", "jsx", "ts", "tsx", "mjs", "cjs", "vue", "svelte",
-            "c", "h", "cc", "cpp", "cxx", "hpp", "hxx", "go", "rs", "rb", "php",
-            "sql", "graphql", "proto", "thrift", "avsc",
-            "xml", "json", "json5", "yaml", "yml", "toml", "ini", "conf", "properties",
-            "md", "mdx", "rst", "txt", "adoc", "csv", "tsv",
-            "sh", "bash", "zsh", "fish", "ps1", "bat", "cmd",
-            "gradle", "cmake", "dockerfile", "gitignore", "gitattributes");
-    private static final Set<String> SPECIAL_NAMES = Set.of(
-            "dockerfile", "makefile", "rakefile", "gemfile", "procfile", "jenkinsfile",
-            "pom.xml", "package.json", "requirements.txt", "pyproject.toml", "cargo.toml",
-            "go.mod", "go.sum", "readme", "license", "agents.md", "claude.md", "review.md",
-            ".dockerignore", ".env.example", ".editorconfig", ".npmrc");
     private static final List<String> SKIPPED_SEGMENTS = List.of(
             "/node_modules/", "/vendor/", "/third_party/", "/third-party/", "/generated/",
             "/dist/", "/build/", "/target/", "/.next/", "/coverage/");
 
     private final GitClient git;
+    private final LanguageRegistry languages;
 
     RepositorySnapshotCollector(GitClient git) {
+        this(git, LanguageRegistry.defaults());
+    }
+
+    RepositorySnapshotCollector(GitClient git, LanguageRegistry languages) {
         this.git = git;
+        this.languages = languages;
     }
 
     KnowledgeSnapshot collect(String ref, int chunkBytes, long maxTotalBytes, int maxFileBytes)
@@ -50,7 +41,7 @@ final class RepositorySnapshotCollector {
                         "symlink or submodule entry"));
                 continue;
             }
-            if (!isKnowledgeText(path)) {
+            if (!allowedTextLocation(path) || !languages.recognizesText(path)) {
                 inventory.add(new KnowledgeFile(path, size,
                         KnowledgeFile.Status.SKIPPED_BINARY_OR_GENERATED, "binary, generated, vendored, or unsupported text type"));
                 continue;
@@ -87,6 +78,11 @@ final class RepositorySnapshotCollector {
     }
 
     static boolean isKnowledgeText(String path) {
+        if (!allowedTextLocation(path)) return false;
+        return LanguageRegistry.defaults().recognizesText(path);
+    }
+
+    static boolean allowedTextLocation(String path) {
         String normalized = "/" + path.toLowerCase(Locale.ROOT).replace('\\', '/');
         for (String segment : SKIPPED_SEGMENTS) {
             if (normalized.contains(segment)) {
@@ -100,11 +96,7 @@ final class RepositorySnapshotCollector {
         if (name.endsWith(".lock") || name.endsWith(".min.js") || name.endsWith(".map")) {
             return false;
         }
-        if (SPECIAL_NAMES.contains(name)) {
-            return true;
-        }
-        int dot = name.lastIndexOf('.');
-        return dot >= 0 && TEXT_EXTENSIONS.contains(name.substring(dot + 1));
+        return true;
     }
 }
 

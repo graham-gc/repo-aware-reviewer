@@ -84,7 +84,7 @@ final class EvidenceTests {
             archive.write("message Order { string id = 1; }\n".getBytes(StandardCharsets.UTF_8));
             archive.closeEntry();
         }
-        var supplemental = new SupplementalEvidence(git, new MavenEvidence(git, executor, cache)).collect(evidence, """
+        var supplemental = new SupplementalEvidence(git, executor, java.util.Map.of("java", cache)).collect(evidence, """
                 REQUEST_FILE|base|Stable.java|1:2|Find a call contract
                 REQUEST_MAVEN|target|test.contract:schema:1.2|contracts/order.proto|Check the field number
                 REQUEST_MAVEN|target|test.contract:schema:1.3|contracts/order.proto|Check a nonexistent version
@@ -97,7 +97,7 @@ final class EvidenceTests {
         require(supplemental.coverage().contains("../outside.txt all: UNAVAILABLE"), "unsafe path");
         require(EvidenceText.bytes(evidence.markdown() + supplemental.markdown()) <= 10_000, "combined evidence budget");
 
-        var methods = new SupplementalEvidence(git, new MavenEvidence(git, executor, cache)).collect(evidence, """
+        var methods = new SupplementalEvidence(git, executor, java.util.Map.of("java", cache)).collect(evidence, """
                 REQUEST_FILE|base|Stable.java|symbol:parseContract|Trace the methodREQUEST_FILE|target|Stable.java|symbol:overloaded|Check ambiguity
                 REQUEST_FILE|target|Stable.java|symbol:missing|Check unavailable declarations
                 """, 0, 0);
@@ -374,19 +374,19 @@ final class EvidenceTests {
         String discovery = Files.readString(run.resolve("discover-prompt.md"));
         require(report.contains("constexpr int contractValue12 = 12;") && report.contains("Policy detail 12 applies."),
                 "default CLI flow supplies more than eight source excerpts and rule sections to verification");
-        require(discovery.contains("File and Maven requests have no count limit.")
+        require(discovery.contains("File and language requests have no count limit.")
                 && discovery.contains("Knowledge queries have no count limit."), "discovery reflects the unlimited defaults");
         require(coverage.contains("Behavior queries processed: 12") && coverage.contains("Skipped by query limit: 0")
                 && coverage.contains("Supplemental rule excerpts supplied: 12")
                 && coverage.contains("Skipped by request limit: 0"), "all distinct requests are considered by default");
-        require(Files.readString(run.resolve("scope.md")).contains("File and Maven request count limit: unlimited"),
+        require(Files.readString(run.resolve("scope.md")).contains("File and language request count limit: unlimited"),
                 "scope records the effective request limit");
 
         var git = new GitClient(repo, executor);
         ReviewScope scope = git.resolve(unlimited);
         EvidenceBundle evidence = new EvidenceCollector(git).collect(scope, null, InputDocument.read(knowledge),
                 CliOptions.KnowledgeMode.SCOPED, unlimited.maxEvidenceBytes());
-        var collector = new SupplementalEvidence(git, new MavenEvidence(git, executor, fixture.resolve("cache")));
+        var collector = new SupplementalEvidence(git, executor, java.util.Map.of("java", fixture.resolve("cache")));
         var mixed = collector.collect(evidence, String.join("\n", requests), 0, 0);
         require(mixed.coverage().contains("Supplemental requests included: 13/13"),
                 "file and dependency requests both follow the unlimited default and are deduplicated");
@@ -409,7 +409,7 @@ final class EvidenceTests {
         require(limitedReport.contains("constexpr int contractValue2 = 2;") && limitedReport.contains("Policy detail 2 applies.")
                 && !limitedReport.contains("constexpr int contractValue3 = 3;") && !limitedReport.contains("Policy detail 3 applies."),
                 "verification receives only the requested number of excerpts under finite limits");
-        require(limitedPrompt.contains("The CLI attempts at most 2 file or Maven requests.")
+        require(limitedPrompt.contains("The CLI attempts at most 2 file or language requests.")
                 && limitedPrompt.contains("The CLI processes at most 2 knowledge queries."), "configured limits reach the model prompt");
     }
 
@@ -559,7 +559,7 @@ final class EvidenceTests {
                 "tracked knowledge is only supplied through scoped excerpts");
         require(scoped.coverage().contains("docs/approved-rules.md — diff: OMITTED (scoped knowledge document)"
                 + "; target file: OMITTED (scoped knowledge document)"), "excluded change remains in the coverage inventory");
-        var supplemental = new SupplementalEvidence(git, new MavenEvidence(git, executor, fixture.resolve("cache")))
+        var supplemental = new SupplementalEvidence(git, executor, java.util.Map.of("java", fixture.resolve("cache")))
                 .collect(scoped, "REQUEST_FILE|target|docs/approved-rules.md|all|Try reading the tracked knowledge file", 0, 0);
         require(supplemental.coverage().contains("Use a knowledge query for the scoped knowledge document")
                 && !supplemental.markdown().contains("发票在月末结算"), "raw follow-up read cannot bypass scoped selection");
@@ -572,7 +572,7 @@ final class EvidenceTests {
         git(executor, repo, "commit", "-qm", "rename the knowledge input");
         EvidenceBundle afterRename = collector.collect(git.resolve(options), null, InputDocument.read(renamed),
                 CliOptions.KnowledgeMode.SCOPED, 160_000);
-        var oldPath = new SupplementalEvidence(git, new MavenEvidence(git, executor, fixture.resolve("cache")))
+        var oldPath = new SupplementalEvidence(git, executor, java.util.Map.of("java", fixture.resolve("cache")))
                 .collect(afterRename, "REQUEST_FILE|base|docs/approved-rules.md|all|Try reading the previous path", 0, 0);
         require(oldPath.coverage().contains("Use a knowledge query for the scoped knowledge document"),
                 "base file path stays scoped after a rename");

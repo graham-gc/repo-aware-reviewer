@@ -12,3 +12,10 @@ compile_java_sources() {
     fi
     javac --release 21 "$@" "${sources[@]}"
 }
+
+copy_runtime_resources() {
+    local resources_dir=$1 destination_dir=$2
+    if [[ -d "$resources_dir" ]]; then
+        cp -R "$resources_dir/." "$destination_dir/"
+    fi
+}
