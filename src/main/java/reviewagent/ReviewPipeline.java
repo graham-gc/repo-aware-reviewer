@@ -28,7 +28,7 @@ final class ReviewPipeline {
     }
 
     private Path run(CliOptions options, CommandProgress progress) throws IOException, InterruptedException {
-        int totalSteps = options.prepareOnly() ? 3 : 7;
+        int totalSteps = options.prepareOnly() ? 3 : 9;
         progress.step(0, totalSteps, "Resolving Git review scope");
         GitClient git = new GitClient(options.repo(), executor);
         ReviewScope scope = git.resolve(options);
@@ -77,6 +77,14 @@ final class ReviewPipeline {
                     "[trigger]", "[impact]", "[source evidence]", "[diff relationship]");
             write(runDirectory.resolve("verify-prompt-template.md"),
                     prompts.verifyFinding(evidence, example, "[supplemental evidence]"));
+            write(runDirectory.resolve("adjudication-prompt-template.md"),
+                    prompts.adjudicate(evidence, example, List.of(), "[supplemental evidence]"));
+            if (requirement != null) {
+                write(runDirectory.resolve("requirement-assessment-prompt-template.md"),
+                        prompts.assessRequirements(evidence, "[supplemental evidence]", "[candidate verdicts]", "None", false));
+                write(runDirectory.resolve("requirement-audit-prompt-template.md"),
+                        prompts.assessRequirements(evidence, "[supplemental evidence]", "[candidate verdicts]", "[draft assessment]", true));
+            }
             write(runDirectory.resolve("report-prompt-template.md"),
                     prompts.finalizeReport(evidence, List.of(), "[discovery notes]", "[supplemental evidence]", "[verification results]"));
             progress.finish(totalSteps, "Evidence and prompts ready");
@@ -101,19 +109,17 @@ final class ReviewPipeline {
 
         progress.step(3, totalSteps, "Loading requested evidence");
         MavenEvidence maven = new MavenEvidence(git, executor, SupplementalEvidence.defaultMavenCache());
-        SupplementalEvidence.Result supplemental = new SupplementalEvidence(git, maven).collect(
-                evidence, candidates, options.maxSupplementalRequests(), options.maxKnowledgeQueries());
-        if (resume) {
-            requireMatchingResumeFile(runDirectory.resolve("supplemental-evidence.md"), supplemental.markdown(), false);
-        }
+        EvidenceSession supplemental = new EvidenceSession(evidence, new SupplementalEvidence(git, maven),
+                options.maxSupplementalRequests(), options.maxKnowledgeQueries());
+        boolean discoveryMaterial = supplemental.load(discoveryNotes.toString(), "Discovery evidence requests");
         write(runDirectory.resolve("scope.md"), scopeText);
         write(runDirectory.resolve("candidates.md"), candidates);
         write(runDirectory.resolve("supplemental-evidence.md"), supplemental.markdown());
-        StringBuilder coverage = new StringBuilder(evidence.coverage()).append(supplemental.coverage());
-        write(runDirectory.resolve("coverage.md"), coverage.toString());
+        ReviewQuality quality = new ReviewQuality(options, evidence, supplemental, prompts, agent, runDirectory, progress, totalSteps);
+        quality.saveEvidence();
 
         progress.step(4, totalSteps, "Reviewing supplemental evidence");
-        if (supplemental.hasMaterial()) {
+        if (discoveryMaterial) {
             EvidenceBundle augmented = new EvidenceBundle(evidence.scope(), evidence.changedFiles(),
                     evidence.markdown() + supplemental.markdown(), evidence.coverage(), 0, evidence.scopedKnowledge());
             String prompt = prompts.independentDiscovery(augmented, """
@@ -131,47 +137,42 @@ final class ReviewPipeline {
             discoveryNotes.append("\n## S1\n\n").append(parsed.notes());
             rawCandidates.append("\n## S1\n\n").append(response).append('\n');
             write(runDirectory.resolve("candidates.md"), rawCandidates.toString());
-            coverage.append("\nUnprocessed supplemental-discovery evidence requests: ")
-                    .append(EvidenceRequest.parse(response).size()).append(".\n");
+            supplemental.load(parsed.notes(), "Supplemental discovery evidence requests");
+            quality.saveEvidence();
         }
 
         progress.step(5, totalSteps, findings.isEmpty() ? "No candidate findings to verify"
                 : "Verifying candidate issues 0/" + findings.size());
-        var verificationTasks = findings.stream().map(finding -> new ReviewTasks.Task(finding.id(),
-                prompts.verifyFinding(evidence, finding, supplemental.markdown()),
-                reply -> ReviewOutput.verification(reply, finding, evidence.changedFiles()))).toList();
-        var verificationReplies = ReviewTasks.run(verificationTasks, agent, runDirectory.resolve("verification"),
-                options.reviewParallelism(), progress, 5, totalSteps, "Verifying candidate issues", resume);
-        var confirmed = new ArrayList<ReviewFinding>();
-        StringBuilder verificationCoverage = new StringBuilder("\n## Individual candidate verification\n\n");
-        for (ReviewFinding finding : findings) {
-            ReviewOutput.Verification result = ReviewOutput.verification(
-                    verificationReplies.get(finding.id()), finding, evidence.changedFiles());
-            verificationCoverage.append("- ").append(finding.id()).append(" — ").append(result.status())
-                    .append(". ").append(EvidenceText.oneLine(finding.title())).append(" (`")
-                    .append(EvidenceText.oneLine(finding.path())).append(':').append(finding.line()).append("`). ")
-                    .append(EvidenceText.oneLine(result.reason())).append('\n');
-            if (result.status() == ReviewOutput.Status.CONFIRMED) {
-                confirmed.add(result.confirmed());
-            }
-        }
-        verificationCoverage.append("\nCandidates: ").append(findings.size()).append(". Confirmed before deduplication: ")
-                .append(confirmed.size()).append(".\n");
-        coverage.append(verificationCoverage);
-        write(runDirectory.resolve("coverage.md"), coverage.toString());
+        List<ReviewOutput.Decision> preliminary = quality.verify(findings);
+        String verificationCoverage = ReviewQuality.coverage("Individual candidate verification", preliminary);
+        long preliminaryCount = preliminary.stream().filter(d -> d.verdict().status() == ReviewOutput.Status.CONFIRMED).count();
+        verificationCoverage += "\nCandidates: " + findings.size() + ". Confirmed before deduplication: " + preliminaryCount + ".\n";
+
+        progress.step(6, totalSteps, "Assessing and independently auditing requirements");
+        String assessment = quality.assess(requirement, verificationCoverage);
+
+        progress.step(7, totalSteps, "Reconciling verdicts before publication");
+        List<ReviewOutput.Decision> adjudicated = quality.adjudicate(preliminary, assessment);
+        verificationCoverage += ReviewQuality.coverage("Publication adjudication", adjudicated);
         OutputLanguage language = OutputLanguage.parse(options.language());
+        List<ReviewFinding> confirmed = adjudicated.stream()
+                .filter(d -> d.verdict().status() == ReviewOutput.Status.CONFIRMED)
+                .map(d -> ReviewQuality.publishedFinding(d, language)).toList();
         write(runDirectory.resolve("verified-findings.md"), confirmed.stream().map(finding -> finding.markdown(language))
                 .collect(java.util.stream.Collectors.joining()));
 
-        progress.step(6, totalSteps, "Deduplicating findings and preparing the report");
+        write(runDirectory.resolve("coverage.md"), evidence.coverage() + supplemental.coverage() + verificationCoverage);
+
+        progress.step(8, totalSteps, "Deduplicating findings and preparing the report");
         String reportPrompt = prompts.finalizeReport(evidence, confirmed, discoveryNotes.toString(),
-                supplemental.markdown(), verificationCoverage.toString());
+                supplemental.markdown(), verificationCoverage) + "\nAUDITED REQUIREMENT ASSESSMENT\n" + assessment;
         write(runDirectory.resolve("verify-prompt.md"), reportPrompt);
         var reportReplies = ReviewTasks.run(List.of(new ReviewTasks.Task("report", reportPrompt,
-                reply -> ReviewOutput.finalReport(reply, confirmed, language))), agent, runDirectory,
-                options.reviewParallelism(), progress, 6, totalSteps, "Finalizing report", resume);
+                reply -> ReviewOutput.finalReport(reply, confirmed, language, assessment))), agent, runDirectory,
+                options.reviewParallelism(), progress, 8, totalSteps, "Finalizing report", resume);
         String response = reportReplies.get("report");
-        String report = ReviewOutput.finalReport(response, confirmed, language);
+        String report = ReviewOutput.finalReport(response, confirmed, language, assessment)
+                + ReviewQuality.unresolved(preliminary, adjudicated, language);
         write(runDirectory.resolve("report.md"), report);
         progress.finish(totalSteps, "Wrote report.md");
         return runDirectory;

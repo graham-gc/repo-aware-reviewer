@@ -71,8 +71,12 @@ final class ReviewTasks {
             throws IOException, InterruptedException {
         Path responseFile = directory.resolve(task.id() + "-response.md");
         Path repairFile = directory.resolve(task.id() + "-repair-response.md");
+        Path promptFile = directory.resolve(task.id() + "-prompt.md");
         String response = null;
-        if (resume) {
+        boolean samePrompt = Files.isRegularFile(promptFile)
+                && Files.readString(promptFile, StandardCharsets.UTF_8).equals(task.prompt());
+        // A valid old verdict is not reusable when its instructions or supplied evidence have changed.
+        if (resume && samePrompt) {
             for (Path saved : List.of(responseFile, repairFile)) {
                 if (!Files.isRegularFile(saved)) {
                     continue;
@@ -95,7 +99,16 @@ final class ReviewTasks {
             }
         }
         if (response == null) {
-            Files.writeString(directory.resolve(task.id() + "-prompt.md"), task.prompt(), StandardCharsets.UTF_8);
+            // Invalidate before recording the new prompt: an interrupted invocation must not associate an
+            // old response (or repair) with the new evidence on the next resume.
+            if (!samePrompt) {
+                for (Path old : List.of(responseFile, repairFile, promptFile)) {
+                    if (Files.isRegularFile(old)) Files.move(old,
+                            old.resolveSibling(old.getFileName().toString().replace(task.id() + "-", task.id() + "-superseded-")),
+                            java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                }
+            }
+            Files.writeString(promptFile, task.prompt(), StandardCharsets.UTF_8);
             response = agent.invoke(task.prompt(), directory.resolve(task.id()));
             Files.writeString(responseFile, response, StandardCharsets.UTF_8);
         }

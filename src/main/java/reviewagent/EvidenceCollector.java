@@ -126,13 +126,16 @@ final class EvidenceCollector {
             int quota = diffBudget / (reviewChanges.size() - i);
             int overhead = EvidenceText.bytes(EvidenceText.block(title, "diff", ""));
             String patch = EvidenceText.linePrefix(change.patch(), quota - overhead);
+            int actualOverhead = EvidenceText.bytes(EvidenceText.block(title, "diff", patch)) - EvidenceText.bytes(patch);
+            if (actualOverhead > overhead) patch = EvidenceText.linePrefix(patch, quota - actualOverhead);
             if (patch.isEmpty()) {
                 diffOmitted++;
                 diffStatuses.add("OMITTED (byte budget)");
                 continue;
             }
-            out.append(EvidenceText.block(title, "diff", patch));
-            int bytes = overhead + EvidenceText.bytes(patch);
+            String block = EvidenceText.block(title, "diff", patch);
+            out.append(block);
+            int bytes = EvidenceText.bytes(block);
             diffBudget -= bytes;
             remaining -= bytes;
             if (!patch.equals(change.patch())) {
@@ -186,7 +189,7 @@ final class EvidenceCollector {
     }
 
     private String readBlock(String commit, String file, int quota) throws IOException, InterruptedException {
-        String title = EvidenceText.oneLine(file);
+        String title = EvidenceText.oneLine(file) + " at " + commit;
         int room = quota - EvidenceText.bytes(EvidenceText.block(title, "text", ""));
         if (room <= 0) {
             throw new IOException("No room in the evidence budget");
@@ -211,7 +214,7 @@ final class EvidenceCollector {
         }
         out.append("- Path: `").append(document.path()).append("`\n")
                 .append("- SHA-256: `").append(document.sha256()).append("`\n\n")
-                .append(document.content()).append("\n\n");
+                .append(EvidenceText.block(title + " — " + document.path(), "markdown", document.content()));
     }
 
 }

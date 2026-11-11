@@ -48,7 +48,7 @@ final class SupplementalEvidence {
         ScopedKnowledge.Result knowledge = evidence.scopedKnowledge() == null
                 ? new ScopedKnowledge.Result("", "", 0)
                 : evidence.scopedKnowledge().supplemental(parsed, evidence.supplementBudget() / 2, maxKnowledgeQueries);
-        String heading = "\n## Supplemental evidence requested during discovery\n\n";
+        String heading = "\n## Supplemental evidence requested by reviewers\n\n";
         StringBuilder coverage = new StringBuilder(heading);
         StringBuilder prompt = new StringBuilder(heading);
         int remaining = evidence.supplementBudget() - EvidenceText.bytes(heading + knowledge.markdown()) - 220;

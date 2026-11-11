@@ -165,7 +165,7 @@ final class EvidenceTests {
                         esac
                         printf '%s\\n' '</findings>' '```'
                         ;;
-                    'You are the independent candidate verification'*)
+                    'You are the independent candidate verification'*|'You are the independent publication adjudication'*)
                         case "$prompt" in
                             *'<finding id="R1-2">'*)
                                 printf '%s\\n' '```xml' '<verification><status>REJECTED</status><reason>An existing guard disproves the candidate.</reason></verification>' '```'
@@ -174,10 +174,13 @@ final class EvidenceTests {
                                 printf '%s\\n' '```xml' '<verification><status>INSUFFICIENT_EVIDENCE</status><reason>The required library semantics are unavailable.</reason></verification>' '```'
                                 ;;
                             *)
-                                finding=$(printf '%s\\n' "$prompt" | sed -n '/^<finding id=/p')
-                                printf '%s\\n' '```xml' '<verification><status>CONFIRMED</status><reason>Code supports the trigger and impact.</reason>' "$finding" '</verification>' '```'
+                                finding=$(printf '%s\\n' "$prompt" | sed -n '/^CANDIDATE TO VERIFY$/{n;p;}')
+                                printf '%s\\n' '```xml' '<verification><status>CONFIRMED</status><reason>Code supports the trigger and impact.</reason>' 'GROUNDING_XML' "$finding" '</verification>' '```'
                                 ;;
                         esac
+                        ;;
+                    'You are the candidate reconciliation'*)
+                        printf '%s\\n' '<candidate-groups><group><id>R1-1</id><id>R2-1</id></group><group><id>R1-2</id></group><group><id>R2-2</id></group><group><id>R3-1</id></group></candidate-groups>'
                         ;;
                     'You are the report consolidation'*)
                         printf '%s\\n' '# Review scope' '# Functional and business change' '# Findings' \
@@ -187,7 +190,8 @@ final class EvidenceTests {
                     *) exit 33 ;;
                 esac
                 """.replace("FIRST_XML", first).replace("REJECTED_XML", rejected).replace("DUPLICATE_XML", duplicate)
-                .replace("INSUFFICIENT_XML", insufficient).replace("SEPARATE_XML", separate);
+                .replace("INSUFFICIENT_XML", insufficient).replace("SEPARATE_XML", separate)
+                .replace("GROUNDING_XML", grounding("Z-small.java", "class ZSmall { int change = 7; }"));
         CliOptions options = CliOptions.parse(new String[]{"review", "--repo", repo.toString(), "--review-parallelism", "2",
                 "--output-dir", fixture.resolve("multi-review").toString(), "--agent-command", "/bin/sh", "--agent-arg", "-c",
                 "--agent-arg", stub, "--agent-arg", "multi-review-stub", "--agent-arg", signals.toString()});
@@ -495,7 +499,7 @@ final class EvidenceTests {
                             'REQUEST_KNOWLEDGE|运行 状态|Generic terms alone do not establish coverage'
                         printf '%s\\n' '```xml' '<findings/>' '```'
                         ;;
-                    'You are the independent candidate verification'*)
+                    'You are the independent candidate verification'*|'You are the independent publication adjudication'*)
                         case "$prompt" in
                             *'保留原来的回退路径'*'历史记录继续按原格式解码'*) ;;
                             *) exit 23 ;;
@@ -503,10 +507,13 @@ final class EvidenceTests {
                         case "$prompt" in
                             *'发票在月末结算'*|*'此段是超限证据标记'*|*'状态记录保留一天'*) exit 24 ;;
                         esac
-                        finding=$(printf '%s\\n' "$prompt" | sed -n '/^<finding id=/p')
+                        finding=$(printf '%s\\n' "$prompt" | sed -n '/^CANDIDATE TO VERIFY$/{n;p;}')
                         printf '%s\\n' '```xml' '<verification><status>CONFIRMED</status>' \
-                            '<reason>The changed contract conflicts with the supplied presence rule.</reason>' \
+                            '<reason>The changed contract conflicts with the supplied presence rule.</reason>' 'GROUNDING_XML' \
                             "$finding" '</verification>' '```'
+                        ;;
+                    'You are the candidate reconciliation'*)
+                        printf '%s\\n' '<candidate-groups><group><id>S1-1</id></group></candidate-groups>'
                         ;;
                     'You are the report consolidation'*)
                         printf '%s\\n' '# Review scope' '# Functional and business change' '# Findings' \
@@ -515,7 +522,8 @@ final class EvidenceTests {
                         ;;
                     *) exit 25 ;;
                 esac
-                """;
+                """.replace("GROUNDING_XML", grounding("contracts/shared.proto",
+                        "-message SharedEvent { optional string owner_key = 1; }\n+message SharedEvent { string owner_key = 1; }"));
         var options = CliOptions.parse(new String[]{"review", "--repo", repo.toString(),
                 "--knowledge", knowledge.toString(), "--knowledge-mode", "scoped",
                 "--output-dir", fixture.resolve("scoped-review").toString(),
@@ -529,7 +537,7 @@ final class EvidenceTests {
                 "unmatched behavior is recorded");
         require(coverage.lines().anyMatch(line -> line.contains("账务审计超限")
                 && line.contains("OMITTED (byte limit)")), "oversized section is omitted whole");
-        require(coverage.contains("Behavior queries processed: 6. Without supplied rules: 3. Invalid: 3"),
+        require(coverage.contains("Behavior queries processed: 6. Without supplied rules: 3. Invalid: 1"),
                 "joined valid queries recovered and the malformed query counted separately");
         require(coverage.contains("Invalid knowledge request on discovery output line "), "invalid query location recorded");
         require(coverage.contains("Match: exact endpoint /events/ack") && coverage.contains("运行 状态: NO MATCH"),
@@ -576,6 +584,12 @@ final class EvidenceTests {
         command.addAll(List.of(arguments));
         CommandResult result = executor.run(command, repo, null, Duration.ofSeconds(15));
         require(result.exitCode() == 0, "Git fixture: " + result.stderr());
+    }
+
+    private static String grounding(String source, String quote) {
+        return "<relation>INTRODUCED</relation><baseline>The diff adds the failing behavior.</baseline>"
+                + "<contract>The operation must preserve its invariant.</contract><citations><citation><source>"
+                + source + "</source><quote>" + quote + "</quote></citation></citations>";
     }
 
     private static void require(boolean condition, String description) {

@@ -273,7 +273,7 @@ final class ScopedKnowledge {
             if (supplied.contains(section.id())) {
                 return "ALREADY INCLUDED";
             }
-            String block = "### " + section.label() + "\n\n" + section.original() + "\n\n";
+            String block = EvidenceText.block(section.label(), "markdown", section.original());
             int bytes = EvidenceText.bytes(block);
             if (bytes > remaining) {
                 return "OMITTED (byte limit)";

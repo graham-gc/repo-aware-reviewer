@@ -26,7 +26,10 @@ final class EvidenceText {
     }
 
     static String block(String title, String language, String content) {
-        return "### " + title + "\n\n```" + language + "\n" + content + "\n```\n\n";
+        int longest = java.util.regex.Pattern.compile("`+").matcher(content).results()
+                .mapToInt(match -> match.group().length()).max().orElse(0);
+        String fence = "`".repeat(Math.max(3, longest + 1));
+        return "### " + title + "\n\n" + fence + language + "\n" + content + "\n" + fence + "\n\n";
     }
 
     static String oneLine(String value) {
