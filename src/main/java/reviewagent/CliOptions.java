@@ -83,7 +83,7 @@ record CliOptions(Path repo, String commit, String branch, String base, String r
         }
         if (!prepareOnly && agentCommand == null) {
             agentCommand = "claude";
-            agentArgs.add("-p");
+            agentArgs.addAll(AgentRunner.defaultArguments());
         }
         if (maxEvidenceBytes < 10_000) {
             throw new IllegalArgumentException("--max-evidence-bytes must be at least 10000");
@@ -93,6 +93,9 @@ record CliOptions(Path repo, String commit, String branch, String base, String r
         }
         if (reviewParallelism < 1) {
             throw new IllegalArgumentException("--review-parallelism must be at least 1");
+        }
+        if (timeout.isZero() || timeout.isNegative()) {
+            throw new IllegalArgumentException("--agent-timeout-seconds must be positive");
         }
         return new CliOptions(repo.toAbsolutePath().normalize(), commit, branch, base, range,
                 absolute(requirement), absolute(knowledge), knowledgeMode, outputDir.toAbsolutePath().normalize(), absolute(resumeDirectory),

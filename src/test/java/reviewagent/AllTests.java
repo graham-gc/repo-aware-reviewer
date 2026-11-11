@@ -2,6 +2,11 @@ package reviewagent;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.nio.file.Files;
+import java.nio.charset.StandardCharsets;
+import java.io.ByteArrayOutputStream;
+import java.io.PrintStream;
+import java.util.Comparator;
 import java.time.Duration;
 import java.util.List;
 
@@ -15,6 +20,8 @@ public final class AllTests {
         testPromptPolicy();
         testKnowledgeOptions();
         testAgentResponseEncoding();
+        testCommandDiagnostics();
+        testProgressStageElapsed();
         ReviewOutputTests.run();
         EvidenceTests.run();
         System.out.println("All tests passed");
@@ -56,7 +63,58 @@ public final class AllTests {
                 "knowledge", "generate", "--repo", "."
         });
         equal("claude", defaultBackend.agentCommand());
-        equal(java.util.List.of("-p"), defaultBackend.agentArgs());
+        List<String> expected = List.of("-p", "--tools", "", "--strict-mcp-config", "--mcp-config", "{\"mcpServers\":{}}");
+        equal(expected, defaultBackend.agentArgs());
+        equal(expected, CliOptions.parse(new String[]{"review", "--repo", "."}).agentArgs());
+        equal(List.of("-p"), CliOptions.parse(new String[]{"review", "--repo", ".", "--agent-command", "claude",
+                "--agent-arg", "-p"}).agentArgs());
+    }
+
+    private static void testCommandDiagnostics() throws Exception {
+        Path directory = Files.createTempDirectory("review-command-log-test-");
+        try {
+            Path prefix = directory.resolve("slow-agent");
+            var runner = new AgentRunner(new ProcessExecutor(), "/bin/sh",
+                    List.of("-c", "printf 'partial output\\n'; printf 'diagnostic message\\n' >&2; exec sleep 10"),
+                    directory, Duration.ofMillis(150));
+            try {
+                runner.invoke("prompt", prefix);
+                throw new AssertionError("Expected a model-command timeout");
+            } catch (IOException timeout) {
+                check(timeout.getMessage().contains("timed out"));
+            }
+            equal("partial output\n", Files.readString(directory.resolve("slow-agent-stdout.log")));
+            equal("diagnostic message\n", Files.readString(directory.resolve("slow-agent-stderr.log")));
+            check(Files.readString(directory.resolve("slow-agent-execution.log")).contains("exitCode=unavailable"));
+            Path completed = directory.resolve("completed-agent");
+            equal("done", shellAgent("cat").invoke("done", completed));
+            check(Files.readString(directory.resolve("completed-agent-execution.log")).contains("exitCode=0"));
+            equal("done", Files.readString(directory.resolve("completed-agent-stdout.log")));
+        } finally {
+            try (var paths = Files.walk(directory)) {
+                for (Path path : paths.sorted(Comparator.reverseOrder()).toList()) {
+                    Files.delete(path);
+                }
+            }
+        }
+        throwsArgument(() -> CliOptions.parse(new String[]{"review", "--repo", ".", "--agent-timeout-seconds", "0"}));
+        throwsArgument(() -> KnowledgeOptions.parse(new String[]{"knowledge", "generate", "--repo", ".", "--agent-timeout-seconds", "-1"}));
+    }
+
+    private static void testProgressStageElapsed() throws Exception {
+        var captured = new ByteArrayOutputStream();
+        try (var output = new PrintStream(captured, true, StandardCharsets.UTF_8);
+             var progress = new CommandProgress("elapsed-test", output)) {
+            progress.step(2, 7, "Reviewers 0/3");
+            Thread.sleep(1100);
+            progress.step(2, 7, "Reviewers 1/3");
+            String text = captured.toString(StandardCharsets.UTF_8);
+            check(text.matches("(?s).*(\\([1-9][0-9]*s\\) Reviewers 1/3|Reviewers 1/3 \\(still working, [1-9][0-9]*s elapsed\\)).*"));
+            int previousLength = captured.size();
+            progress.step(3, 7, "Collecting evidence");
+            String nextStage = captured.toString(StandardCharsets.UTF_8).substring(previousLength);
+            check(nextStage.contains("Collecting evidence") && !nextStage.contains("s elapsed"));
+        }
     }
 
     private static void testRangeParsing() {
