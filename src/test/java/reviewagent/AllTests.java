@@ -12,7 +12,6 @@ import java.util.List;
 
 public final class AllTests {
     public static void main(String[] args) throws Exception {
-        testRangeParsing();
         testCliDefaults();
         testRequestLimits();
         testReviewLanguage();
@@ -22,6 +21,7 @@ public final class AllTests {
         testAgentResponseEncoding();
         testCommandDiagnostics();
         testProgressStageElapsed();
+        GitScopeTests.run();
         ReviewOutputTests.run();
         EvidenceTests.run();
         ReviewQualityTests.run();
@@ -125,13 +125,6 @@ public final class AllTests {
         }
     }
 
-    private static void testRangeParsing() {
-        String[] parts = GitClient.splitRange("main..feature");
-        equal("main", parts[0]);
-        equal("feature", parts[1]);
-        throwsArgument(() -> GitClient.splitRange("main...feature"));
-    }
-
     private static void testCliDefaults() {
         CliOptions options = CliOptions.parse(new String[]{
                 "review", "--repo", ".", "--prepare-only"
@@ -168,6 +161,10 @@ public final class AllTests {
         throwsArgument(() -> CliOptions.parse(new String[]{
                 "review", "--repo", ".", "--commit", "HEAD", "--branch", "main", "--prepare-only"
         }));
+        throwsArgument(() -> CliOptions.parse(new String[]{"review", "--repo", ".", "--branch", "feature"}));
+        throwsArgument(() -> CliOptions.parse(new String[]{"review", "--repo", ".", "--base", "main"}));
+        throwsArgument(() -> CliOptions.parse(new String[]{"review", "--repo", ".", "--commit", "HEAD", "--base", "main"}));
+        throwsArgument(() -> CliOptions.parse(new String[]{"review", "--repo", ".", "--range", "main..HEAD"}));
     }
 
     private static void testReviewLanguage() {

@@ -50,10 +50,9 @@ Review reports default to English. Add `--language zh-CN` for Simplified Chinese
 Add `--knowledge-mode scoped` to load relevant sections from the supplied knowledge base. The CLI keeps Markdown sections intact and prioritizes changed repository paths, API paths, and code identifiers. It also includes sections titled `Global rules` or `全局规则`. Discovery can request more sections for specific behavior changes. The file can live outside the repository. If the same file appears in the reviewed diff, the CLI records its change in `coverage.md` and supplies its content through scoped excerpts. The default mode, `full`, supplies the whole document.
 
 - `--commit <ref>` reviews a commit against its first parent. It defaults to `HEAD` and requires that parent to be available locally.
-- `--branch <ref> --base <ref>` reviews the branch from its merge base with the baseline.
-- `--range BASE..TARGET` compares two explicit revisions.
+- `--branch <target-ref> --base <base-ref>` directly compares the specified baseline and target snapshots, equivalent to `git diff BASE TARGET`. Both accept branch names, tags, or commit IDs. These options must be supplied together and cannot be combined with `--commit`.
 
-The evidence bundle takes repository review rules from the resolved base commit.
+The CLI reads locally available Git revisions without fetching or switching branches. The evidence bundle takes repository review rules from the specified baseline commit, or the target's first parent in single-commit mode.
 
 Three independent reviewers examine correctness and regressions, requirements and business contracts, and boundary conditions and security. Their evidence requests are combined and deduplicated. When new evidence is supplied, another pass checks it for additional candidates. Each candidate then receives separate verification and can request further code, dependency evidence, or knowledge excerpts when a decisive link is missing.
 

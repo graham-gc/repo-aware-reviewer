@@ -5,7 +5,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 
-record CliOptions(Path repo, String commit, String branch, String base, String range,
+record CliOptions(Path repo, String commit, String branch, String base,
                   Path requirement, Path knowledge, KnowledgeMode knowledgeMode, Path outputDir, Path resumeDirectory,
                   String agentCommand, List<String> agentArgs,
                   boolean prepareOnly, int maxEvidenceBytes, int maxSupplementalRequests, int maxKnowledgeQueries,
@@ -30,7 +30,6 @@ record CliOptions(Path repo, String commit, String branch, String base, String r
         String commit = null;
         String branch = null;
         String base = null;
-        String range = null;
         Path requirement = null;
         Path knowledge = null;
         KnowledgeMode knowledgeMode = KnowledgeMode.FULL;
@@ -53,7 +52,6 @@ record CliOptions(Path repo, String commit, String branch, String base, String r
                 case "--commit" -> commit = value(args, ++i, "--commit");
                 case "--branch" -> branch = value(args, ++i, "--branch");
                 case "--base" -> base = value(args, ++i, "--base");
-                case "--range" -> range = value(args, ++i, "--range");
                 case "--requirement" -> requirement = Path.of(value(args, ++i, "--requirement"));
                 case "--knowledge" -> knowledge = Path.of(value(args, ++i, "--knowledge"));
                 case "--knowledge-mode" -> knowledgeMode = KnowledgeMode.parse(value(args, ++i, "--knowledge-mode"));
@@ -84,9 +82,14 @@ record CliOptions(Path repo, String commit, String branch, String base, String r
         if (knowledgeMode == KnowledgeMode.SCOPED && knowledge == null) {
             throw new IllegalArgumentException("--knowledge-mode scoped requires --knowledge");
         }
-        int scopes = (commit != null ? 1 : 0) + (branch != null ? 1 : 0) + (range != null ? 1 : 0);
-        if (scopes > 1) {
-            throw new IllegalArgumentException("Use only one of --commit, --branch, or --range");
+        if (commit != null && branch != null) {
+            throw new IllegalArgumentException("Use only one of --commit or --branch");
+        }
+        if (branch != null && base == null) {
+            throw new IllegalArgumentException("--branch requires --base");
+        }
+        if (base != null && branch == null) {
+            throw new IllegalArgumentException("--base requires --branch; use --branch <target-ref> --base <base-ref> to compare revisions");
         }
         if (!prepareOnly && agentCommand == null) {
             agentCommand = "claude";
@@ -104,7 +107,7 @@ record CliOptions(Path repo, String commit, String branch, String base, String r
         if (timeout.isZero() || timeout.isNegative()) {
             throw new IllegalArgumentException("--agent-timeout-seconds must be positive");
         }
-        return new CliOptions(repo.toAbsolutePath().normalize(), commit, branch, base, range,
+        return new CliOptions(repo.toAbsolutePath().normalize(), commit, branch, base,
                 absolute(requirement), absolute(knowledge), knowledgeMode, outputDir.toAbsolutePath().normalize(), absolute(resumeDirectory),
                 agentCommand, List.copyOf(agentArgs), prepareOnly, maxEvidenceBytes,
                 maxSupplementalRequests, maxKnowledgeQueries, reviewParallelism, timeout, language,
