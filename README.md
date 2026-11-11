@@ -61,7 +61,7 @@ Three independent reviewers examine correctness and regressions, requirements an
 
 Each model process has a default timeout of 900 seconds, configurable with `--agent-timeout-seconds`. Review task artifacts include `*-stdout.log`, `*-stderr.log`, and `*-execution.log` with elapsed time and exit status. Output logs are preserved when a command times out. Progress elapsed time covers the current stage across completed subtasks.
 
-Structured replies accept raw XML and fenced XML. Invalid structured replies get one format-correction attempt, with the original and corrected responses saved. To continue an interrupted run, repeat its review command with `--resume /path/to/run-directory`. Valid saved results are reused and missing or invalid tasks are continued. The resolved scope, input documents, and collected evidence must match the saved run. Concurrency may be changed when resuming.
+Structured replies accept raw XML and fenced XML. A redundant wrapper around a single finding is normalized before field and identity validation. Invalid structured replies get one format-correction attempt, with the original and corrected responses saved. To continue an interrupted run, repeat its review command with `--resume /path/to/run-directory`. Saved original and corrected replies are checked for a reusable result before making another model call. Missing or invalid tasks are continued. The resolved scope, input documents, and collected evidence must match the saved run. Concurrency may be changed when resuming.
 
 ## GitHub pull request reviews
 

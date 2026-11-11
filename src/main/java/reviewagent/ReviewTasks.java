@@ -70,10 +70,31 @@ final class ReviewTasks {
     private static String invoke(Task task, AgentRunner agent, Path directory, boolean resume)
             throws IOException, InterruptedException {
         Path responseFile = directory.resolve(task.id() + "-response.md");
-        String response;
-        if (resume && Files.isRegularFile(responseFile)) {
-            response = Files.readString(responseFile, StandardCharsets.UTF_8);
-        } else {
+        Path repairFile = directory.resolve(task.id() + "-repair-response.md");
+        String response = null;
+        if (resume) {
+            for (Path saved : List.of(responseFile, repairFile)) {
+                if (!Files.isRegularFile(saved)) {
+                    continue;
+                }
+                String cached = Files.readString(saved, StandardCharsets.UTF_8);
+                try {
+                    AgentRunner.validateResponse(cached);
+                    task.validator().validate(cached);
+                } catch (IOException invalid) {
+                    response = cached;
+                    continue;
+                }
+                if (!saved.equals(responseFile)) {
+                    if (response != null) {
+                        Files.writeString(directory.resolve(task.id() + "-invalid-response.md"), response, StandardCharsets.UTF_8);
+                    }
+                    Files.writeString(responseFile, cached, StandardCharsets.UTF_8);
+                }
+                return cached;
+            }
+        }
+        if (response == null) {
             Files.writeString(directory.resolve(task.id() + "-prompt.md"), task.prompt(), StandardCharsets.UTF_8);
             response = agent.invoke(task.prompt(), directory.resolve(task.id()));
             Files.writeString(responseFile, response, StandardCharsets.UTF_8);
@@ -91,7 +112,7 @@ final class ReviewTasks {
                     + "\n\nPREVIOUS RESPONSE\n" + response;
             Files.writeString(directory.resolve(task.id() + "-repair-prompt.md"), repairPrompt, StandardCharsets.UTF_8);
             String repaired = agent.invoke(repairPrompt, directory.resolve(task.id() + "-repair"));
-            Files.writeString(directory.resolve(task.id() + "-repair-response.md"), repaired, StandardCharsets.UTF_8);
+            Files.writeString(repairFile, repaired, StandardCharsets.UTF_8);
             try {
                 task.validator().validate(repaired);
             } catch (IOException stillInvalid) {

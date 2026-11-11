@@ -250,6 +250,24 @@ final class EvidenceTests {
                 && Files.exists(repairDirectory.resolve("repair-repair-response.md")),
                 "one format correction is saved and its valid result is reused without additional model calls");
 
+        Files.writeString(repairDirectory.resolve("repair-response.md"), "<invoke>invalid tool-call output</invoke>");
+        String savedRepair = Files.readString(repairDirectory.resolve("repair-repair-response.md"));
+        var unavailableAgent = new AgentRunner(new ProcessExecutor(), "/bin/sh", List.of("-c", "exit 99"),
+                fixture, Duration.ofSeconds(5));
+        try (var progress = new CommandProgress("repair-resume-test", new java.io.PrintStream(java.io.OutputStream.nullOutputStream()))) {
+            ReviewTasks.run(List.of(repairTask), unavailableAgent, repairDirectory, 1, progress, 1, 2,
+                    "Reusing saved format correction", true);
+        }
+        require(Files.readString(repairDirectory.resolve("repair-response.md")).equals(savedRepair),
+                "resume promotes a valid saved repair after the original response fails validation");
+        Files.delete(repairDirectory.resolve("repair-response.md"));
+        try (var progress = new CommandProgress("missing-original-test", new java.io.PrintStream(java.io.OutputStream.nullOutputStream()))) {
+            ReviewTasks.run(List.of(repairTask), unavailableAgent, repairDirectory, 1, progress, 1, 2,
+                    "Reusing repair with missing original", true);
+        }
+        require(Files.readString(repairDirectory.resolve("repair-response.md")).equals(savedRepair),
+                "resume recovers from a saved repair when the original response is missing");
+
         CliOptions prepare = CliOptions.parse(new String[]{"review", "--repo", repo.toString(), "--prepare-only",
                 "--output-dir", fixture.resolve("multi-prepare").toString()});
         Path prepared = new ReviewPipeline(new ProcessExecutor(), Clock.systemUTC()).run(prepare);

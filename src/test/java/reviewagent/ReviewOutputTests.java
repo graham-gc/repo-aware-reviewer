@@ -24,6 +24,15 @@ final class ReviewOutputTests {
         String verdict = "<verification><status>CONFIRMED</status><reason>Concrete source evidence.</reason>"
                 + ReviewOutput.findingXml(first) + "</verification>";
         require(ReviewOutput.verification(xml(verdict), first, List.of("a.cpp")).confirmed().equals(first), "confirmed verdict");
+        String firstXml = ReviewOutput.findingXml(first);
+        String nested = verdict.replace(firstXml, "<finding>" + firstXml + "</finding>");
+        require(ReviewOutput.verification(nested, first, List.of("a.cpp")).confirmed().equals(first),
+                "a single redundant finding wrapper preserves all verified fields");
+        fails(() -> ReviewOutput.verification(verdict.replace(firstXml,
+                "<finding id=\"other\">" + firstXml + "</finding>"), first, List.of("a.cpp")));
+        fails(() -> ReviewOutput.verification(verdict.replace(firstXml,
+                "<finding><impact>Different impact</impact>" + firstXml + "</finding>"), first, List.of("a.cpp")));
+        fails(() -> ReviewOutput.verification(verdict.replace(firstXml, firstXml + firstXml), first, List.of("a.cpp")));
         for (String wrapped : List.of(verdict, "Decision follows.\n" + verdict + "\nEnd.",
                 "> Example <verification/>\n" + verdict,
                 "```XML\n" + verdict + "\n```", "```\n" + verdict + "\n```", "~~~xml\n" + verdict + "\n~~~")) {
