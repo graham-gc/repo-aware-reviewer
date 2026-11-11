@@ -20,21 +20,11 @@ final class GitClient {
 
     ReviewScope resolve(CliOptions options) throws IOException, InterruptedException {
         requireRepository();
-        if (options.range() != null) {
-            String[] parts = splitRange(options.range());
-            String base = commit(parts[0]);
-            String target = commit(parts[1]);
-            return new ReviewScope(ReviewScope.Mode.RANGE, parts[0], parts[1], base, target, base + ".." + target);
-        }
         if (options.branch() != null) {
-            if (options.base() == null) {
-                throw new IllegalArgumentException("--branch requires --base so the branch baseline is explicit");
-            }
             String target = commit(options.branch());
-            String requestedBase = commit(options.base());
-            String mergeBase = oneLine("merge-base", requestedBase, target);
+            String base = commit(options.base());
             return new ReviewScope(ReviewScope.Mode.BRANCH, options.base(), options.branch(),
-                    mergeBase, target, mergeBase + ".." + target);
+                    base, target, base + ".." + target);
         }
         String requested = options.commit() == null ? "HEAD" : options.commit();
         String target = commit(requested);
@@ -179,14 +169,6 @@ final class GitClient {
 
     private CommandResult execute(List<String> command) throws IOException, InterruptedException {
         return executor.run(command, repository, null, Duration.ofSeconds(30));
-    }
-
-    static String[] splitRange(String value) {
-        int separator = value.indexOf("..");
-        if (separator <= 0 || separator + 2 >= value.length() || value.indexOf("...", separator) >= 0) {
-            throw new IllegalArgumentException("--range must use BASE..TARGET");
-        }
-        return new String[]{value.substring(0, separator), value.substring(separator + 2)};
     }
 
 }
