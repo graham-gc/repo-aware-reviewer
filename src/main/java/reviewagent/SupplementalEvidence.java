@@ -9,11 +9,10 @@ import java.util.Locale;
 import java.util.Set;
 
 final class SupplementalEvidence {
-    private static final int MAX_REQUESTS = 8;
     private static final int MAX_SOURCE_BYTES = 1_000_000;
     private static final Set<String> BLOCKED_COMPONENTS = Set.of("", ".", "..", ".git", ".claude", ".idea", ".aws", ".ssh");
 
-    record Result(String markdown, String coverage) {
+    record Result(String markdown, String coverage, boolean hasMaterial) {
     }
 
     private record Excerpt(String markdown, String status) {
@@ -27,7 +26,8 @@ final class SupplementalEvidence {
         this.maven = maven;
     }
 
-    Result collect(EvidenceBundle evidence, String candidates) throws InterruptedException {
+    Result collect(EvidenceBundle evidence, String candidates, int maxRequests, int maxKnowledgeQueries)
+            throws InterruptedException {
         var requests = new LinkedHashMap<List<String>, String[]>();
         var invalidLines = new ArrayList<Integer>();
         List<EvidenceRequest> parsed = EvidenceRequest.parse(candidates);
@@ -46,20 +46,20 @@ final class SupplementalEvidence {
         }
 
         ScopedKnowledge.Result knowledge = evidence.scopedKnowledge() == null
-                ? new ScopedKnowledge.Result("", "")
-                : evidence.scopedKnowledge().supplemental(parsed, evidence.supplementBudget() / 2);
+                ? new ScopedKnowledge.Result("", "", 0)
+                : evidence.scopedKnowledge().supplemental(parsed, evidence.supplementBudget() / 2, maxKnowledgeQueries);
         String heading = "\n## Supplemental evidence requested during discovery\n\n";
         StringBuilder coverage = new StringBuilder(heading);
         StringBuilder prompt = new StringBuilder(heading);
         int remaining = evidence.supplementBudget() - EvidenceText.bytes(heading + knowledge.markdown()) - 220;
         int processed = 0;
-        int total = Math.min(requests.size(), MAX_REQUESTS);
+        int total = maxRequests == 0 ? requests.size() : Math.min(requests.size(), maxRequests);
         int included = 0;
         for (String[] fields : requests.values()) {
             if (processed == total) {
                 break;
             }
-            int quota = remaining / (total - processed++);
+            int quota = Math.min(remaining, Math.max(256, remaining / (total - processed++)));
             String revision = fields[1].equals("base") ? evidence.scope().baseCommit() : evidence.scope().targetCommit();
             String label = fields[1] + " " + EvidenceText.oneLine(fields[2]) + " " + EvidenceText.oneLine(fields[3]);
             String status;
@@ -101,7 +101,7 @@ final class SupplementalEvidence {
         String summary = "\nSupplemental requests included: " + included + "/" + processed + ". Invalid: " + invalidLines.size()
                 + ". Skipped by request limit: " + (requests.size() - processed) + ". See `coverage.md` for details.\n";
         return new Result(prompt.append(summary).append(knowledge.markdown()).toString(),
-                coverage.append(summary).append(knowledge.coverage()).toString());
+                coverage.append(summary).append(knowledge.coverage()).toString(), included > 0 || knowledge.suppliedSections() > 0);
     }
 
     private Excerpt repositoryFile(String revision, String path, String selector, int quota)

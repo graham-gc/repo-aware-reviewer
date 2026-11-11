@@ -8,7 +8,8 @@ import java.util.List;
 record CliOptions(Path repo, String commit, String branch, String base, String range,
                   Path requirement, Path knowledge, KnowledgeMode knowledgeMode, Path outputDir,
                   String agentCommand, List<String> agentArgs,
-                  boolean prepareOnly, int maxEvidenceBytes, Duration agentTimeout, String language) {
+                  boolean prepareOnly, int maxEvidenceBytes, int maxSupplementalRequests, int maxKnowledgeQueries,
+                  int reviewParallelism, Duration agentTimeout, String language) {
     enum KnowledgeMode {
         FULL, SCOPED;
 
@@ -38,6 +39,9 @@ record CliOptions(Path repo, String commit, String branch, String base, String r
         List<String> agentArgs = new ArrayList<>();
         boolean prepareOnly = false;
         int maxEvidenceBytes = 1_000_000;
+        int maxSupplementalRequests = 0;
+        int maxKnowledgeQueries = 0;
+        int reviewParallelism = 3;
         Duration timeout = Duration.ofMinutes(15);
         String language = "en";
 
@@ -56,6 +60,9 @@ record CliOptions(Path repo, String commit, String branch, String base, String r
                 case "--agent-arg" -> agentArgs.add(value(args, ++i, "--agent-arg"));
                 case "--prepare-only" -> prepareOnly = true;
                 case "--max-evidence-bytes" -> maxEvidenceBytes = Integer.parseInt(value(args, ++i, "--max-evidence-bytes"));
+                case "--max-supplemental-requests" -> maxSupplementalRequests = Integer.parseInt(value(args, ++i, "--max-supplemental-requests"));
+                case "--max-knowledge-queries" -> maxKnowledgeQueries = Integer.parseInt(value(args, ++i, "--max-knowledge-queries"));
+                case "--review-parallelism" -> reviewParallelism = Integer.parseInt(value(args, ++i, "--review-parallelism"));
                 case "--agent-timeout-seconds" -> timeout = Duration.ofSeconds(Long.parseLong(value(args, ++i, "--agent-timeout-seconds")));
                 case "--language" -> language = OutputLanguage.parse(value(args, ++i, "--language")).code();
                 default -> throw new IllegalArgumentException("Unknown option: " + args[i]);
@@ -79,9 +86,16 @@ record CliOptions(Path repo, String commit, String branch, String base, String r
         if (maxEvidenceBytes < 10_000) {
             throw new IllegalArgumentException("--max-evidence-bytes must be at least 10000");
         }
+        if (maxSupplementalRequests < 0 || maxKnowledgeQueries < 0) {
+            throw new IllegalArgumentException("Request count limits must be non-negative (0 means unlimited)");
+        }
+        if (reviewParallelism < 1) {
+            throw new IllegalArgumentException("--review-parallelism must be at least 1");
+        }
         return new CliOptions(repo.toAbsolutePath().normalize(), commit, branch, base, range,
                 absolute(requirement), absolute(knowledge), knowledgeMode, outputDir.toAbsolutePath().normalize(),
-                agentCommand, List.copyOf(agentArgs), prepareOnly, maxEvidenceBytes, timeout, language);
+                agentCommand, List.copyOf(agentArgs), prepareOnly, maxEvidenceBytes,
+                maxSupplementalRequests, maxKnowledgeQueries, reviewParallelism, timeout, language);
     }
 
     private static Path absolute(Path path) {
