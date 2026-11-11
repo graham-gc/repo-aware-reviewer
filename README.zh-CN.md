@@ -97,7 +97,7 @@ Action 的 `language` 参数默认是 `en`。示例工作流从可选仓库变�
 
 ## 输出与限制
 
-进度写到 stderr，在交互式终端中原地刷新一行，重定向时按普通日志逐行输出。两个命令成功后把本次运行目录写到 stdout。默认输出目录是 `review-output/` 和 `knowledge-output/`，可用 `--output-dir` 更改。任一命令加上 `--prepare-only`，即可在本地保存证据和提示词，无需调用模型。
+进度按已完成阶段显示百分比，写到 stderr，在交互式终端中原地刷新一行，重定向时按普通日志逐行输出。等待模型时只更新耗时，百分比保持不变。构建和测试脚本也使用百分比显示。两个命令成功后把本次运行目录写到 stdout。默认输出目录是 `review-output/` 和 `knowledge-output/`，可用 `--output-dir` 更改。任一命令加上 `--prepare-only`，即可在本地保存证据和提示词，无需调用模型。
 
 - `review` 生成 `report.md`。`scope.md` 记录实际提交、输入哈希和并行设置，`evidence.md` 保存证据，`coverage.md` 记录证据缺口及每个候选的复核状态。`discovery/`、`verification/`、`adjudication/` 和 `assessment/` 保存各次调用的提示词及回复，追加轮次保存在子目录。`supplemental-evidence.md` 保存各轮补读材料；传入需求文档时，`requirement-assessment.md` 保存审计后的验收结论。`verified-findings.md` 保存通过发布裁决、尚未去重的候选，`report-response.md` 保留汇总原文。格式纠正后仍未通过结构校验时，本轮审查会报错。
 - `knowledge generate` 生成 `candidate-knowledge.md`。可查看 `inventory.md` 了解哪些文件被纳入或跳过。两种流程都会在本地保存各自的证据。

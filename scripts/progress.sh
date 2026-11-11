@@ -7,8 +7,9 @@ progress_render() {
     local label=$1 completed=$2 total=$3 message=$4
     local finished=$5
     local filled=$((10 * completed / total))
+    local percent=$((100 * completed / total))
     local full='##########' empty='----------'
-    local line="[$label] [${full:0:filled}${empty:filled}] $completed/$total $message"
+    local line="[$label] [${full:0:filled}${empty:filled}] $percent% $message"
     if progress_is_live; then
         local size columns
         size=$(stty size <&2 2>/dev/null) || size=''

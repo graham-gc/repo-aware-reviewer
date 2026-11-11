@@ -52,7 +52,7 @@ final class ReviewTasks {
                 for (int completed = 1; completed <= tasks.size(); completed++) {
                     Reply reply = completions.take().get();
                     replies.put(reply.id(), reply.response());
-                    progress.step(stage, stages, description + " " + completed + "/" + tasks.size());
+                    progress.step(stage, stages, description + " (" + completed + " of " + tasks.size() + " complete)");
                 }
                 var ordered = new LinkedHashMap<String, String>();
                 tasks.forEach(task -> ordered.put(task.id(), replies.get(task.id())));
