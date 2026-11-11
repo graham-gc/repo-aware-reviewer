@@ -5,7 +5,9 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
 final class GitClient {
     private final Path repository;
@@ -42,6 +44,17 @@ final class GitClient {
     }
 
     record Change(String path, String previousPath, boolean deleted, String patch) {
+    }
+
+    Set<String> repositoryPaths(Path file) throws IOException, InterruptedException {
+        Path root = Path.of(oneLine("rev-parse", "--show-toplevel")).toRealPath();
+        var paths = new LinkedHashSet<String>();
+        for (Path candidate : List.of(file.toAbsolutePath().normalize(), file.toRealPath())) {
+            if (candidate.startsWith(root)) {
+                paths.add(root.relativize(candidate).toString().replace(java.io.File.separatorChar, '/'));
+            }
+        }
+        return paths;
     }
 
     private record ChangedPath(char status, String previousPath, String path) {

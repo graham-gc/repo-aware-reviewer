@@ -3,9 +3,11 @@ package reviewagent;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 final class EvidenceCollector {
     private static final List<String> BASELINE_RULE_FILES = List.of("AGENTS.md", "CLAUDE.md", "REVIEW.md");
+    private static final String SCOPED_DOCUMENT = "OMITTED (scoped knowledge document)";
     private static final List<String> DEPENDENCY_FILES = List.of(
             "pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts",
             "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",
@@ -34,34 +36,55 @@ final class EvidenceCollector {
                 .append("- Diff: `").append(scope.diffExpression()).append("`\n\n");
 
         appendDocument(out, "External requirement", requirement);
-        ScopedKnowledge scopedKnowledge = null;
+        ScopedKnowledge scopedKnowledge;
+        Set<String> scopedPaths = Set.of();
         if (knowledgeMode == CliOptions.KnowledgeMode.SCOPED) {
-            scopedKnowledge = new ScopedKnowledge(knowledge);
+            scopedPaths = git.repositoryPaths(knowledge.path());
+            // A rename patch contains both versions. Keep both paths out of raw file evidence.
+            for (GitClient.Change change : changes) {
+                if (change.previousPath() != null
+                        && (scopedPaths.contains(change.path()) || scopedPaths.contains(change.previousPath()))) {
+                    scopedPaths.add(change.path());
+                    scopedPaths.add(change.previousPath());
+                }
+            }
+            scopedKnowledge = new ScopedKnowledge(knowledge, scopedPaths);
         } else {
+            scopedKnowledge = null;
             appendDocument(out, "Human-maintained knowledge base", knowledge);
         }
 
         out.append("## Review instructions from trusted base\n\n");
         boolean foundRule = false;
         for (String file : BASELINE_RULE_FILES) {
-            if (git.existsAt(scope.baseCommit(), file)) {
+            if (!scopedPaths.contains(file) && git.existsAt(scope.baseCommit(), file)) {
                 foundRule = true;
                 out.append(EvidenceText.block(file + " at base", "text",
                         git.regularBlobAt(scope.baseCommit(), file, initialBudget)));
             }
         }
         if (!foundRule) {
-            out.append("No repository review instruction file was found at the base commit.\n\n");
+            out.append("No base-version repository review instructions were supplied.\n\n");
         }
 
-        int remaining = initialBudget - EvidenceText.bytes(out.toString()) - 512;
+        List<GitClient.Change> reviewChanges = new ArrayList<>();
+        StringBuilder scopedChanges = new StringBuilder();
+        for (GitClient.Change change : changes) {
+            if (scopedPaths.contains(change.path())) {
+                scopedChanges.append("- ").append(EvidenceText.oneLine(change.path())).append(" — ")
+                        .append(SCOPED_DOCUMENT).append('\n');
+            } else {
+                reviewChanges.add(change);
+            }
+        }
+        int remaining = initialBudget - EvidenceText.bytes(out.toString() + scopedChanges) - 512;
         if (remaining < 512) {
             throw new IllegalArgumentException("Required documents and baseline rules leave too little room for code evidence; "
                     + "increase --max-evidence-bytes or use smaller input documents");
         }
         String knowledgeCoverage = "";
         if (scopedKnowledge != null) {
-            ScopedKnowledge.Result selection = scopedKnowledge.initial(changes, remaining / 4);
+            ScopedKnowledge.Result selection = scopedKnowledge.initial(reviewChanges, remaining / 4);
             out.append(selection.markdown());
             knowledgeCoverage = selection.coverage();
             remaining -= EvidenceText.bytes(selection.markdown());
@@ -70,7 +93,7 @@ final class EvidenceCollector {
         int manifestBudget = Math.min(remaining / 8, 48_000);
         List<String> omittedManifests = new ArrayList<>();
         for (String file : DEPENDENCY_FILES) {
-            if (!file.contains("*") && git.existsAt(scope.targetCommit(), file)) {
+            if (!scopedPaths.contains(file) && !file.contains("*") && git.existsAt(scope.targetCommit(), file)) {
                 String block;
                 try {
                     block = readBlock(scope.targetCommit(), file, manifestBudget);
@@ -88,15 +111,19 @@ final class EvidenceCollector {
                     .append(String.join(", ", omittedManifests)).append(".\n\n");
         }
         out.append("## Git diff by changed file\n\n");
+        out.append(scopedChanges);
+        if (!scopedChanges.isEmpty()) {
+            out.append('\n');
+        }
         int diffBudget = (int) (remaining * 2L / 3);
         int diffComplete = 0;
         int diffPartial = 0;
-        int diffOmitted = 0;
+        int diffOmitted = changes.size() - reviewChanges.size();
         List<String> diffStatuses = new ArrayList<>();
-        for (int i = 0; i < changes.size(); i++) {
-            GitClient.Change change = changes.get(i);
+        for (int i = 0; i < reviewChanges.size(); i++) {
+            GitClient.Change change = reviewChanges.get(i);
             String title = EvidenceText.oneLine(change.path());
-            int quota = diffBudget / (changes.size() - i);
+            int quota = diffBudget / (reviewChanges.size() - i);
             int overhead = EvidenceText.bytes(EvidenceText.block(title, "diff", ""));
             String patch = EvidenceText.linePrefix(change.patch(), quota - overhead);
             if (patch.isEmpty()) {
@@ -121,9 +148,14 @@ final class EvidenceCollector {
         }
 
         out.append("## Target-version changed-file context\n\n");
-        for (int i = 0; i < changes.size(); i++) {
-            GitClient.Change change = changes.get(i);
+        int index = 0;
+        for (GitClient.Change change : changes) {
             String file = change.path();
+            if (scopedPaths.contains(file)) {
+                coverage.append("- ").append(EvidenceText.oneLine(file)).append(" — diff: ")
+                        .append(SCOPED_DOCUMENT).append("; target file: ").append(SCOPED_DOCUMENT).append('\n');
+                continue;
+            }
             String context;
             if (binaryPatch(change.patch())) {
                 context = "OMITTED (binary)";
@@ -131,7 +163,7 @@ final class EvidenceCollector {
                 context = "NOT APPLICABLE (deleted)";
             } else {
                 try {
-                    String block = readBlock(scope.targetCommit(), file, remaining / (changes.size() - i));
+                    String block = readBlock(scope.targetCommit(), file, remaining / (reviewChanges.size() - index));
                     out.append(block);
                     remaining -= EvidenceText.bytes(block);
                     context = "INCLUDED";
@@ -140,7 +172,7 @@ final class EvidenceCollector {
                 }
             }
             coverage.append("- ").append(EvidenceText.oneLine(file)).append(" — diff: ")
-                    .append(diffStatuses.get(i)).append("; target file: ").append(context).append('\n');
+                    .append(diffStatuses.get(index++)).append("; target file: ").append(context).append('\n');
         }
         String summary = "## Evidence coverage and verification status\n\n"
                 + "Changed files: " + changes.size() + ". Complete diff: " + diffComplete

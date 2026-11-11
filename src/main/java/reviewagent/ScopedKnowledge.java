@@ -2,13 +2,16 @@ package reviewagent;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 final class ScopedKnowledge {
     private static final int MAX_BYTES_PER_PASS = 24_000;
@@ -23,6 +26,9 @@ final class ScopedKnowledge {
     private static final Pattern SETEXT_TITLE = Pattern.compile("^ {0,3}(?![>#+*~-]|\\d+[.)]\\s)\\S.*$");
     private static final Pattern CODE_SYMBOL = Pattern.compile(
             "\\b[A-Za-z][A-Za-z0-9]*(?:[a-z0-9][A-Z]|_[A-Za-z0-9])[A-Za-z0-9_]*\\b");
+    private static final Pattern ENDPOINT = Pattern.compile(
+            "(?<![\\p{L}\\p{N}_./:#-])/(?:[A-Za-z0-9_{}:-]+/)*[A-Za-z0-9_{}:-]+(?![\\p{L}\\p{N}_./-])");
+    private static final Pattern PROSE_FILE = Pattern.compile("(?i).+\\.(?:md|mdx|markdown|rst|adoc|txt)$");
     private static final Pattern TERM = Pattern.compile("\\p{IsHan}+|[\\p{L}\\p{N}_$&&[^\\p{IsHan}]]+");
     private static final Set<String> GLOBAL_TITLES = Set.of("global", "global rules", "cross-cutting rules",
             "全局规则", "全局业务规则", "全局约束", "通用规则");
@@ -30,6 +36,8 @@ final class ScopedKnowledge {
     private static final Set<String> STOP_TERMS = Set.of("and", "are", "for", "the", "that", "this",
             "from", "into", "with", "when", "must", "should", "change", "changes", "behavior", "rule",
             "rules", "业务", "规则", "变更", "适用", "必须", "需要", "以及", "是否");
+    private static final Set<String> GENERIC_TERMS = Set.of("run", "running", "status", "request", "response", "data",
+            "result", "运行", "状态", "请求", "响应", "数据", "结果", "流程", "通过");
 
     record Result(String markdown, String coverage) {
     }
@@ -38,7 +46,7 @@ final class ScopedKnowledge {
     }
 
     private record Section(String id, String title, int firstLine, int lastLine, String original,
-                           Set<String> terms, Set<String> titleTerms) {
+                           Set<String> terms, Set<String> titleTerms, Set<String> endpoints, Set<String> identifiers) {
         String label() {
             return id + " — " + EvidenceText.oneLine(title) + " (lines " + firstLine + "–" + lastLine + ")";
         }
@@ -51,12 +59,22 @@ final class ScopedKnowledge {
     }
 
     private final InputDocument document;
+    private final Set<String> sourcePaths;
     private final List<Section> sections;
+    private final Map<String, Integer> termFrequency = new HashMap<>();
     private final Set<String> supplied = new HashSet<>();
 
-    ScopedKnowledge(InputDocument document) {
+    ScopedKnowledge(InputDocument document, Set<String> sourcePaths) {
         this.document = document;
+        this.sourcePaths = Set.copyOf(sourcePaths);
         this.sections = sections(document.content());
+        for (Section section : sections) {
+            section.terms().forEach(term -> termFrequency.merge(term, 1, Integer::sum));
+        }
+    }
+
+    boolean isSourcePath(String path) {
+        return sourcePaths.contains(path);
     }
 
     boolean containsHanText() {
@@ -68,26 +86,44 @@ final class ScopedKnowledge {
         var matches = new LinkedHashMap<String, Match>();
         for (Section section : sections) {
             if (GLOBAL_TITLES.contains(normalize(section.title()))) {
-                matches.put(section.id(), new Match(section, 3, "explicit global heading"));
+                matches.put(section.id(), new Match(section, 40, "explicit global heading"));
             }
         }
         StringBuilder coverage = new StringBuilder("\n## Scoped knowledge — initial selection\n\n")
                 .append("Indexed sections: ").append(sections.size()).append(".\n\n");
         for (GitClient.Change change : changes) {
             Pattern paths = changedPaths(change);
-            Set<String> symbols = changedSymbols(change);
+            Set<String> symbols = new LinkedHashSet<>();
+            Set<String> endpoints = Set.of();
+            boolean prose = PROSE_FILE.matcher(change.path()).matches();
+            if (!prose) {
+                String edited = changedLines(change.patch());
+                endpoints = matches(ENDPOINT, edited);
+                addFileStem(symbols, change.path());
+                if (change.previousPath() != null) {
+                    addFileStem(symbols, change.previousPath());
+                }
+                CODE_SYMBOL.matcher(edited).results().map(match -> normalize(match.group()))
+                        .distinct().limit(128).forEach(symbols::add);
+            }
             int matched = 0;
             for (Section section : sections) {
                 var path = paths.matcher(section.original());
                 Match hit;
                 if (path.find()) {
-                    hit = new Match(section, 2, "changed path " + EvidenceText.oneLine(path.group()));
+                    hit = new Match(section, prose ? 15 : 30, "changed path " + EvidenceText.oneLine(path.group(1)));
                 } else {
-                    String symbol = symbols.stream().filter(section.terms()::contains).findFirst().orElse(null);
-                    if (symbol == null) {
-                        continue;
+                    String endpoint = endpoints.stream().filter(section.endpoints()::contains).sorted().findFirst().orElse(null);
+                    if (endpoint != null) {
+                        hit = new Match(section, 20, "changed endpoint " + endpoint);
+                    } else {
+                        String symbol = symbols.stream().filter(section.terms()::contains)
+                                .filter(term -> weight(term) > 0).max(Comparator.comparingInt(this::weight)).orElse(null);
+                        if (symbol == null) {
+                            continue;
+                        }
+                        hit = new Match(section, 10 + weight(symbol), "changed identifier " + symbol);
                     }
-                    hit = new Match(section, 1, "changed identifier " + symbol);
                 }
                 matches.merge(section.id(), hit, (first, second) -> first.score() >= second.score() ? first : second);
                 matched++;
@@ -111,18 +147,18 @@ final class ScopedKnowledge {
         return new Result(selection.markdown(summary), coverage.append(summary).toString());
     }
 
-    Result supplemental(String candidates, int budget) {
+    Result supplemental(List<EvidenceRequest> requests, int budget) {
         var queries = new LinkedHashMap<String, String>();
-        int invalid = 0;
-        for (String line : candidates.lines().toList()) {
-            String request = line.strip();
+        var invalidLines = new ArrayList<Integer>();
+        for (EvidenceRequest parsed : requests) {
+            String request = parsed.text();
             if (!request.startsWith(REQUEST)) {
                 continue;
             }
             String[] fields = request.split("\\|", 3);
             if (fields.length != 3 || fields[1].isBlank() || fields[1].length() > 160
                     || fields[2].isBlank() || request.length() > 700) {
-                invalid++;
+                invalidLines.add(parsed.line());
                 continue;
             }
             queries.putIfAbsent(normalize(fields[1]), fields[2].strip());
@@ -160,8 +196,11 @@ final class ScopedKnowledge {
         }
         long uncovered = lookups.stream().filter(lookup -> lookup.matches().stream()
                 .noneMatch(match -> supplied.contains(match.section().id()))).count();
+        for (int line : invalidLines) {
+            coverage.append("- Invalid knowledge request on discovery output line ").append(line).append(".\n");
+        }
         String summary = "\nBehavior queries processed: " + lookups.size() + ". Without supplied rules: " + uncovered
-                + ". Invalid: " + invalid
+                + ". Invalid: " + invalidLines.size()
                 + ". Skipped by query limit: " + (queries.size() - lookups.size())
                 + ". Supplemental rule excerpts supplied: " + selection.count + ".\n";
         if (lookups.isEmpty()) {
@@ -172,6 +211,8 @@ final class ScopedKnowledge {
 
     private List<Match> search(String query) {
         Set<String> queryTerms = terms(query);
+        Set<String> endpoints = matches(ENDPOINT, query);
+        long meaningfulTerms = queryTerms.stream().filter(term -> weight(term) > 0).count();
         boolean byId = query.matches("kb-[0-9]+");
         var matches = new ArrayList<Match>();
         for (Section section : sections) {
@@ -181,15 +222,38 @@ final class ScopedKnowledge {
                 }
                 continue;
             }
-            var overlap = queryTerms.stream().filter(section.terms()::contains).sorted().toList();
-            if (!overlap.isEmpty() && overlap.size() >= Math.min(2, queryTerms.size())) {
-                int score = overlap.size();
-                score += (int) overlap.stream().filter(section.titleTerms()::contains).count() * 2;
-                matches.add(new Match(section, score, String.join(", ", overlap.stream().limit(6).toList())));
+            var overlap = queryTerms.stream().filter(section.terms()::contains).filter(term -> weight(term) > 0)
+                    .sorted(Comparator.comparingInt(this::weight).reversed().thenComparing(Comparator.naturalOrder())).toList();
+            String endpoint = endpoints.stream().filter(section.endpoints()::contains).sorted().findFirst().orElse(null);
+            String identifier = overlap.stream().filter(section.identifiers()::contains).findFirst().orElse(null);
+            if (endpoint == null && identifier == null
+                    && (overlap.isEmpty() || overlap.size() < Math.min(2, meaningfulTerms))) {
+                continue;
             }
+            int score = overlap.stream().mapToInt(term -> weight(term) * (section.titleTerms().contains(term) ? 2 : 1)).sum();
+            if (queryTerms.stream().anyMatch(term -> GENERIC_TERMS.contains(term) && section.terms().contains(term))) {
+                score++;
+            }
+            String reason = String.join(", ", overlap.stream().limit(6).toList());
+            if (endpoint != null) {
+                score += 400;
+                reason = "exact endpoint " + endpoint;
+            } else if (identifier != null) {
+                score += 100;
+                reason = "exact identifier " + identifier;
+            }
+            matches.add(new Match(section, score, reason));
         }
-        return matches.stream().sorted(Comparator.comparingInt(Match::score).reversed())
-                .limit(MAX_MATCHES_PER_QUERY).toList();
+        int best = matches.stream().mapToInt(Match::score).max().orElse(0);
+        return matches.stream().filter(match -> match.score() * 2 >= best)
+                .sorted(Comparator.comparingInt(Match::score).reversed()).limit(MAX_MATCHES_PER_QUERY).toList();
+    }
+
+    private int weight(String term) {
+        if (GENERIC_TERMS.contains(term)) {
+            return 0;
+        }
+        return termFrequency.getOrDefault(term, 0) <= Math.max(1, sections.size() / 3) ? 3 : 1;
     }
 
     private final class Selection {
@@ -233,21 +297,18 @@ final class ScopedKnowledge {
         if (change.previousPath() != null) {
             alternatives += "|" + Pattern.quote(change.previousPath());
         }
-        return Pattern.compile("(?<![\\p{L}\\p{N}_./-])(?:" + alternatives + ")(?![\\p{L}\\p{N}_./-])");
+        return Pattern.compile("(?<![\\p{L}\\p{N}_./-])(?:\\.\\.?/)*(" + alternatives + ")(?![\\p{L}\\p{N}_./-])");
     }
 
-    private static Set<String> changedSymbols(GitClient.Change change) {
-        var symbols = new LinkedHashSet<String>();
-        addFileStem(symbols, change.path());
-        if (change.previousPath() != null) {
-            addFileStem(symbols, change.previousPath());
-        }
-        change.patch().lines().filter(line -> line.startsWith("@@")
+    private static String changedLines(String patch) {
+        return patch.lines().filter(line -> line.startsWith("@@")
                         || (line.startsWith("+") && !line.startsWith("+++"))
                         || (line.startsWith("-") && !line.startsWith("---")))
-                .flatMap(line -> CODE_SYMBOL.matcher(line).results())
-                .map(match -> normalize(match.group())).distinct().limit(128).forEach(symbols::add);
-        return symbols;
+                .collect(Collectors.joining("\n"));
+    }
+
+    private static Set<String> matches(Pattern pattern, String text) {
+        return pattern.matcher(text).results().map(match -> normalize(match.group())).collect(Collectors.toSet());
     }
 
     private static void addFileStem(Set<String> symbols, String path) {
@@ -339,7 +400,8 @@ final class ScopedKnowledge {
             String original = content.substring(start.offset(), end.offset());
             if (!original.isBlank()) {
                 sections.add(new Section("KB-" + start.line(), start.title(), start.line(), end.line() - 1,
-                        original, terms(original), terms(start.title())));
+                        original, terms(original), terms(start.title()), matches(ENDPOINT, original),
+                        matches(CODE_SYMBOL, original)));
             }
         }
         return List.copyOf(sections);
