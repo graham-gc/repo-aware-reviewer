@@ -59,6 +59,8 @@ java -jar build/code-review-agent.jar review \
 
 `--review-parallelism` 控制审查和复核的并行调用数，默认是 `3`。设为 `1` 时，同样的任务依次执行。每次调用都使用已配置的 Agent 命令和超时，耗时及模型用量会随候选数量增加。证据采集目前只有一轮补读，未解决的缺口会记录下来供报告说明。
 
+结构化回复支持原始 XML 和带代码围栏的 XML。结构错误时会自动尝试一次格式纠正，并保留原回复和纠正记录。续跑中断的审查时，在原命令上增加 `--resume /path/to/run-directory`，程序会复用已保存的有效结果，继续缺失或无效的任务。实际审查范围、输入文档和采集证据须与原运行一致，续跑时可以调整并行数。
+
 ## GitHub PR 审查
 
 把[示例工作流](examples/github-review.yml)复制到待审查仓库的 `.github/workflows/`，配置 `ANTHROPIC_API_KEY` Actions Secret，并将 Action 引用固定到可信版本。同仓库的 PR 创建或更新时会自动触发。有仓库写权限的人也可以在 PR 评论 `/review`。报告会回贴到 PR，报告、审查范围和覆盖情况也会保存为 Actions artifact。
@@ -71,7 +73,7 @@ Action 的 `language` 参数默认是 `en`。示例工作流从可选仓库变�
 
 进度写到 stderr，在交互式终端中原地刷新一行，重定向时按普通日志逐行输出。两个命令成功后把本次运行目录写到 stdout。默认输出目录是 `review-output/` 和 `knowledge-output/`，可用 `--output-dir` 更改。任一命令加上 `--prepare-only`，即可在本地保存证据和提示词，无需调用模型。
 
-- `review` 生成 `report.md`。`scope.md` 记录实际提交、输入哈希和并行设置，`evidence.md` 保存证据，`coverage.md` 记录证据缺口及每个候选的复核状态。`discovery/` 和 `verification/` 保存各次调用的提示词及回复，`verified-findings.md` 保存去重前的已确认候选，`report-response.md` 保留汇总原文。结构化结果格式错误或不完整时，本轮审查会报错。
+- `review` 生成 `report.md`。`scope.md` 记录实际提交、输入哈希和并行设置，`evidence.md` 保存证据，`coverage.md` 记录证据缺口及每个候选的复核状态。`discovery/` 和 `verification/` 保存各次调用的提示词及回复，`verified-findings.md` 保存去重前的已确认候选，`report-response.md` 保留汇总原文。格式纠正后仍未通过结构校验时，本轮审查会报错。
 - `knowledge generate` 生成 `candidate-knowledge.md`。可查看 `inventory.md` 了解哪些文件被纳入或跳过。两种流程都会在本地保存各自的证据。
 
 复核前，采集器可按请求读取基线或目标提交中已跟踪的文本。Java 文件支持按唯一的方法名定位声明，并记录实际提供的行号。依赖补证只读取所选版本根 `pom.xml` 中声明了固定版本且已缓存的直接 JAR 依赖，提取 Java 公开签名和 `.proto` 文件。采集过程无需运行目标项目的构建或测试。输入较大时，`review` 可用 `--max-evidence-bytes`，`knowledge generate` 可用 `--max-file-bytes` 和 `--max-total-bytes` 调整预算。

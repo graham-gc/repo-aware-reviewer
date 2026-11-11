@@ -202,6 +202,54 @@ final class EvidenceTests {
         require(Files.exists(run.resolve("discovery/R3-response.md")) && Files.exists(run.resolve("verification/R3-1-response.md")),
                 "independent reviews and individual verification artifacts are saved");
 
+        CliOptions cached = CliOptions.parse(new String[]{"review", "--repo", repo.toString(), "--resume", run.toString(),
+                "--review-parallelism", "1", "--agent-command", "/bin/sh", "--agent-arg", "-c", "--agent-arg", "exit 99"});
+        Path resumed = new ReviewPipeline(new ProcessExecutor(), Clock.systemUTC()).run(cached);
+        require(resumed.equals(run) && Files.readString(run.resolve("report.md")).equals(report),
+                "resume reuses every valid stage without another model call and allows concurrency changes");
+        Path savedReply = fixture.resolve("saved-verification.md");
+        Files.copy(run.resolve("verification/R3-1-response.md"), savedReply);
+        Files.delete(run.resolve("verification/R3-1-response.md"));
+        CliOptions incomplete = CliOptions.parse(new String[]{"review", "--repo", repo.toString(), "--resume", run.toString(),
+                "--agent-command", "/bin/sh", "--agent-arg", "-c", "--agent-arg", "cat \"$1\"",
+                "--agent-arg", "resume-stub", "--agent-arg", savedReply.toString()});
+        new ReviewPipeline(new ProcessExecutor(), Clock.systemUTC()).run(incomplete);
+        require(Files.readString(run.resolve("report.md")).equals(report), "resume invokes only the missing verification task");
+        String savedScope = Files.readString(run.resolve("scope.md"));
+        try {
+            CliOptions changedInput = CliOptions.parse(new String[]{"review", "--repo", repo.toString(), "--resume", run.toString(),
+                    "--language", "zh-CN", "--agent-command", "/bin/sh", "--agent-arg", "-c", "--agent-arg", "exit 99"});
+            new ReviewPipeline(new ProcessExecutor(), Clock.systemUTC()).run(changedInput);
+            throw new AssertionError("Expected changed resume inputs to be rejected");
+        } catch (java.io.IOException mismatch) {
+            require(mismatch.getMessage().contains("scope.md"), "resume diagnoses changed review inputs");
+        }
+        require(Files.readString(run.resolve("scope.md")).equals(savedScope), "rejected resume preserves the saved scope");
+
+        Path repairDirectory = Files.createDirectory(fixture.resolve("format-repair"));
+        String repairStub = """
+                prompt=$(cat)
+                printf 'call\\n' >> "$1/model-calls.txt"
+                case "$prompt" in
+                    *'OUTPUT FORMAT CORRECTION'*) cat "$2" ;;
+                    *) printf 'Verification completed without structured output.\\n' ;;
+                esac
+                """;
+        var repairAgent = new AgentRunner(new ProcessExecutor(), "/bin/sh",
+                List.of("-c", repairStub, "repair-stub", repairDirectory.toString(), savedReply.toString()), fixture, Duration.ofSeconds(5));
+        ReviewFinding repairCandidate = ReviewOutput.discovery("<findings>" + separate + "</findings>",
+                "R3", List.of("Z-small.java")).findings().getFirst();
+        var repairTask = new ReviewTasks.Task("repair", "Verify the candidate",
+                reply -> ReviewOutput.verification(reply, repairCandidate, List.of("Z-small.java")));
+        try (var progress = new CommandProgress("repair-test", new java.io.PrintStream(java.io.OutputStream.nullOutputStream()))) {
+            ReviewTasks.run(List.of(repairTask), repairAgent, repairDirectory, 1, progress, 1, 2, "Repairing structured output", false);
+            ReviewTasks.run(List.of(repairTask), repairAgent, repairDirectory, 1, progress, 1, 2, "Reusing repaired output", true);
+        }
+        require(Files.readAllLines(repairDirectory.resolve("model-calls.txt")).size() == 2
+                && Files.exists(repairDirectory.resolve("repair-invalid-response.md"))
+                && Files.exists(repairDirectory.resolve("repair-repair-response.md")),
+                "one format correction is saved and its valid result is reused without additional model calls");
+
         CliOptions prepare = CliOptions.parse(new String[]{"review", "--repo", repo.toString(), "--prepare-only",
                 "--output-dir", fixture.resolve("multi-prepare").toString()});
         Path prepared = new ReviewPipeline(new ProcessExecutor(), Clock.systemUTC()).run(prepare);
@@ -230,8 +278,9 @@ final class EvidenceTests {
         long started = System.nanoTime();
         try (var progress = new CommandProgress("cancellation-test", new java.io.PrintStream(java.io.OutputStream.nullOutputStream()))) {
             try {
-                ReviewTasks.run(List.of(new ReviewTasks.Task("fail", "fail"), new ReviewTasks.Task("block", "block")),
-                        failureAgent, fixture.resolve("failed-tasks"), 2, progress, 1, 2, "Testing failed agent");
+                ReviewTasks.run(List.of(new ReviewTasks.Task("fail", "fail", response -> {}),
+                                new ReviewTasks.Task("block", "block", response -> {})),
+                        failureAgent, fixture.resolve("failed-tasks"), 2, progress, 1, 2, "Testing failed agent", false);
                 throw new AssertionError("Expected an agent failure");
             } catch (java.io.IOException expected) {
                 require(expected.getMessage().contains("See task artifacts"), "agent failures identify their diagnostic directory");

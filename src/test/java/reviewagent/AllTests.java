@@ -75,6 +75,9 @@ public final class AllTests {
         equal(1_000_000, options.maxEvidenceBytes());
         equal(0, options.maxSupplementalRequests());
         equal(0, options.maxKnowledgeQueries());
+        equal(null, options.resumeDirectory());
+        equal(Path.of("saved-run").toAbsolutePath().normalize(), CliOptions.parse(new String[]{
+                "review", "--repo", ".", "--resume", "saved-run"}).resumeDirectory());
         throwsArgument(() -> CliOptions.parse(new String[]{
                 "review", "--repo", ".", "--knowledge-mode", "scoped"
         }));

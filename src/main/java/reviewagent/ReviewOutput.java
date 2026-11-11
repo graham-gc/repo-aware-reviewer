@@ -20,8 +20,11 @@ import java.util.Set;
 import java.util.regex.Pattern;
 
 final class ReviewOutput {
-    private static final Pattern XML_BLOCK = Pattern.compile("(?ms)^```xml[ \\t]*\\R(.*?)^```[ \\t]*(?:\\R|$)");
-    private static final Set<String> FINDING_FIELDS = Set.of("title", "severity", "path", "line", "endLine",
+    private static final Pattern XML_TOKEN = Pattern.compile(
+            "(?s)<!--.*?-->|<!\\[CDATA\\[.*?]]>|<\\?.*?\\?>|<(?:\"[^\"]*\"|'[^']*'|[^'\"<>])*>");
+    private static final Pattern XML_BLOCK = Pattern.compile(
+            "(?ms)^ {0,3}(`{3,}|~{3,})[ \\t]*(?i:xml)?[ \\t]*\\R(.*?)^ {0,3}\\1[ \\t]*(?:\\R|$)");
+    private static final Set<String> FINDING_FIELDS = Set.of("id", "title", "severity", "path", "line", "endLine",
             "trigger", "impact", "evidence", "diffRelation");
 
     enum Status {
@@ -37,11 +40,14 @@ final class ReviewOutput {
     private record XmlBlock(Element root, String remainder) {
     }
 
+    private record Span(int start, int end) {
+    }
+
     static Discovery discovery(String response, String reviewer, List<String> changedFiles) throws IOException {
         XmlBlock block = xml(response, "findings");
         var findings = new ArrayList<ReviewFinding>();
         for (Element element : children(block.root(), "finding")) {
-            findings.add(finding(element, reviewer + "-" + (findings.size() + 1), changedFiles));
+            findings.add(finding(element, reviewer + "-" + (findings.size() + 1), changedFiles, false));
         }
         return new Discovery(List.copyOf(findings), block.remainder());
     }
@@ -61,7 +67,7 @@ final class ReviewOutput {
             if (!fields.containsKey("finding")) {
                 throw new IOException("Confirmed verification is missing its finding");
             }
-            confirmed = finding(fields.get("finding"), candidate.id(), changedFiles);
+            confirmed = finding(fields.get("finding"), candidate.id(), changedFiles, true);
         } else if (fields.containsKey("finding")) {
             throw new IOException("Unconfirmed verification contains a finding");
         }
@@ -130,8 +136,14 @@ final class ReviewOutput {
                 + "</" + name + ">";
     }
 
-    private static ReviewFinding finding(Element element, String id, List<String> changedFiles) throws IOException {
+    private static ReviewFinding finding(Element element, String id, List<String> changedFiles, boolean checkCandidateId)
+            throws IOException {
         Map<String, Element> fields = fields(element, FINDING_FIELDS);
+        String attributeId = element.getAttribute("id");
+        if (checkCandidateId && ((!attributeId.isEmpty() && !attributeId.equals(id))
+                || (fields.containsKey("id") && !text(fields, "id").equals(id)))) {
+            throw new IOException("Finding ID does not match the candidate being processed");
+        }
         String path = text(fields, "path");
         if (!changedFiles.contains(path)) {
             throw new IOException("Finding location is outside the changed files: " + EvidenceText.oneLine(path));
@@ -142,7 +154,7 @@ final class ReviewOutput {
             if (first < 1 || last < first) {
                 throw new IllegalArgumentException("Invalid finding line range");
             }
-            return new ReviewFinding(id, text(fields, "title"), ReviewFinding.Severity.valueOf(text(fields, "severity")),
+            return new ReviewFinding(id, text(fields, "title"), ReviewFinding.Severity.parse(text(fields, "severity")),
                     path, first, last, text(fields, "trigger"), text(fields, "impact"), text(fields, "evidence"),
                     text(fields, "diffRelation"));
         } catch (IllegalArgumentException invalid) {
@@ -184,42 +196,77 @@ final class ReviewOutput {
     }
 
     private static XmlBlock xml(String response, String rootName) throws IOException {
+        Span span = rootSpan(response, rootName);
+        String content = response.substring(span.start(), span.end());
+        int start = span.start();
+        int end = span.end();
         var blocks = XML_BLOCK.matcher(response);
-        XmlBlock result = null;
         while (blocks.find()) {
-            String content = blocks.group(1).strip();
-            if (!content.matches("(?s)<" + rootName + "(?:[\\s/>]).*")) {
-                continue;
-            }
-            if (result != null) {
-                throw new IOException("Repeated " + rootName + " response block");
-            }
-            try {
-                var factory = DocumentBuilderFactory.newInstance();
-                factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
-                factory.setFeature("http://xml.org/sax/features/external-general-entities", false);
-                factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
-                factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "");
-                factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_SCHEMA, "");
-                factory.setXIncludeAware(false);
-                factory.setExpandEntityReferences(false);
-                var builder = factory.newDocumentBuilder();
-                builder.setErrorHandler(new DefaultHandler() {
-                    @Override
-                    public void fatalError(SAXParseException error) throws SAXException {
-                        throw error;
-                    }
-                });
-                Element root = builder.parse(new org.xml.sax.InputSource(new StringReader(content))).getDocumentElement();
-                if (!root.getTagName().equals(rootName)) {
-                    throw new IOException("Unexpected review response root");
-                }
-                result = new XmlBlock(root, response.substring(0, blocks.start()) + response.substring(blocks.end()));
-            } catch (ParserConfigurationException | SAXException invalid) {
-                throw new IOException("Invalid " + rootName + " response structure", invalid);
+            if (blocks.start() <= start && blocks.end() >= end && blocks.group(2).strip().equals(content)) {
+                start = blocks.start();
+                end = blocks.end();
+                break;
             }
         }
-        if (result == null) {
+        try {
+            var factory = DocumentBuilderFactory.newInstance();
+            factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+            factory.setFeature("http://xml.org/sax/features/external-general-entities", false);
+            factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
+            factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "");
+            factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_SCHEMA, "");
+            factory.setXIncludeAware(false);
+            factory.setExpandEntityReferences(false);
+            var builder = factory.newDocumentBuilder();
+            builder.setErrorHandler(new DefaultHandler() {
+                @Override
+                public void fatalError(SAXParseException error) throws SAXException {
+                    throw error;
+                }
+            });
+            Element root = builder.parse(new org.xml.sax.InputSource(new StringReader(content))).getDocumentElement();
+            if (!root.getTagName().equals(rootName)) {
+                throw new IOException("Unexpected review response root");
+            }
+            return new XmlBlock(root, response.substring(0, start) + response.substring(end));
+        } catch (ParserConfigurationException | SAXException invalid) {
+            throw new IOException("Invalid " + rootName + " response structure", invalid);
+        }
+    }
+
+    private static Span rootSpan(String response, String rootName) throws IOException {
+        Pattern opening = Pattern.compile("<" + Pattern.quote(rootName) + "(?=[\\s/>]).*", Pattern.DOTALL);
+        Pattern closing = Pattern.compile("</" + Pattern.quote(rootName) + "\\s*>");
+        // Keep source offsets while excluding protocol examples quoted in Markdown.
+        String searchable = Pattern.compile("(?m)^ {0,3}>[^\\r\\n]*").matcher(response)
+                .replaceAll(match -> " ".repeat(match.group().length()));
+        var tokens = XML_TOKEN.matcher(searchable);
+        Span result = null;
+        int start = -1;
+        int depth = 0;
+        while (tokens.find()) {
+            String token = tokens.group();
+            if (opening.matcher(token).matches()) {
+                if (depth == 0) {
+                    if (result != null) {
+                        throw new IOException("Repeated " + rootName + " response block");
+                    }
+                    start = tokens.start();
+                }
+                depth++;
+                if (token.endsWith("/>")) {
+                    depth--;
+                }
+            } else if (closing.matcher(token).matches() && depth > 0) {
+                depth--;
+            } else {
+                continue;
+            }
+            if (depth == 0) {
+                result = new Span(start, tokens.end());
+            }
+        }
+        if (result == null || depth != 0) {
             throw new IOException("Missing " + rootName + " XML response block");
         }
         return result;
