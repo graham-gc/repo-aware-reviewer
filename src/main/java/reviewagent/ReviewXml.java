@@ -20,7 +20,8 @@ import java.util.regex.Pattern;
 final class ReviewXml {
     private static final Pattern XML_BLOCK = Pattern.compile(
             "(?ms)^ {0,3}(`{3,}|~{3,})[ \\t]*(?i:xml)?[ \\t]*\\R(.*?)^ {0,3}\\1[ \\t]*(?:\\R|$)");
-    record XmlBlock(Element root, String remainder) {
+    record XmlBlock(Element root, String remainder, List<String> normalizations) {
+        XmlBlock(Element root, String remainder) { this(root, remainder, List.of()); }
     }
 
     record Span(int start, int end) {
@@ -52,6 +53,9 @@ final class ReviewXml {
                     throw new IOException("Unexpected review element: " + element.getTagName());
                 }
                 elements.add(element);
+            } else if (node.getNodeType() == org.w3c.dom.Node.COMMENT_NODE
+                    || node.getNodeType() == org.w3c.dom.Node.PROCESSING_INSTRUCTION_NODE) {
+                // XML trivia does not become a review value or a protocol child.
             } else if (!node.getTextContent().isBlank()) {
                 throw new IOException("Unexpected text in review structure");
             }
@@ -60,13 +64,40 @@ final class ReviewXml {
     }
 
     static XmlBlock xml(String response, String rootName) throws IOException {
+        try { return strict(response, rootName); }
+        catch (IOException original) {
+            if (original instanceof AmbiguousTextFieldException) throw original;
+            var valid = new LinkedHashMap<String, XmlBlock>();
+            var notes = new LinkedHashMap<String, String>();
+            var candidates = XmlStructureRepair.candidates(response, rootName);
+            for (var candidate : candidates) {
+                try {
+                    XmlBlock parsed = strict(candidate.response(), rootName);
+                    valid.putIfAbsent(candidate.response(), parsed);
+                    notes.putIfAbsent(candidate.response(), candidate.note());
+                } catch (IOException rejected) { /* Never accept a repair without strict parsing and schema validation. */ }
+            }
+            if (valid.size() == 1) {
+                var entry = valid.entrySet().iterator().next();
+                String note = notes.get(entry.getKey());
+                ResponseDiagnostics.record(note);
+                return new XmlBlock(entry.getValue().root(), entry.getValue().remainder(), List.of(note));
+            }
+            if (!candidates.isEmpty()) throw new IOException(original.getMessage()
+                    + "; delimiter repair was not applied: " + (valid.isEmpty() ? "no structurally valid candidate" : "ambiguous candidates"), original);
+            throw original;
+        }
+    }
+
+    private static XmlBlock strict(String response, String rootName) throws IOException {
         Span span = rootSpan(response, rootName);
         String content = response.substring(span.start(), span.end());
         int start = span.start();
         int end = span.end();
         var blocks = XML_BLOCK.matcher(response);
         while (blocks.find()) {
-            if (blocks.start() <= start && blocks.end() >= end && blocks.group(2).strip().equals(content)) {
+            if (blocks.start(2) <= start && blocks.end(2) >= end
+                    && trivia(response.substring(blocks.start(2), start)) && trivia(response.substring(end, blocks.end(2)))) {
                 start = blocks.start();
                 end = blocks.end();
                 break;
@@ -92,12 +123,34 @@ final class ReviewXml {
             if (!root.getTagName().equals(rootName)) {
                 throw new IOException("Unexpected review response root");
             }
+            ReviewSchema.validate(root);
+            XmlStructureRepair.checkTextBoundaries(content);
             return new XmlBlock(root, response.substring(0, start) + response.substring(end));
         } catch (SAXParseException invalid) {
             throw new IOException("Invalid " + rootName + " response structure at line " + invalid.getLineNumber()
                     + ", column " + invalid.getColumnNumber() + ": " + invalid.getMessage(), invalid);
         } catch (ParserConfigurationException | SAXException invalid) {
             throw new IOException("Invalid " + rootName + " response structure", invalid);
+        }
+    }
+
+    private static boolean trivia(String value) {
+        return value.matches("(?s)(?:\\s|<!--.*?-->|<\\?.*?\\?>)*");
+    }
+
+    static String replaceRoot(String response, String rootName, Element root) throws IOException {
+        Span span = rootSpan(response, rootName);
+        try {
+            var factory = javax.xml.transform.TransformerFactory.newInstance();
+            factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "");
+            factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_STYLESHEET, "");
+            var transformer = factory.newTransformer();
+            transformer.setOutputProperty(javax.xml.transform.OutputKeys.OMIT_XML_DECLARATION, "yes");
+            var output = new java.io.StringWriter();
+            transformer.transform(new javax.xml.transform.dom.DOMSource(root), new javax.xml.transform.stream.StreamResult(output));
+            return response.substring(0, span.start()) + output + response.substring(span.end());
+        } catch (javax.xml.transform.TransformerException | IllegalArgumentException invalid) {
+            throw new IOException("Cannot serialize the corrected assessment without changing its envelope", invalid);
         }
     }
 

@@ -75,6 +75,8 @@ final class ReviewPipeline {
         if (evidence.changedFiles().isEmpty()) {
             OutputLanguage language = OutputLanguage.parse(options.language());
             write(runDirectory.resolve("report.md"), ReviewReport.emptyDiffReport(scope, language, requirement != null));
+            write(runDirectory.resolve("review-status.md"), "Status: SKIPPED\n\n"
+                    + language.text("No changes to review; acceptance was not assessed.", "没有需要审查的变更，未进行需求验收。") + "\n");
             write(runDirectory.resolve("coverage.md"), evidence.coverage()
                     + "\nReview and requirement assessment skipped: the baseline and target have no file differences. No model was called by this execution.\n");
             if (requirement != null) {
@@ -173,15 +175,22 @@ final class ReviewPipeline {
                 : "Verifying candidate issues (0 of " + findings.size() + " complete)");
         List<ReviewOutput.Decision> preliminary = quality.verify(findings);
         String verificationCoverage = ReviewQuality.coverage("Individual candidate verification", preliminary);
-        long preliminaryCount = preliminary.stream().filter(d -> d.verdict().status() == ReviewOutput.Status.CONFIRMED).count();
-        verificationCoverage += "\nCandidates: " + findings.size() + ". Confirmed before deduplication: " + preliminaryCount + ".\n";
+        verificationCoverage += "\nCandidates: " + findings.size() + ". Confirmed before deduplication: "
+                + preliminary.stream().filter(d -> d.verdict().status() == ReviewOutput.Status.CONFIRMED).count() + ".\n";
 
         progress.step(6, totalSteps, "Assessing and independently auditing requirements");
         ReviewQuality.AssessmentResult assessed = quality.assess(requirement, verificationCoverage);
-        String assessment = assessed.summary();
 
-        progress.step(7, totalSteps, "Reconciling verdicts before publication");
+        progress.step(7, totalSteps, "Verifying unmet requirements and reconciling verdicts before publication");
+        AssessmentFindings.Plan assessmentPlan = quality.planAssessment(assessed);
+        List<ReviewOutput.Decision> requirementDecisions = quality.verifyAssessment(assessmentPlan);
+        preliminary = java.util.stream.Stream.concat(preliminary.stream(), requirementDecisions.stream()).toList();
+        verificationCoverage += ReviewQuality.coverage("Unmet requirement candidate verification", requirementDecisions);
+        verificationCoverage += "\nCandidates including unmet requirements: " + preliminary.size() + ". Confirmed before publication: "
+                + preliminary.stream().filter(d -> d.verdict().status() == ReviewOutput.Status.CONFIRMED).count() + ".\n";
         List<ReviewOutput.Decision> adjudicated = quality.adjudicate(preliminary, assessed.details());
+        assessed = quality.reconcileAssessment(assessed, assessmentPlan, preliminary, adjudicated);
+        String assessment = assessed.summary();
         verificationCoverage += ReviewQuality.coverage("Publication adjudication", adjudicated);
         OutputLanguage language = OutputLanguage.parse(options.language());
         List<ReviewFinding> confirmed = adjudicated.stream()
@@ -191,19 +200,25 @@ final class ReviewPipeline {
                 .collect(java.util.stream.Collectors.joining()));
 
         write(runDirectory.resolve("coverage.md"), evidence.coverage() + supplemental.coverage() + verificationCoverage);
+        ReviewQuality.Completion completion = ReviewQuality.completion(preliminary, adjudicated, assessmentPlan, language);
 
         progress.step(8, totalSteps, "Deduplicating findings and preparing the report");
         String reportPrompt = prompts.finalizeReport(evidence, confirmed, discoveryNotes.toString(),
-                supplemental.markdown(), verificationCoverage) + "\nAUDITED REQUIREMENT ASSESSMENT\n" + assessment;
+                supplemental.markdown(), verificationCoverage) + "\nAUDITED REQUIREMENT ASSESSMENT\n" + assessment
+                + "\nPROGRAMMATIC CANDIDATE COUNTS\nDiscovery: " + findings.size() + "; unmet requirements: "
+                + requirementDecisions.size() + "; total: " + preliminary.size()
+                + "\nPROGRAMMATIC REVIEW COMPLETENESS\n" + completion.markdown();
         write(runDirectory.resolve("verify-prompt.md"), reportPrompt);
         var reportReplies = ReviewTasks.run(List.of(new ReviewTasks.Task("report", reportPrompt,
                 reply -> ReviewReport.finalReport(reply, confirmed, language, assessment))), agent, runDirectory,
                 options.reviewParallelism(), progress, 8, totalSteps, "Finalizing report", resume);
         String response = reportReplies.get("report");
-        String report = ReviewReport.finalReport(response, confirmed, language, assessment)
+        String report = completion.notice() + ReviewReport.finalReport(response, confirmed, language, assessment)
                 + ReviewQuality.unresolved(preliminary, adjudicated, language);
         write(runDirectory.resolve("report.md"), report);
-        progress.finish(totalSteps, "Wrote report.md");
+        write(runDirectory.resolve("review-status.md"), completion.markdown());
+        progress.finish(totalSteps, completion.complete() ? "Wrote report.md" : "Wrote incomplete report.md ("
+                + completion.pendingChecks() + " checks remain unresolved)");
         return runDirectory;
     }
 

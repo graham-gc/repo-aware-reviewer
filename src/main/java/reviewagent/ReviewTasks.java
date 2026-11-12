@@ -17,17 +17,38 @@ final class ReviewTasks {
     @FunctionalInterface
     interface Validator {
         void validate(String response) throws IOException;
+        default String corrected(String response, IOException failure) throws IOException { return response; }
+        default String correctionInstructions(IOException failure) { return ""; }
     }
 
     record Task(String id, String prompt, Validator validator) {
     }
 
-    private record Reply(String id, String response) {
+    record Outcome(String response, String error) {
+        boolean valid() { return error == null; }
+    }
+
+    private record Reply(String id, Outcome outcome) {
     }
 
     static Map<String, String> run(List<Task> tasks, AgentRunner agent, Path directory, int parallelism,
                                    CommandProgress progress, int stage, int stages, String description, boolean resume)
             throws IOException, InterruptedException {
+        var outcomes = runBatch(tasks, agent, directory, parallelism, progress, stage, stages, description, resume, false);
+        var responses = new LinkedHashMap<String, String>();
+        outcomes.forEach((id, outcome) -> responses.put(id, outcome.response()));
+        return responses;
+    }
+
+    static Map<String, Outcome> runIsolated(List<Task> tasks, AgentRunner agent, Path directory, int parallelism,
+                                           CommandProgress progress, int stage, int stages, String description, boolean resume)
+            throws IOException, InterruptedException {
+        return runBatch(tasks, agent, directory, parallelism, progress, stage, stages, description, resume, true);
+    }
+
+    private static Map<String, Outcome> runBatch(List<Task> tasks, AgentRunner agent, Path directory, int parallelism,
+                                                CommandProgress progress, int stage, int stages, String description, boolean resume,
+                                                boolean isolateInvalidOutput) throws IOException, InterruptedException {
         Files.createDirectories(directory);
         if (tasks.isEmpty()) {
             return Map.of();
@@ -41,20 +62,26 @@ final class ReviewTasks {
                         try {
                             String response = invoke(task, agent, directory, resume);
                             Files.deleteIfExists(directory.resolve(task.id() + "-error.txt"));
-                            return new Reply(task.id(), response);
+                            return new Reply(task.id(), new Outcome(response, null));
                         } catch (IOException failure) {
                             Files.writeString(directory.resolve(task.id() + "-error.txt"), failure.getMessage(), StandardCharsets.UTF_8);
+                            if (isolateInvalidOutput && failure instanceof InvalidReviewResponseException) {
+                                return new Reply(task.id(), new Outcome(null, failure.getMessage()));
+                            }
                             throw failure;
                         }
                     }));
                 }
-                var replies = new LinkedHashMap<String, String>();
+                var replies = new LinkedHashMap<String, Outcome>();
+                int invalidOutputs = 0;
                 for (int completed = 1; completed <= tasks.size(); completed++) {
                     Reply reply = completions.take().get();
-                    replies.put(reply.id(), reply.response());
-                    progress.step(stage, stages, description + " (" + completed + " of " + tasks.size() + " complete)");
+                    replies.put(reply.id(), reply.outcome());
+                    if (!reply.outcome().valid()) invalidOutputs++;
+                    progress.step(stage, stages, description + " (" + completed + " of " + tasks.size() + " complete"
+                            + (invalidOutputs == 0 ? "" : "; " + invalidOutputs + " invalid outputs") + ")");
                 }
-                var ordered = new LinkedHashMap<String, String>();
+                var ordered = new LinkedHashMap<String, Outcome>();
                 tasks.forEach(task -> ordered.put(task.id(), replies.get(task.id())));
                 return ordered;
             } catch (ExecutionException failure) {
@@ -75,6 +102,7 @@ final class ReviewTasks {
         Path decisionRepairFile = directory.resolve(task.id() + "-decision-repair-response.md");
         Path promptFile = directory.resolve(task.id() + "-prompt.md");
         String response = null;
+        IOException cachedFailure = null;
         boolean samePrompt = Files.isRegularFile(promptFile)
                 && Files.readString(promptFile, StandardCharsets.UTF_8).equals(task.prompt());
         // A valid old verdict is not reusable when its instructions or supplied evidence have changed.
@@ -83,15 +111,16 @@ final class ReviewTasks {
                 if (!Files.isRegularFile(saved)) {
                     continue;
                 }
-                String cached = Files.readString(saved, StandardCharsets.UTF_8);
+                String raw = Files.readString(saved, StandardCharsets.UTF_8);
+                String cached = cachedFailure == null ? raw : corrected(task, raw, cachedFailure, directory, saved.getFileName().toString().replace("-response.md", "-applied-response.md"));
                 try {
-                    AgentRunner.validateResponse(cached);
-                    task.validator().validate(cached);
+                    validate(task, cached, directory);
                 } catch (IOException invalid) {
                     response = cached;
+                    cachedFailure = invalid;
                     continue;
                 }
-                if (!saved.equals(responseFile)) {
+                if (!saved.equals(responseFile) || !cached.equals(raw)) {
                     if (response != null) {
                         Files.writeString(directory.resolve(task.id() + "-invalid-response.md"), response, StandardCharsets.UTF_8);
                     }
@@ -117,14 +146,13 @@ final class ReviewTasks {
         var attempted = new java.util.HashSet<String>();
         while (true) {
             try {
-                AgentRunner.validateResponse(response);
-                task.validator().validate(response);
+                validate(task, response, directory);
             } catch (IOException invalid) {
                 boolean quotation = invalid instanceof SourceQuotationException;
                 boolean decision = invalid instanceof ReviewDecisionException;
                 String kind = quotation ? "quote-repair" : decision ? "decision-repair" : "repair";
                 if (!attempted.add(kind)) {
-                    throw new IOException("Task " + task.id() + " returned invalid structured output after bounded output correction: "
+                    throw new InvalidReviewResponseException("Task " + task.id() + " returned invalid structured output after bounded output correction: "
                             + invalid.getMessage(), invalid);
                 }
                 Files.writeString(directory.resolve(task.id() + (quotation ? "-quote-invalid-response.md" : decision ? "-decision-invalid-response.md" : "-invalid-response.md")),
@@ -138,22 +166,53 @@ final class ReviewTasks {
                         ? "SOURCE QUOTATION CORRECTION\n"
                             + "The response contains quotations absent from the supplied source. Re-copy each invalid requirement "
                             + "or citation directly and exactly from the original evidence block. Fix matching quotations consistently. "
+                            + "A quote may belong to a different included source: diff metadata and +/- lines require a DIFF ID, "
+                            + "while unchanged lines may require a TARGET_SOURCE or BASE_SOURCE ID. Use the exact-match reference "
+                            + "candidates in the validation feedback only after checking their file, revision and kind; copy their short SRC reference. "
+                            + "For a near-matching quotation, feedback may supply an exact <source> plus <lines> citation. "
+                            + "After rechecking the claim against its actual excerpt, copy that selector and omit quote to avoid "
+                            + "transcription errors. Do not preserve reasoning that depends on a mistyped method or value. "
                             + "Use requirementText for paraphrases or translations. Preserve applicable requirement meaning and "
                             + "supported conclusions; do not invent a requirement or evidence, or promote an unconfirmed finding. "
                             + "If no supplied source supports a conclusion, keep it insufficient rather than manufacturing a quote. "
                         : "OUTPUT FORMAT CORRECTION\n"
                             + "The previous response failed structural validation. Correct only its serialization and comply with the response schema above. "
                             + "Preserve the evidence-based decisions and reasoning. Do not invent facts or promote an unconfirmed finding. ";
-                String repairPrompt = task.prompt() + "\n\n" + correction
+                String repairPrompt = task.prompt() + "\n\n" + correction + task.validator().correctionInstructions(invalid)
                         + "Return the complete corrected response.\nValidation error: " + invalid.getMessage()
                         + "\n\nPREVIOUS RESPONSE\n" + response;
                 Files.writeString(directory.resolve(task.id() + "-" + kind + "-prompt.md"), repairPrompt, StandardCharsets.UTF_8);
-                response = agent.invoke(repairPrompt, directory.resolve(task.id() + "-" + kind));
-                Files.writeString(directory.resolve(task.id() + "-" + kind + "-response.md"), response, StandardCharsets.UTF_8);
+                String raw = agent.invoke(repairPrompt, directory.resolve(task.id() + "-" + kind));
+                Files.writeString(directory.resolve(task.id() + "-" + kind + "-response.md"), raw, StandardCharsets.UTF_8);
+                response = corrected(task, raw, invalid, directory, task.id() + "-" + kind + "-applied-response.md");
                 continue;
             }
             Files.writeString(responseFile, response, StandardCharsets.UTF_8);
             return response;
+        }
+    }
+
+    private static void validate(Task task, String response, Path directory) throws IOException {
+        try (var diagnostics = ResponseDiagnostics.capture()) {
+            try {
+                AgentRunner.validateResponse(response);
+                task.validator().validate(response);
+            } finally {
+                if (!diagnostics.notes().isEmpty()) Files.writeString(directory.resolve(task.id() + "-normalization.log"),
+                        String.join("\n", diagnostics.notes()) + "\n", StandardCharsets.UTF_8,
+                        java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+            }
+        }
+    }
+
+    private static String corrected(Task task, String raw, IOException failure, Path directory, String artifact) throws IOException {
+        try (var diagnostics = ResponseDiagnostics.capture()) {
+            String corrected = task.validator().corrected(raw, failure);
+            if (!corrected.equals(raw)) Files.writeString(directory.resolve(artifact), corrected, StandardCharsets.UTF_8);
+            if (!diagnostics.notes().isEmpty()) Files.writeString(directory.resolve(task.id() + "-normalization.log"),
+                    String.join("\n", diagnostics.notes()) + "\n", StandardCharsets.UTF_8,
+                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+            return corrected;
         }
     }
 }
