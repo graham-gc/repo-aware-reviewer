@@ -52,7 +52,21 @@ Add `--knowledge-mode scoped` to load relevant sections from the supplied knowle
 - `--commit <ref>` reviews a commit against its first parent. It defaults to `HEAD` and requires that parent to be available locally.
 - `--branch <target-ref> --base <base-ref>` directly compares the specified baseline and target snapshots, equivalent to `git diff BASE TARGET`. Both accept branch names, tags, or commit IDs. These options must be supplied together and cannot be combined with `--commit`.
 
-The CLI reads locally available Git revisions without fetching or switching branches. The evidence bundle takes repository review rules from the specified baseline commit, or the target's first parent in single-commit mode.
+By default, the CLI reads locally available Git revisions. To fetch the baseline from a configured remote before a new review, add `--base-remote` and give `--base` the branch name on that remote:
+
+```bash
+java -jar build/code-review-agent.jar review \
+  --repo /path/to/repo \
+  --branch <target-commit-id> \
+  --base main \
+  --base-remote origin
+```
+
+For another baseline, use a branch such as `--base release/1.0`; `--base-remote upstream` selects another configured remote. With `--base-remote`, use `main` or `refs/heads/main`, rather than the local tracking name `origin/main`. The target revision must already be available locally. Fetch uses the repository's existing Git authentication and pins the retrieved branch tip for the whole review. This is the remote version obtained at fetch time, independent of merge direction or parent order. The comparison remains a direct diff against that snapshot, including any differences if the target has not incorporated that version. Fetch failures stop the review without falling back to stale local references.
+
+Fetching does not check out or merge code, update local or remote-tracking branches, or overwrite `FETCH_HEAD`. A private ref protects each active review's baseline and is removed when the review ends. Fetch progress uses the same updating line. The default fetch timeout is 120 seconds, configurable with `--fetch-timeout-seconds`. The run directory retains `baseline-fetch-stdout.log`, `baseline-fetch-stderr.log`, `baseline-fetch-execution.log` (command, working directory, start time, timeout, elapsed time, and exit status), and `baseline-fetch-snapshot.log` (remote, branch, pinned commit, and fetch time). `scope.md` records the remote, branch, and resolved commits. `--resume` reuses the saved baseline without fetching again; start a new review to fetch a newer version.
+
+The evidence bundle takes repository review rules from the specified baseline commit, or the target's first parent in single-commit mode.
 
 Three independent reviewers examine correctness and regressions, requirements and business contracts, and boundary conditions and security. Their evidence requests are combined and deduplicated. When new evidence is supplied, another pass checks it for additional candidates. Each candidate then receives separate verification and can request further code, dependency evidence, or knowledge excerpts when a decisive link is missing.
 

@@ -31,8 +31,23 @@ final class ReviewPipeline {
         int totalSteps = options.prepareOnly() ? 3 : 9;
         progress.step(0, totalSteps, "Resolving Git review scope");
         GitClient git = new GitClient(options.repo(), executor);
-        ReviewScope scope = git.resolve(options);
+        if (options.baseRemote() != null) {
+            String target = git.resolveCommit(options.branch());
+            Path runDirectory = options.resumeDirectory() == null
+                    ? createRunDirectory(options.outputDir(), target) : options.resumeDirectory();
+            progress.step(0, totalSteps, (options.resumeDirectory() == null ? "Fetching baseline " : "Restoring pinned baseline ")
+                    + options.baseRemote() + "/" + options.base());
+            try (var baseline = RemoteBaseline.open(options, executor, git, runDirectory)) {
+                ReviewScope scope = new ReviewScope(ReviewScope.Mode.BRANCH, options.base(), options.branch(),
+                        baseline.commit(), target, baseline.commit() + ".." + target);
+                return runResolved(options, progress, totalSteps, git, scope, runDirectory);
+            }
+        }
+        return runResolved(options, progress, totalSteps, git, git.resolve(options), null);
+    }
 
+    private Path runResolved(CliOptions options, CommandProgress progress, int totalSteps, GitClient git,
+                             ReviewScope scope, Path preparedDirectory) throws IOException, InterruptedException {
         progress.step(1, totalSteps, "Collecting Git diff and review evidence");
         InputDocument requirement = InputDocument.read(options.requirement());
         InputDocument knowledge = InputDocument.read(options.knowledge());
@@ -46,7 +61,8 @@ final class ReviewPipeline {
             requireMatchingResumeFile(runDirectory.resolve("scope.md"), scopeText, true);
             requireMatchingResumeFile(runDirectory.resolve("evidence.md"), evidence.markdown(), true);
         } else {
-            runDirectory = createRunDirectory(options.outputDir(), scope.targetCommit());
+            runDirectory = preparedDirectory == null
+                    ? createRunDirectory(options.outputDir(), scope.targetCommit()) : preparedDirectory;
         }
 
         if (!resume || options.prepareOnly()) {
@@ -198,9 +214,16 @@ final class ReviewPipeline {
     private Path createRunDirectory(Path root, String targetCommit) throws IOException {
         String timestamp = DateTimeFormatter.ofPattern("uuuuMMdd-HHmmss")
                 .format(OffsetDateTime.now(clock).atZoneSameInstant(ZoneId.systemDefault()));
-        Path directory = root.resolve(timestamp + "-" + targetCommit.substring(0, 12));
-        Files.createDirectories(directory);
-        return directory;
+        Files.createDirectories(root);
+        String name = timestamp + "-" + targetCommit.substring(0, 12);
+        for (int attempt = 1; ; attempt++) {
+            Path directory = root.resolve(name + (attempt == 1 ? "" : "-" + attempt));
+            try {
+                return Files.createDirectory(directory);
+            } catch (java.nio.file.FileAlreadyExistsException collision) {
+                // Concurrent reviews of the same target must not overwrite each other's pinned scope or logs.
+            }
+        }
     }
 
     private static String scopeMarkdown(CliOptions options, ReviewScope scope,
@@ -229,6 +252,8 @@ final class ReviewPipeline {
                 options.maxSupplementalRequests() == 0 ? "unlimited" : options.maxSupplementalRequests(),
                 options.maxKnowledgeQueries() == 0 ? "unlimited" : options.maxKnowledgeQueries(),
                 options.reviewParallelism(), options.language())
+                + (options.baseRemote() == null ? "" : "- Baseline remote: `" + options.baseRemote() + "`\n"
+                    + "- Baseline remote branch: `" + RemoteBaseline.branchRef(options.base()) + "`\n")
                 + "- Language modules: " + LanguageRegistry.defaults().modules().stream().map(LanguageModule::id)
                         .collect(java.util.stream.Collectors.joining(", ")) + "\n"
                 + "- Language capabilities: " + LanguageRegistry.defaults().capabilitySummary() + "\n"

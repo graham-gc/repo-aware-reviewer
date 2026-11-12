@@ -5,7 +5,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 
-record CliOptions(Path repo, String commit, String branch, String base,
+record CliOptions(Path repo, String commit, String branch, String base, String baseRemote, Duration fetchTimeout,
                   Path requirement, Path knowledge, KnowledgeMode knowledgeMode, Path outputDir, Path resumeDirectory,
                   String agentCommand, List<String> agentArgs,
                   boolean prepareOnly, int maxEvidenceBytes, int maxSupplementalRequests, int maxKnowledgeQueries,
@@ -30,6 +30,9 @@ record CliOptions(Path repo, String commit, String branch, String base,
         String commit = null;
         String branch = null;
         String base = null;
+        String baseRemote = null;
+        Duration fetchTimeout = Duration.ofMinutes(2);
+        boolean fetchTimeoutSpecified = false;
         Path requirement = null;
         Path knowledge = null;
         KnowledgeMode knowledgeMode = KnowledgeMode.FULL;
@@ -52,6 +55,11 @@ record CliOptions(Path repo, String commit, String branch, String base,
                 case "--commit" -> commit = value(args, ++i, "--commit");
                 case "--branch" -> branch = value(args, ++i, "--branch");
                 case "--base" -> base = value(args, ++i, "--base");
+                case "--base-remote" -> baseRemote = value(args, ++i, "--base-remote");
+                case "--fetch-timeout-seconds" -> {
+                    fetchTimeout = Duration.ofSeconds(Long.parseLong(value(args, ++i, "--fetch-timeout-seconds")));
+                    fetchTimeoutSpecified = true;
+                }
                 case "--requirement" -> requirement = Path.of(value(args, ++i, "--requirement"));
                 case "--knowledge" -> knowledge = Path.of(value(args, ++i, "--knowledge"));
                 case "--knowledge-mode" -> knowledgeMode = KnowledgeMode.parse(value(args, ++i, "--knowledge-mode"));
@@ -91,6 +99,18 @@ record CliOptions(Path repo, String commit, String branch, String base,
         if (base != null && branch == null) {
             throw new IllegalArgumentException("--base requires --branch; use --branch <target-ref> --base <base-ref> to compare revisions");
         }
+        if (baseRemote != null && branch == null) {
+            throw new IllegalArgumentException("--base-remote requires --branch and --base");
+        }
+        if (baseRemote != null && !baseRemote.matches("[A-Za-z0-9][A-Za-z0-9._/-]*")) {
+            throw new IllegalArgumentException("--base-remote must be a configured Git remote name, such as origin");
+        }
+        if (fetchTimeoutSpecified && baseRemote == null) {
+            throw new IllegalArgumentException("--fetch-timeout-seconds requires --base-remote");
+        }
+        if (fetchTimeout.isZero() || fetchTimeout.isNegative()) {
+            throw new IllegalArgumentException("--fetch-timeout-seconds must be positive");
+        }
         if (!prepareOnly && agentCommand == null) {
             agentCommand = "claude";
             agentArgs.addAll(AgentRunner.defaultArguments());
@@ -107,7 +127,7 @@ record CliOptions(Path repo, String commit, String branch, String base,
         if (timeout.isZero() || timeout.isNegative()) {
             throw new IllegalArgumentException("--agent-timeout-seconds must be positive");
         }
-        return new CliOptions(repo.toAbsolutePath().normalize(), commit, branch, base,
+        return new CliOptions(repo.toAbsolutePath().normalize(), commit, branch, base, baseRemote, fetchTimeout,
                 absolute(requirement), absolute(knowledge), knowledgeMode, outputDir.toAbsolutePath().normalize(), absolute(resumeDirectory),
                 agentCommand, List.copyOf(agentArgs), prepareOnly, maxEvidenceBytes,
                 maxSupplementalRequests, maxKnowledgeQueries, reviewParallelism, timeout, language,
