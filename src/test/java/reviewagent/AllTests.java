@@ -25,9 +25,15 @@ public final class AllTests {
         GitScopeTests.run();
         RemoteBaselineTests.run();
         ReviewOutputTests.run();
+        ReviewXmlTests.run();
         EvidenceTests.run();
         ReviewQualityTests.run();
         ReviewQualityRegressionTests.run();
+        EvidenceReferenceTests.run();
+        AssessmentFindingsTests.run();
+        AssessmentCorrectionTests.run();
+        CitationRangeTests.run();
+        ReviewTaskIsolationTests.run();
         GoLanguageTests.run();
         LanguageModuleTests.run();
         System.out.println("All tests passed");

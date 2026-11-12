@@ -11,6 +11,7 @@ import java.util.regex.Pattern;
 final class EvidenceCatalog {
     private final Map<String, EvidenceSource> sources;
     private final Map<String, String> aliases = new LinkedHashMap<>();
+    private final Map<String, String> references = new LinkedHashMap<>();
     private final boolean authoritative;
 
     EvidenceCatalog(List<EvidenceSource> entries, boolean authoritative) {
@@ -22,10 +23,20 @@ final class EvidenceCatalog {
             alias(entry.id(), entry.id(), ambiguous);
             alias(entry.title(), entry.id(), ambiguous);
             alias(entry.id() + ": " + entry.title(), entry.id(), ambiguous);
+            if (entry.role(EvidenceSource.Role.DIFF) && !entry.path().isEmpty()) {
+                alias(entry.path() + " diff", entry.id(), ambiguous);
+                alias(entry.path() + " [diff]", entry.id(), ambiguous);
+            }
             var match = kb.matcher(entry.title());
             if (entry.role(EvidenceSource.Role.CONTRACT) && match.matches()) {
                 alias(match.group(1), entry.id(), ambiguous); alias(match.group(2), entry.id(), ambiguous);
             }
+        }
+        int sequence = 1;
+        for (EvidenceSource source : items.values()) {
+            String reference = "SRC-" + sequence++;
+            alias(reference, source.id(), ambiguous);
+            references.put(source.id(), reference);
         }
         ambiguous.forEach(aliases::remove);
         sources = java.util.Collections.unmodifiableMap(items);
@@ -56,9 +67,29 @@ final class EvidenceCatalog {
     }
 
     String inventory() {
-        return sources.values().stream().map(source -> "- " + source.id() + ": " + source.title() + " ["
-                + (source.role(EvidenceSource.Role.CONTRACT) ? "contract" : "source") + "]\n")
+        return sources.values().stream().map(source -> "- " + reference(source) + ": " + source.title() + " ["
+                + (source.role(EvidenceSource.Role.CONTRACT) ? "contract" : "source") + "]\n  " + provenance(source)
+                + "; evidence-id: " + source.id() + "\n")
                 .collect(java.util.stream.Collectors.joining());
+    }
+
+    String reference(EvidenceSource source) {
+        String reference = references.get(source.id());
+        return source.id().equals(aliases.get(reference)) ? reference : source.id();
+    }
+
+    String describe(EvidenceSource source) {
+        return reference(source) + ": " + source.title() + " (" + provenance(source) + "; evidence-id: " + source.id() + ")";
+    }
+
+    private static String provenance(EvidenceSource source) {
+        if (source.role(EvidenceSource.Role.DIFF)) return "Kind: DIFF; base: " + source.baselineRevision()
+                + "; target: " + source.revision();
+        String kind = source.role(EvidenceSource.Role.CONTRACT) ? "CONTRACT"
+                : source.role(EvidenceSource.Role.INDEX) ? "INDEX"
+                : source.role(EvidenceSource.Role.TARGET) ? "TARGET_SOURCE"
+                : source.role(EvidenceSource.Role.BASELINE) ? "BASE_SOURCE" : "SOURCE";
+        return "Kind: " + kind + "; revision: " + source.revision();
     }
 
     String manifest() {
@@ -66,6 +97,7 @@ final class EvidenceCatalog {
                 + "Legacy provider blocks retain quotation validation; location metadata may be unavailable.\n\n");
         for (EvidenceSource source : sources.values()) {
             out.append("- ").append(source.id()).append(" — ").append(EvidenceText.oneLine(source.title()))
+                    .append("\n  - Citation reference: ").append(reference(source))
                     .append("\n  - Roles: ").append(source.roles().stream().sorted().toList())
                     .append("; provenance: ").append(source.authoritative() ? "NATIVE" : "LEGACY_PROVIDER")
                     .append("; revision: ").append(source.revision())

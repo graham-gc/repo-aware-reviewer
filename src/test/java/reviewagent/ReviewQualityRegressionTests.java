@@ -17,8 +17,10 @@ final class ReviewQualityRegressionTests {
         navigation();
         locationsAndIdentity();
         proofObligations();
+        revisionPremises();
         policyAndPresentation();
         decisionCorrection();
+        citationSourceReferences();
     }
 
     private static EvidenceBundle bundle() {
@@ -88,6 +90,61 @@ final class ReviewQualityRegressionTests {
                 == ReviewSupport.Kind.EXPLICIT_DEFENSIVE_REQUIREMENT, "explicit malformed-response defense remains reviewable");
         fails(() -> ReviewGrounding.verification(defensive.replace("<basis>CONTRACT</basis>", "<basis>IMPLEMENTATION</basis>"),
                 finding(300), evidence, index));
+    }
+
+    private static void revisionPremises() throws Exception {
+        var original = bundle();
+        var added = EvidenceSource.diff("runner.py", null, "diff --git a/runner.py b/runner.py\nnew file mode 100644\n"
+                + "--- /dev/null\n+++ b/runner.py\n@@ -0,0 +1,2 @@\n+def finalize():\n+    " + CODE + "\n", SCOPE, true);
+        var base = EvidenceSources.file("base", "runner.py", 299, "runner.py at base (lines 299–300)",
+                "def finalize():\n    return legacy_result_code()", SCOPE, LanguageRegistry.defaults());
+        var removed = EvidenceSource.diff("runner.py", "runner.py", "diff --git a/runner.py b/runner.py\n"
+                + "--- a/runner.py\n+++ b/runner.py\n@@ -300,1 +300,1 @@\n-    return legacy_result_code()\n+    " + CODE + "\n", SCOPE, true);
+        var catalog = original.catalog().plus(new EvidenceCatalog(List.of(added, base, removed), true));
+        var evidence = new EvidenceBundle(SCOPE, original.changedFiles(), "", "", 20_000, null, catalog);
+        var index = new EvidenceIndex(catalog);
+        String implementation = citation(catalog.sources().getFirst().id(), CODE);
+        String rule = citation(catalog.sources().get(1).id(), RULE);
+        String reachable = verification("REACHABLE_FAILURE", "IMPLEMENTATION", implementation, implementation + rule);
+        String defensive = verification("EXPLICIT_DEFENSIVE_REQUIREMENT", "CONTRACT", rule, implementation + rule);
+        for (String proof : List.of(citation(added.id(), "new file mode 100644"),
+                citation(base.id(), "return legacy_result_code()"), citation(removed.id(), "-    return legacy_result_code()"))) {
+            String scopePremise = "<premise><statement>The baseline differs from this target implementation.</statement>"
+                    + "<basis>IMPLEMENTATION</basis><citations>" + proof + "</citations></premise>";
+            for (String response : List.of(reachable, defensive)) {
+                require(ReviewGrounding.verification(response.replace("</premises>", scopePremise + "</premises>"),
+                        finding(300), evidence, index).verdict().status() == ReviewOutput.Status.CONFIRMED,
+                        "baseline and new-file facts can accompany independently supported target failure premises");
+            }
+            fails(() -> ReviewGrounding.verification(verification("REACHABLE_FAILURE", "IMPLEMENTATION", proof,
+                    implementation + rule), finding(300), evidence, index));
+        }
+        // New-file metadata alone proves neither the target failure nor its location.
+        fails(() -> ReviewGrounding.verification(verification("EXPLICIT_DEFENSIVE_REQUIREMENT", "CONTRACT", rule,
+                citation(added.id(), "new file mode 100644") + rule), finding(300), evidence, index));
+        var forged = EvidenceSource.diff("runner.py", "runner.py", "diff --git a/runner.py b/runner.py\n"
+                + "--- a/runner.py\n+++ b/runner.py\n@@ -300,0 +300,1 @@\n+    print('new file mode 100644')\n", SCOPE, true);
+        var forgedIndex = new EvidenceIndex(catalog.plus(new EvidenceCatalog(List.of(forged), true)));
+        require(!forgedIndex.hasBaseline(forgedIndex.bind(List.of(new EvidenceIndex.Citation(forged.id(), "new file mode 100644")))),
+                "a string in added code cannot establish that a file was absent from the baseline");
+
+        // Revalidate a saved correction without changing its prompt or requiring another model call.
+        String saved = defensive.replace("</premises>", "<premise><statement>This file was added.</statement>"
+                + "<basis>IMPLEMENTATION</basis><citations>" + citation(added.id(), "new file mode 100644")
+                + "</citations></premise></premises>");
+        String invalidRange = saved.replace("<endLine>300</endLine>", "<endLine>334</endLine>");
+        fails(() -> ReviewGrounding.verification(invalidRange, finding(300), evidence, index));
+        Path directory = Files.createTempDirectory("review-revision-premise-resume-");
+        String prompt = "Validate unchanged saved evidence";
+        Files.writeString(directory.resolve("scope-prompt.md"), prompt);
+        Files.writeString(directory.resolve("scope-response.md"), invalidRange);
+        Files.writeString(directory.resolve("scope-decision-repair-response.md"), saved);
+        var task = new ReviewTasks.Task("scope", prompt, reply -> ReviewGrounding.verification(reply, finding(300), evidence, index));
+        var mustNotRun = new AgentRunner(new ProcessExecutor(), "/bin/sh", List.of("-c", "exit 97"), directory, Duration.ofSeconds(5));
+        try (var progress = new CommandProgress("revision", new java.io.PrintStream(java.io.OutputStream.nullOutputStream()))) {
+            require(ReviewTasks.run(List.of(task), mustNotRun, directory, 1, progress, 1, 2, "Resume revision proof", true)
+                    .get("scope").equals(saved), "resume reuses a valid scope-premise correction while rejecting the original oversized location");
+        }
     }
 
     private static void policyAndPresentation() throws Exception {
@@ -164,6 +221,74 @@ final class ReviewQualityRegressionTests {
             require(Files.readString(directory.resolve("proof-response.md")).equals("insufficient"), "semantic repair can downgrade the verdict");
             require(Files.isRegularFile(directory.resolve("proof-decision-repair-response.md")), "decision correction has a separate audit artifact");
             ReviewTasks.run(tasks, agent, directory, 1, progress, 1, 2, "Resume proof", true);
+        }
+    }
+
+    private static void citationSourceReferences() throws Exception {
+        String examplePath = "examples/ci/github-actions.yml";
+        String examplePatch = "diff --git a/" + examplePath + " b/" + examplePath + "\nnew file mode 100644\n"
+                + "--- /dev/null\n+++ b/" + examplePath + "\n@@ -0,0 +1,2 @@\n"
+                + "+      - uses: actions/checkout@v7\n+        uses: actions/upload-artifact@v7\n";
+        var exampleDiff = EvidenceSource.diff(examplePath, null, examplePatch, SCOPE, true);
+        var exampleFile = EvidenceSources.file("target", examplePath, 1, examplePath + " at target",
+                "      - uses: actions/checkout@v7\n        uses: actions/upload-artifact@v7\n", SCOPE, LanguageRegistry.defaults());
+        String ciPath = ".github/workflows/ci.yml";
+        var ciDiff = EvidenceSource.diff(ciPath, null, "diff --git a/" + ciPath + " b/" + ciPath + "\n"
+                + "@@ -20,1 +20,2 @@\n       run: mvn verify\n+      run: python3 -m unittest\n", SCOPE, true);
+        var ciFile = EvidenceSources.file("target", ciPath, 1, ciPath + " at target", "steps:\n        uses: actions/checkout@v4\n",
+                SCOPE, LanguageRegistry.defaults());
+        var catalog = new EvidenceCatalog(List.of(exampleDiff, exampleFile, ciDiff, ciFile), true);
+        var index = new EvidenceIndex(catalog);
+        var evidence = new EvidenceBundle(SCOPE, List.of(examplePath, ciPath), "", "", 20_000, null, catalog);
+        for (String alias : List.of(examplePath + " diff", examplePath + " [diff]")) {
+            var bound = index.bind(List.of(new EvidenceIndex.Citation(alias, "new file mode 100644")));
+            require(bound.getFirst().sourceId().equals(exampleDiff.id()) && index.hasBaseline(bound) && !index.hasTarget(bound),
+                    "diff aliases preserve patch provenance; metadata does not become target implementation");
+        }
+        String inventory = index.inventory();
+        require(inventory.contains(index.reference(exampleDiff.id()) + ": " + examplePath + " [source]\n  Kind: DIFF")
+                && inventory.contains(index.reference(exampleFile.id()) + ": " + examplePath + " at target [source]\n  Kind: TARGET_SOURCE"),
+                "same-file patch and source IDs have distinct types in the model inventory");
+        try {
+            index.validate(List.of(new EvidenceIndex.Citation(exampleFile.id(), "new file mode 100644")));
+            throw new AssertionError("Diff metadata is absent from a full file");
+        } catch (SourceQuotationException invalid) {
+            require(invalid.getMessage().contains(exampleDiff.id()) && invalid.getMessage().contains("Kind: DIFF"),
+                    "file-vs-diff mismatch returns the exact included patch ID without accepting the wrong reference");
+        }
+        String response = "<verification><status>INSUFFICIENT_EVIDENCE</status><reason>External version availability is unproved.</reason>"
+                + "<citations>" + citation(examplePath + " diff", "new file mode 100644")
+                + citation(examplePath + " diff", "+      - uses: actions/checkout@v7")
+                + citation(examplePath + " diff", "+        uses: actions/upload-artifact@v7")
+                + citation(ciDiff.id(), "uses: actions/checkout@v4") + "</citations></verification>";
+        try {
+            ReviewGrounding.verification(response, finding(300), evidence, index);
+            throw new AssertionError("An unchanged line cannot cite a patch that omits it");
+        } catch (SourceQuotationException invalid) {
+            require(invalid.getMessage().contains(ciFile.id()) && invalid.getMessage().contains("Kind: TARGET_SOURCE"),
+                    "unchanged v4 line gets an exact full-source reference hint");
+        }
+        String corrected = response.replace("<source>" + ciDiff.id() + "</source>", "<source>" + ciFile.id() + "</source>");
+        require(ReviewGrounding.verification(corrected, finding(300), evidence, index).verdict().status()
+                == ReviewOutput.Status.INSUFFICIENT_EVIDENCE, "reference correction preserves the unconfirmed verdict");
+        fails(() -> index.validate(List.of(new EvidenceIndex.Citation(ciFile.id(), "uses: actions/checkout@v8"))));
+        var collision = EvidenceSource.create(examplePath + " diff", "text", "A distinct literal block title.", "target", "literal.yml", 1,
+                java.util.Set.of(EvidenceSource.Role.TARGET, EvidenceSource.Role.IMPLEMENTATION), true);
+        var collisionIndex = new EvidenceIndex(catalog.plus(new EvidenceCatalog(List.of(collision), true)));
+        fails(() -> collisionIndex.validate(List.of(new EvidenceIndex.Citation(examplePath + " diff", "new file mode 100644"))));
+        collisionIndex.validate(List.of(new EvidenceIndex.Citation(exampleDiff.id(), "new file mode 100644")));
+
+        Path directory = Files.createTempDirectory("review-reference-repair-");
+        String script = "prompt=$(cat); case \"$prompt\" in *'Reference correction candidates'*'" + ciFile.id()
+                + "'*) cat <<'FIXED'\n" + corrected + "\nFIXED\n;; *) cat <<'WRONG'\n" + response + "\nWRONG\n;; esac";
+        var agent = new AgentRunner(new ProcessExecutor(), "/bin/sh", List.of("-c", script), directory, Duration.ofSeconds(5));
+        var task = new ReviewTasks.Task("R1-2", "Review the supplied CI example", reply -> ReviewGrounding.verification(reply, finding(300), evidence, index));
+        try (var progress = new CommandProgress("reference", new java.io.PrintStream(java.io.OutputStream.nullOutputStream()))) {
+            var replies = ReviewTasks.run(List.of(task), agent, directory, 1, progress, 1, 2, "Reference repair", false);
+            require(ReviewGrounding.verification(replies.get("R1-2"), finding(300), evidence, index).verdict().status()
+                    == ReviewOutput.Status.INSUFFICIENT_EVIDENCE, "one bounded source correction resolves the saved failure shape");
+            var mustNotRun = new AgentRunner(new ProcessExecutor(), "/bin/sh", List.of("-c", "exit 17"), directory, Duration.ofSeconds(5));
+            ReviewTasks.run(List.of(task), mustNotRun, directory, 1, progress, 1, 2, "Resume reference repair", true);
         }
     }
 

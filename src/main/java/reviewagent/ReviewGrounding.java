@@ -52,7 +52,8 @@ final class ReviewGrounding {
         }
         for (var premise : support.premises()) {
             if (premise.basis() == ReviewSupport.Basis.ASSUMPTION
-                    || premise.basis() == ReviewSupport.Basis.IMPLEMENTATION && !index.hasTarget(premise.citations())
+                    || premise.basis() == ReviewSupport.Basis.IMPLEMENTATION
+                        && !index.hasTarget(premise.citations()) && !index.hasBaseline(premise.citations())
                     || premise.basis() == ReviewSupport.Basis.CONTRACT && !index.hasContract(premise.citations())) {
                 throw new ReviewDecisionException("Unproved finding premise: " + premise.statement()
                         + ". Supply decisive implementation/contract quotations, or mark the finding INSUFFICIENT_EVIDENCE.");
@@ -60,20 +61,27 @@ final class ReviewGrounding {
         }
         ReviewSupport.Basis required = support.kind() == ReviewSupport.Kind.EXPLICIT_DEFENSIVE_REQUIREMENT
                 ? ReviewSupport.Basis.CONTRACT : ReviewSupport.Basis.IMPLEMENTATION;
-        if (support.premises().stream().noneMatch(p -> p.basis() == required)) {
-            throw new ReviewDecisionException("Finding support kind requires a proved " + required + " premise");
+        // Baseline and diff metadata can prove change attribution, but cannot prove a target failure path.
+        if (support.premises().stream().noneMatch(p -> p.basis() == required
+                && (required != ReviewSupport.Basis.IMPLEMENTATION || index.hasTarget(p.citations())))) {
+            throw new ReviewDecisionException("Finding support kind requires a proved " + required
+                    + (required == ReviewSupport.Basis.IMPLEMENTATION ? " premise at the target revision" : " premise"));
         }
     }
 
     static List<AssessmentItem> assessment(String response, InputDocument requirement, EvidenceIndex index,
                                            List<AssessmentItem> previous) throws IOException {
-        List<AssessmentItem> parsed = ReviewOutput.assessmentItems(response);
+        List<AssessmentItem> parsed = new ArrayList<>();
         var items = new ArrayList<AssessmentItem>();
         var quoteErrors = new ArrayList<String>();
         String original = EvidenceIndex.normalize(requirement.content());
-        for (AssessmentItem item : parsed) {
-            if (!original.contains(EvidenceIndex.normalize(item.requirement()))) {
-                quoteErrors.add(item.id() + " <requirement>: " + EvidenceText.oneLine(item.requirement()));
+        for (AssessmentItem raw : ReviewOutput.assessmentItems(response)) {
+            AssessmentItem item = raw;
+            try { item = RequirementReference.resolve(raw, requirement); }
+            catch (IOException invalid) { quoteErrors.add(raw.id() + " <requirementLines>: " + invalid.getMessage()); }
+            parsed.add(item);
+            if (item.requirementLines().isEmpty() && !RequirementReference.contains(original, item.requirement())) {
+                quoteErrors.add(item.id() + " <requirement>: " + EvidenceText.oneLine(item.requirement()) + RequirementReference.hint(requirement, item.requirement()));
             }
             try { index.validate(item.citations()); }
             catch (SourceQuotationException invalid) { quoteErrors.add(item.id() + " " + invalid.getMessage()); }
@@ -92,7 +100,7 @@ final class ReviewGrounding {
                 throw new ReviewDecisionException("A conclusive requirement assessment requires implementation quotations");
             }
             items.add(new AssessmentItem(item.id(), item.requirement(), item.requirementText(), item.behavior(), item.status(),
-                    item.reasoning(), item.boundaries(), item.gap(), citations, item.policyBasis(), item.policyReason()));
+                    item.reasoning(), item.boundaries(), item.gap(), citations, item.policyBasis(), item.policyReason(), item.requirementLines()));
         }
         for (AssessmentItem item : items) {
             boolean conflicting = items.stream().anyMatch(other -> !other.id().equals(item.id())
@@ -103,7 +111,8 @@ final class ReviewGrounding {
                     + ". Reconcile the verdicts or distinguish the observable behaviors explicitly.");
         }
         for (AssessmentItem old : previous) {
-            if (items.stream().noneMatch(item -> item.id().equals(old.id()) && item.requirement().equals(old.requirement()))) {
+            if (items.stream().noneMatch(item -> item.id().equals(old.id())
+                    && EvidenceIndex.normalize(item.requirement()).equals(EvidenceIndex.normalize(old.requirement())))) {
                 throw new ReviewDecisionException("Requirement audit omitted or remapped an existing assessment item: " + old.id());
             }
         }

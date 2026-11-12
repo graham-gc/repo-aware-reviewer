@@ -1,5 +1,6 @@
 package reviewagent;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -17,6 +18,7 @@ record EvidenceSource(String id, String title, String format, String text, Strin
     record Location(String sourceId, String path, String revision, int firstLine, int lastLine, Side side) {
         String reference() { return path + ":" + firstLine + (lastLine == firstLine ? "" : "–" + lastLine) + " at " + revision; }
     }
+    record Excerpt(String text, List<Location> locations) { }
 
     EvidenceSource { roles = Set.copyOf(roles); }
 
@@ -44,6 +46,24 @@ record EvidenceSource(String id, String title, String format, String text, Strin
 
     String markdown() { return EvidenceText.block(title, format, text); }
     boolean role(Role role) { return roles.contains(role); }
+
+    Excerpt excerpt(String selector) throws IOException {
+        if (!selector.matches("[1-9][0-9]{0,6}:[1-9][0-9]{0,6}")) {
+            throw new IOException("Expected <lines>first:last</lines> with positive block-relative line numbers");
+        }
+        String[] endpoints = selector.split(":");
+        int from = Integer.parseInt(endpoints[0]), to = Integer.parseInt(endpoints[1]);
+        List<String> lines = text.lines().toList();
+        if (to < from || to - from >= 200 || to > lines.size()) {
+            throw new IOException("Citation range must contain 1–200 lines entirely inside the included block ("
+                    + lines.size() + " lines); these are block-relative, not repository file line numbers");
+        }
+        List<Location> locations = path.isEmpty() || revision.isEmpty() ? List.of()
+                : role(Role.DIFF) ? diffLocations(lines, from, to)
+                : firstLine < 1 ? List.of() : List.of(new Location(id, path, revision,
+                    firstLine + from - 1, firstLine + to - 1, Side.FILE));
+        return new Excerpt(String.join("\n", lines.subList(from - 1, to)), locations);
+    }
 
     List<Location> locations(String quotation) {
         if (path.isEmpty() || revision.isEmpty() || firstLine < 1 && !role(Role.DIFF)) return List.of();

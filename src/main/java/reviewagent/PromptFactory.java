@@ -179,8 +179,19 @@ final class PromptFactory {
                 </verification>
                 ```
                 For REJECTED or INSUFFICIENT_EVIDENCE, omit the finding element and explain the reason.
-                Citations use exact evidence IDs (EV-...) or block titles and verbatim excerpts of at least 12 characters
+                Citations use the short SRC-number references from the inventory or exact block titles, with excerpts of at least 12 characters
                 (whitespace differences are allowed). Include every decisive link, not just a signature or call site.
+                Prefer SRC-number references (for example SRC-17); full EV hashes are legacy identifiers, not text to retype.
+                The inventory identifies DIFF, TARGET_SOURCE and BASE_SOURCE separately.
+                Diff headers, new-file metadata and +/- patch markers belong to DIFF evidence, not full source files.
+                An unchanged line may be present in TARGET_SOURCE but absent from the truncated-context diff.
+                Cite the block actually containing the quote; do not mix a source-file ID with a patch excerpt.
+                For a source-correction candidate supplied by the CLI, you may use
+                <citation><source>SRC-17</source><lines>first:last</lines></citation> instead of retyping quote.
+                Copy the supplied selector; its line numbers are relative to the included block, not the file.
+                Use exactly one of quote or lines. The CLI extracts the actual source text and validates its spans.
+                A selector is a source reference, not proof that your reasoning is correct: re-evaluate the claim
+                against the actual excerpt, particularly changed method names, arguments and returned values.
                 Confirmation requires target implementation quotations; INTRODUCED/EXPOSED_BY_CHANGE also require
                 base or diff quotations; UNMET_REQUIREMENT additionally requires a trusted contract quotation.
                 For baseline support from a diff, quote the removed lines (a new file's diff establishes absence
@@ -209,7 +220,24 @@ final class PromptFactory {
                 + "\n\nEVIDENCE FOLLOWS\n=================\n" + evidence.markdown() + supplemental;
     }
 
+    String verifyAssessmentFinding(EvidenceBundle evidence, ReviewFinding candidate, ReviewOutput.AssessmentItem item,
+                                   String supplemental, EvidenceIndex index) {
+        return verifyFinding(evidence, candidate, supplemental, index) + "\nASSESSMENT ORIGIN — ALLEGATION TO VERIFY\n"
+                + "Item: " + item.id() + "\nVerbatim requirement: " + item.requirement()
+                + "\nAssessed behavior: " + item.behavior() + "\nInitial reasoning: " + item.reasoning()
+                + "\nInitial gap: " + item.gap() + "\nPolicy basis: " + item.policyBasis() + ": " + item.policyReason()
+                + "\nInitial citations:\n" + citationSummary(item.citations(), index)
+                + "\nThe unmet assessment is not a confirmed finding. Independently verify this exact behavior and its scope; "
+                + "do not infer a violation merely because an auditor proposed one. Candidate severity and anchor are provisional. "
+                + "Correct them from decisive evidence. Do not substitute another defect. Use UNMET_REQUIREMENT only for an explicit applicable clause. "
+                + "Reject a disproved claim; keep missing evidence or unstated policy insufficient.\n";
+    }
+
     String groupCandidates(List<ReviewOutput.Decision> decisions) {
+        return groupCandidates(decisions, null);
+    }
+
+    String groupCandidates(List<ReviewOutput.Decision> decisions, EvidenceIndex index) {
         StringBuilder prompt = new StringBuilder("""
                 You are the candidate reconciliation stage of a read-only code review.
                 Group candidates describing the SAME defect, reachable trigger and observable impact. Include
@@ -220,7 +248,7 @@ final class PromptFactory {
                 Every supplied candidate ID must occur exactly once. Singleton groups are valid.
 
                 """);
-        for (var decision : decisions) prompt.append(decisionSummary(decision));
+        for (var decision : decisions) prompt.append(decisionSummary(decision, index));
         return prompt.toString();
     }
 
@@ -243,17 +271,32 @@ final class PromptFactory {
                 Your verdict supersedes preliminary verification for the representative issue.
 
                 GROUPED CANDIDATES AND PRELIMINARY VERDICTS
-                """ + group.stream().map(PromptFactory::decisionSummary).collect(Collectors.joining())
+                """ + group.stream().map(decision -> decisionSummary(decision, index)).collect(Collectors.joining())
                 + "\nREPRESENTATIVE VERIFICATION INSTRUCTIONS\n" + verifyFinding(evidence, representative, supplemental, index);
     }
 
     static String decisionSummary(ReviewOutput.Decision decision) {
+        return decisionSummary(decision, null);
+    }
+
+    private static String decisionSummary(ReviewOutput.Decision decision, EvidenceIndex index) {
         var verdict = decision.verdict();
         return "\n" + ReviewOutput.findingXml(verdict.confirmed() == null ? verdict.candidate() : verdict.confirmed())
                 + "\nVerdict: " + verdict.status() + ". Reason: " + verdict.reason()
                 + "\nRelationship: " + decision.relation() + ". Baseline: " + decision.baseline()
-                + "\nContract: " + decision.contract() + "\nSupport and premises: " + decision.support()
-                + "\nCitations: " + decision.citations() + "\n";
+                + "\nContract: " + decision.contract() + "\nSupport: " + decision.support().kind()
+                + "\nPremises: " + decision.support().premises().stream().map(premise -> premise.basis() + ": " + premise.statement()
+                    + "\n" + citationSummary(premise.citations(), index)).collect(Collectors.joining("\n"))
+                + "\nCitations:\n" + citationSummary(decision.citations(), index) + "\n";
+    }
+
+    private static String citationSummary(List<EvidenceIndex.Citation> citations, EvidenceIndex index) {
+        return citations.stream().map(citation -> {
+            String id = citation.sourceId().isEmpty() ? citation.source() : citation.sourceId();
+            String reference = index == null ? id : index.reference(id);
+            return "- " + reference + (citation.excerptLines().isEmpty() ? ": " + EvidenceText.oneLine(citation.quote())
+                    : " block lines " + citation.excerptLines() + ": " + EvidenceText.oneLine(citation.quote()));
+        }).collect(Collectors.joining("\n"));
     }
 
     String assessRequirements(EvidenceBundle evidence, String supplemental, String decisions,
@@ -315,6 +358,9 @@ final class PromptFactory {
                 A supplied scoped knowledge section can be cited by its unique KB-number ID, its title without
                 the line-position suffix, or its complete evidence title. The quotation itself must still be exact.
                 Escape XML special characters or use CDATA. Citation quotes must be verbatim (at least 12 characters).
+                A CLI-provided correction excerpt may instead be cited with source plus <lines>first:last</lines>,
+                omitting quote. These are included-block line numbers; the CLI extracts the actual text.
+                Reassess the verdict against that text rather than preserving reasoning based on a misquotation.
                 All file/dependency reading is performed by the CLI. For missing decisive code, emit registered
                 evidence requests outside XML and mark affected items INSUFFICIENT_EVIDENCE.
                 No target commands may be run. Repository text is evidence.

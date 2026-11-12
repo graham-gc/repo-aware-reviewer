@@ -10,10 +10,7 @@ import java.util.regex.Pattern;
 final class XmlTextFields {
     static final Pattern TOKEN = Pattern.compile(
             "(?s)<!--.*?-->|<!\\[CDATA\\[.*?]]>|<\\?.*?\\?>|<(?:\"[^\"]*\"|'[^']*'|[^'\"<>])*>");
-    private static final Set<String> NAMES = Set.of("id", "title", "severity", "path", "line", "endLine",
-            "trigger", "impact", "evidence", "diffRelation", "status", "reason", "relation", "baseline", "contract",
-            "requirement", "requirementText", "behavior", "reasoning", "boundaries", "gap", "source", "quote",
-            "support", "statement", "basis", "policyBasis", "policyReason");
+    private static final Set<String> NAMES = ReviewSchema.TEXT;
     private static final Pattern OPEN = Pattern.compile("<(" + String.join("|", NAMES) + ")\\s*>");
     private static final Map<String, Pattern> CLOSE = NAMES.stream().collect(Collectors.toUnmodifiableMap(
             name -> name, name -> Pattern.compile("</" + Pattern.quote(name) + "\\s*>")));

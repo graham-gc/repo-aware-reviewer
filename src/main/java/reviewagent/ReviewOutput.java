@@ -12,16 +12,17 @@ import java.util.Set;
 
 /** Structured review protocol and domain values; grounding and rendering have separate owners. */
 final class ReviewOutput {
-    private static final Set<String> FINDING_FIELDS = Set.of("id", "title", "severity", "path", "line", "endLine",
-            "trigger", "impact", "evidence", "diffRelation");
-    private static final Set<String> ASSESSMENT_FIELDS = Set.of("id", "requirement", "requirementText", "behavior",
-            "status", "reasoning", "boundaries", "gap", "citations", "policyBasis", "policyReason");
+    private static final Set<String> FINDING_FIELDS = ReviewSchema.FINDING;
+    private static final Set<String> ASSESSMENT_FIELDS = ReviewSchema.ASSESSMENT_ITEM;
 
     enum Status {
         CONFIRMED, REJECTED, INSUFFICIENT_EVIDENCE
     }
 
-    record Verification(ReviewFinding candidate, Status status, String reason, ReviewFinding confirmed) {
+    record Verification(ReviewFinding candidate, Status status, String reason, ReviewFinding confirmed, boolean validationFailed) {
+        Verification(ReviewFinding candidate, Status status, String reason, ReviewFinding confirmed) {
+            this(candidate, status, reason, confirmed, false);
+        }
     }
 
     enum Relation { INTRODUCED, EXPOSED_BY_CHANGE, UNMET_REQUIREMENT, PRE_EXISTING, UNRESOLVED }
@@ -38,7 +39,13 @@ final class ReviewOutput {
 
     record AssessmentItem(String id, String requirement, String requirementText, String behavior, AssessmentStatus status,
                           String reasoning, String boundaries, String gap, List<EvidenceIndex.Citation> citations,
-                          PolicyBasis policyBasis, String policyReason) { }
+                          PolicyBasis policyBasis, String policyReason, String requirementLines) {
+        AssessmentItem(String id, String requirement, String requirementText, String behavior, AssessmentStatus status,
+                       String reasoning, String boundaries, String gap, List<EvidenceIndex.Citation> citations,
+                       PolicyBasis policyBasis, String policyReason) {
+            this(id, requirement, requirementText, behavior, status, reasoning, boundaries, gap, citations, policyBasis, policyReason, "");
+        }
+    }
 
     record Discovery(List<ReviewFinding> findings, String notes) {
     }
@@ -54,7 +61,7 @@ final class ReviewOutput {
 
     static Verification verification(String response, ReviewFinding candidate, List<String> changedFiles) throws IOException {
         Element root = xml(response, "verification").root();
-        Map<String, Element> fields = fields(root, Set.of("status", "reason", "finding", "relation", "baseline", "contract", "citations", "support", "premises"));
+        Map<String, Element> fields = fields(root, ReviewSchema.VERIFICATION);
         Status status;
         try {
             status = Status.valueOf(text(fields, "status"));
@@ -77,7 +84,7 @@ final class ReviewOutput {
     static Decision decision(String response, ReviewFinding candidate, List<String> changedFiles) throws IOException {
         Verification verdict = verification(response, candidate, changedFiles);
         Map<String, Element> fields = fields(xml(response, "verification").root(),
-                Set.of("status", "reason", "finding", "relation", "baseline", "contract", "citations", "support", "premises"));
+                ReviewSchema.VERIFICATION);
         Relation relation = Relation.UNRESOLVED;
         if (fields.containsKey("relation")) {
             try { relation = Relation.valueOf(text(fields, "relation")); }
@@ -134,9 +141,12 @@ final class ReviewOutput {
             PolicyBasis policy;
             try { policy = PolicyBasis.valueOf(text(fields, "policyBasis")); }
             catch (IllegalArgumentException invalid) { throw new IOException("Unknown assessment policy basis", invalid); }
-            items.add(new AssessmentItem(id, text(fields, "requirement"), text(fields, "requirementText"), text(fields, "behavior"),
+            if (fields.containsKey("requirement") == fields.containsKey("requirementLines")) {
+                throw new IOException("Use exactly one of requirement or requirementLines");
+            }
+            items.add(new AssessmentItem(id, fields.containsKey("requirement") ? text(fields, "requirement") : "", text(fields, "requirementText"), text(fields, "behavior"),
                     status, text(fields, "reasoning"), text(fields, "boundaries"), text(fields, "gap"), citations(fields.get("citations")),
-                    policy, text(fields, "policyReason")));
+                    policy, text(fields, "policyReason"), fields.containsKey("requirementLines") ? text(fields, "requirementLines") : ""));
         }
         if (items.isEmpty()) throw new IOException("Supplied requirements require a nonempty assessment");
         return List.copyOf(items);
@@ -152,13 +162,18 @@ final class ReviewOutput {
         var citations = new ArrayList<EvidenceIndex.Citation>();
         var quoteErrors = new ArrayList<String>();
         for (Element citation : children(element, "citation")) {
-            var fields = fields(citation, Set.of("source", "quote"));
+            var fields = fields(citation, Set.of("source", "quote", "lines"));
             String source = text(fields, "source");
             try {
-                citations.add(new EvidenceIndex.Citation(source, text(fields, "quote")));
+                if (fields.containsKey("quote") == fields.containsKey("lines")) {
+                    throw new IOException("Use exactly one of quote or lines");
+                }
+                citations.add(fields.containsKey("lines") ? EvidenceIndex.Citation.lines(source, text(fields, "lines"))
+                        : new EvidenceIndex.Citation(source, text(fields, "quote")));
             } catch (IOException invalidQuote) {
-                quoteErrors.add(EvidenceText.oneLine(source) + ": quote must contain nonempty literal source text. "
-                        + "Escape XML markup or wrap the original excerpt in CDATA; do not put nested XML elements inside quote.");
+                quoteErrors.add(EvidenceText.oneLine(source) + ": use exactly one nonempty quote or block-relative lines selector. "
+                        + "A quote must contain literal source text; escape XML markup or use CDATA. "
+                        + "For a CLI-provided excerpt selector, omit quote and copy <lines>first:last</lines>.");
             }
         }
         if (!quoteErrors.isEmpty()) throw new SourceQuotationException(String.join("\n", quoteErrors));
