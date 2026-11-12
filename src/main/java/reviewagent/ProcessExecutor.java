@@ -22,7 +22,14 @@ final class ProcessExecutor {
 
     CommandResult run(List<String> command, Path workingDirectory, String stdin, Duration timeout,
                       Path stdoutLog, Path stderrLog) throws IOException, InterruptedException {
+        return run(command, workingDirectory, stdin, timeout, stdoutLog, stderrLog, java.util.Map.of());
+    }
+
+    CommandResult run(List<String> command, Path workingDirectory, String stdin, Duration timeout,
+                      Path stdoutLog, Path stderrLog, java.util.Map<String, String> environment)
+            throws IOException, InterruptedException {
         ProcessBuilder builder = new ProcessBuilder(command).directory(workingDirectory.toFile());
+        builder.environment().putAll(environment);
         long timeoutNanos = timeout.toNanos();
         Process process = builder.start();
         long deadline = System.nanoTime() + timeoutNanos;

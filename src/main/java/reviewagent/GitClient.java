@@ -20,6 +20,9 @@ final class GitClient {
 
     ReviewScope resolve(CliOptions options) throws IOException, InterruptedException {
         requireRepository();
+        if (options.baseRemote() != null) {
+            throw new IllegalArgumentException("Remote baselines must be fetched and pinned before resolving the review scope");
+        }
         if (options.branch() != null) {
             String target = commit(options.branch());
             String base = commit(options.base());

@@ -52,7 +52,21 @@ java -jar build/code-review-agent.jar review \
 - `--commit <ref>` 审查指定提交相对第一父提交的变更，默认目标是 `HEAD`。第一父提交须在本地可用。
 - `--branch <目标引用> --base <基线引用>` 直接比较指定基线与目标的代码快照，等同于 `git diff BASE TARGET`。两者均接受分支名、标签或提交 ID，必须成对使用，不能与 `--commit` 同时使用。
 
-CLI 读取本地已有的 Git 版本，不会自动拉取或切换分支。证据包中的仓库审查规则来自指定的基线提交；单次提交模式下则来自目标提交的第一父提交。
+CLI 默认读取本地已有的 Git 版本。需要在新审查开始前获取远端基线时，增加 `--base-remote`，并在 `--base` 中指定该远端上的分支名：
+
+```bash
+java -jar build/code-review-agent.jar review \
+  --repo /path/to/repo \
+  --branch <目标提交ID> \
+  --base main \
+  --base-remote origin
+```
+
+其他基线可写成 `--base release/1.0`，`--base-remote upstream` 则指定另一个已配置的远端。使用 `--base-remote` 时，基线应写 `main` 或 `refs/heads/main`，而非本地跟踪引用 `origin/main`。目标提交仍须在本地可用。获取过程使用仓库已有的 Git 认证方式，并将取得的远端分支版本固定为本轮基线。它代表获取时的远端版本，不依赖合并方向或父提交顺序。审查仍直接比较这份快照与目标，目标尚未同步该基线时的差异也会纳入。获取失败会停止审查，不会回退到本地旧引用。
+
+获取过程不会检出或合并代码，不会更新本地分支、远端跟踪引用或覆盖 `FETCH_HEAD`。每轮使用独立引用保护基线，审查结束后移除。获取期间也使用同一行动态进度。默认获取超时为 120 秒，可用 `--fetch-timeout-seconds` 调整。运行目录保留 `baseline-fetch-stdout.log`、`baseline-fetch-stderr.log`、`baseline-fetch-execution.log`（命令、工作目录、开始时间、超时、耗时及退出状态）和 `baseline-fetch-snapshot.log`（远端、分支、固定提交及获取时间）。`scope.md` 记录远端、分支及实际比较的提交。`--resume` 会复用原运行固定的基线，不会重新获取；需要更新基线时应开启新审查。
+
+证据包中的仓库审查规则来自指定的基线提交；单次提交模式下则来自目标提交的第一父提交。
 
 三个独立审查 Agent 分别侧重正确性与回归、需求与业务契约、边界条件与安全。程序合并并去重它们的补证请求。取得新证据后，增加一次检查以发现新的候选问题。每个候选问题随后单独调用模型复核，缺少关键证据时可以继续请求代码、依赖证据或知识库章节。
 

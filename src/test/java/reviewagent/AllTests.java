@@ -16,12 +16,14 @@ public final class AllTests {
         testRequestLimits();
         testReviewLanguage();
         testMutuallyExclusiveScopes();
+        testRemoteBaselineOptions();
         testPromptPolicy();
         testKnowledgeOptions();
         testAgentResponseEncoding();
         testCommandDiagnostics();
         testProgressStageElapsed();
         GitScopeTests.run();
+        RemoteBaselineTests.run();
         ReviewOutputTests.run();
         EvidenceTests.run();
         ReviewQualityTests.run();
@@ -165,6 +167,24 @@ public final class AllTests {
         throwsArgument(() -> CliOptions.parse(new String[]{"review", "--repo", ".", "--base", "main"}));
         throwsArgument(() -> CliOptions.parse(new String[]{"review", "--repo", ".", "--commit", "HEAD", "--base", "main"}));
         throwsArgument(() -> CliOptions.parse(new String[]{"review", "--repo", ".", "--range", "main..HEAD"}));
+    }
+
+    private static void testRemoteBaselineOptions() {
+        equal(null, CliOptions.parse(new String[]{"review", "--repo", "."}).baseRemote());
+        CliOptions remote = CliOptions.parse(new String[]{"review", "--repo", ".", "--branch", "HEAD",
+                "--base", "release/1.0", "--base-remote", "upstream", "--fetch-timeout-seconds", "60"});
+        equal("upstream", remote.baseRemote());
+        equal(Duration.ofSeconds(60), remote.fetchTimeout());
+        for (String[] arguments : List.of(
+                new String[]{"--base-remote", "origin"},
+                new String[]{"--fetch-timeout-seconds", "60"},
+                new String[]{"--branch", "HEAD", "--base", "main", "--base-remote", "--all"},
+                new String[]{"--branch", "HEAD", "--base", "main", "--base-remote", "https://example.invalid/repo"},
+                new String[]{"--branch", "HEAD", "--base", "main", "--base-remote", "origin", "--fetch-timeout-seconds", "0"})) {
+            var command = new java.util.ArrayList<>(List.of("review", "--repo", "."));
+            command.addAll(List.of(arguments));
+            throwsArgument(() -> CliOptions.parse(command.toArray(String[]::new)));
+        }
     }
 
     private static void testReviewLanguage() {
