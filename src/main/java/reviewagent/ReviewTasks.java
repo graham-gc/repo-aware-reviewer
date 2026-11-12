@@ -71,13 +71,14 @@ final class ReviewTasks {
             throws IOException, InterruptedException {
         Path responseFile = directory.resolve(task.id() + "-response.md");
         Path repairFile = directory.resolve(task.id() + "-repair-response.md");
+        Path quoteRepairFile = directory.resolve(task.id() + "-quote-repair-response.md");
         Path promptFile = directory.resolve(task.id() + "-prompt.md");
         String response = null;
         boolean samePrompt = Files.isRegularFile(promptFile)
                 && Files.readString(promptFile, StandardCharsets.UTF_8).equals(task.prompt());
         // A valid old verdict is not reusable when its instructions or supplied evidence have changed.
         if (resume && samePrompt) {
-            for (Path saved : List.of(responseFile, repairFile)) {
+            for (Path saved : List.of(responseFile, repairFile, quoteRepairFile)) {
                 if (!Files.isRegularFile(saved)) {
                     continue;
                 }
@@ -102,7 +103,7 @@ final class ReviewTasks {
             // Invalidate before recording the new prompt: an interrupted invocation must not associate an
             // old response (or repair) with the new evidence on the next resume.
             if (!samePrompt) {
-                for (Path old : List.of(responseFile, repairFile, promptFile)) {
+                for (Path old : List.of(responseFile, repairFile, quoteRepairFile, promptFile)) {
                     if (Files.isRegularFile(old)) Files.move(old,
                             old.resolveSibling(old.getFileName().toString().replace(task.id() + "-", task.id() + "-superseded-")),
                             java.nio.file.StandardCopyOption.REPLACE_EXISTING);
@@ -112,28 +113,40 @@ final class ReviewTasks {
             response = agent.invoke(task.prompt(), directory.resolve(task.id()));
             Files.writeString(responseFile, response, StandardCharsets.UTF_8);
         }
-        try {
-            AgentRunner.validateResponse(response);
-            task.validator().validate(response);
-            return response;
-        } catch (IOException invalid) {
-            Files.writeString(directory.resolve(task.id() + "-invalid-response.md"), response, StandardCharsets.UTF_8);
-            String repairPrompt = task.prompt() + "\n\nOUTPUT FORMAT CORRECTION\n"
-                    + "The previous response failed structural validation. Correct only its serialization and comply with the response schema above. "
-                    + "Preserve the evidence-based decisions and reasoning. Do not invent facts or promote an unconfirmed finding. "
-                    + "Return the complete corrected response.\nValidation error: " + EvidenceText.oneLine(invalid.getMessage())
-                    + "\n\nPREVIOUS RESPONSE\n" + response;
-            Files.writeString(directory.resolve(task.id() + "-repair-prompt.md"), repairPrompt, StandardCharsets.UTF_8);
-            String repaired = agent.invoke(repairPrompt, directory.resolve(task.id() + "-repair"));
-            Files.writeString(repairFile, repaired, StandardCharsets.UTF_8);
+        var attempted = new java.util.HashSet<String>();
+        while (true) {
             try {
-                task.validator().validate(repaired);
-            } catch (IOException stillInvalid) {
-                throw new IOException("Task " + task.id() + " returned invalid structured output after format correction: "
-                        + stillInvalid.getMessage(), stillInvalid);
+                AgentRunner.validateResponse(response);
+                task.validator().validate(response);
+            } catch (IOException invalid) {
+                boolean quotation = invalid instanceof SourceQuotationException;
+                String kind = quotation ? "quote-repair" : "repair";
+                if (!attempted.add(kind)) {
+                    throw new IOException("Task " + task.id() + " returned invalid structured output after bounded output correction: "
+                            + invalid.getMessage(), invalid);
+                }
+                Files.writeString(directory.resolve(task.id() + (quotation ? "-quote-invalid-response.md" : "-invalid-response.md")),
+                        response, StandardCharsets.UTF_8);
+                String correction = quotation
+                        ? "SOURCE QUOTATION CORRECTION\n"
+                            + "The response contains quotations absent from the supplied source. Re-copy each invalid requirement "
+                            + "or citation directly and exactly from the original evidence block. Fix matching quotations consistently. "
+                            + "Use requirementText for paraphrases or translations. Preserve applicable requirement meaning and "
+                            + "supported conclusions; do not invent a requirement or evidence, or promote an unconfirmed finding. "
+                            + "If no supplied source supports a conclusion, keep it insufficient rather than manufacturing a quote. "
+                        : "OUTPUT FORMAT CORRECTION\n"
+                            + "The previous response failed structural validation. Correct only its serialization and comply with the response schema above. "
+                            + "Preserve the evidence-based decisions and reasoning. Do not invent facts or promote an unconfirmed finding. ";
+                String repairPrompt = task.prompt() + "\n\n" + correction
+                        + "Return the complete corrected response.\nValidation error: " + invalid.getMessage()
+                        + "\n\nPREVIOUS RESPONSE\n" + response;
+                Files.writeString(directory.resolve(task.id() + "-" + kind + "-prompt.md"), repairPrompt, StandardCharsets.UTF_8);
+                response = agent.invoke(repairPrompt, directory.resolve(task.id() + "-" + kind));
+                Files.writeString(directory.resolve(task.id() + "-" + kind + "-response.md"), response, StandardCharsets.UTF_8);
+                continue;
             }
-            Files.writeString(responseFile, repaired, StandardCharsets.UTF_8);
-            return repaired;
+            Files.writeString(responseFile, response, StandardCharsets.UTF_8);
+            return response;
         }
     }
 }

@@ -13,6 +13,7 @@ final class GitScopeTests {
         Path fixture = Files.createTempDirectory("review-git-scope-test-");
         try {
             checkExplicitBaseline(fixture);
+            checkEmptyDiff(fixture);
         } finally {
             try (var paths = Files.walk(fixture)) {
                 for (Path path : paths.sorted(Comparator.reverseOrder()).toList()) Files.delete(path);
@@ -99,6 +100,38 @@ final class GitScopeTests {
     private static CliOptions comparison(Path repo, String target, String base) {
         return CliOptions.parse(new String[]{"review", "--repo", repo.toString(),
                 "--branch", target, "--base", base, "--prepare-only"});
+    }
+
+    private static void checkEmptyDiff(Path fixture) throws Exception {
+        var executor = new ProcessExecutor();
+        Path repo = Files.createDirectory(fixture.resolve("empty-diff"));
+        git(executor, repo, "init", "-q", "--initial-branch=main");
+        Files.writeString(repo.resolve("Core.java"), "class Core {}\n");
+        git(executor, repo, "add", "--all");
+        git(executor, repo, "commit", "-qm", "base");
+        String base = git(executor, repo, "rev-parse", "HEAD");
+        git(executor, repo, "commit", "--allow-empty", "-qm", "same tree, different commit");
+        String target = git(executor, repo, "rev-parse", "HEAD");
+        Path requirement = fixture.resolve("empty-diff-requirement.md");
+        Files.writeString(requirement, "应用与环境沿用现有配置。\n");
+        Path marker = fixture.resolve("unexpected-model-call");
+        for (String language : List.of("en", "zh-CN")) {
+            for (String baseline : List.of(base, target)) {
+                CliOptions options = CliOptions.parse(new String[]{"review", "--repo", repo.toString(),
+                        "--branch", target, "--base", baseline, "--requirement", requirement.toString(),
+                        "--language", language, "--output-dir", fixture.resolve("empty-output").toString(),
+                        "--agent-command", "/bin/sh", "--agent-arg", "-c", "--agent-arg", "touch \"$1\"; exit 99",
+                        "--agent-arg", "model-stub", "--agent-arg", marker.toString()});
+                Path run = new ReviewPipeline(executor, Clock.systemUTC()).run(options);
+                String report = Files.readString(run.resolve("report.md"));
+                require(report.contains(language.equals("en") ? "Not assessed: an empty diff" : "未进行需求验收：空 diff"),
+                        "empty diffs produce localized reports without claiming acceptance");
+                require(!Files.exists(marker) && !Files.exists(run.resolve("discovery")),
+                        "identical snapshots skip every model stage even when requirements are supplied");
+                require(Files.readString(run.resolve("coverage.md")).contains("No model was called")
+                        && Files.isRegularFile(run.resolve("requirement-assessment.md")), "skipped acceptance is recorded in artifacts");
+            }
+        }
     }
 
     private static String git(ProcessExecutor executor, Path repo, String... arguments) throws Exception {

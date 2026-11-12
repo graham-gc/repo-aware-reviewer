@@ -13,12 +13,77 @@ final class ReviewQualityTests {
         Path fixture = Files.createTempDirectory("review-quality-test-");
         try {
             protocols(fixture);
+            quotationRecovery(fixture);
             workflow(fixture);
         } finally {
             try (var paths = Files.walk(fixture)) {
                 for (Path path : paths.sorted(Comparator.reverseOrder()).toList()) Files.delete(path);
             }
         }
+    }
+
+    private static void quotationRecovery(Path fixture) throws Exception {
+        Path directory = Files.createDirectory(fixture.resolve("quotation-recovery"));
+        String first = "应用与环境沿用现有配置。";
+        String second = "一次调用只触发一次执行。";
+        Path requirementPath = directory.resolve("requirements.md");
+        String xmlExcerpt = "<plugin><groupId>example.group</groupId></plugin>";
+        Files.writeString(requirementPath, first + "\n" + second + "\n" + xmlExcerpt);
+        InputDocument requirement = InputDocument.read(requirementPath);
+        String source = "External requirement — " + requirementPath;
+        String valid = assessment(first, "INSUFFICIENT_EVIDENCE", citation(source, first), "Missing implementation")
+                .replace("</assessment>", "")
+                + assessment(second, "INSUFFICIENT_EVIDENCE", citation(source, second)
+                    + citation(source, "<![CDATA[" + xmlExcerpt + "]]>"), "Missing implementation")
+                    .replace("<assessment>", "").replace("<id>A1</id>", "<id>A2</id>");
+        String invalid = valid.replace(first, first.replace("与", "和")).replace(second, "一次调用会触发两次执行。")
+                .replace("<![CDATA[" + xmlExcerpt + "]]>", xmlExcerpt);
+        Files.writeString(directory.resolve("valid.xml"), valid);
+        Files.writeString(directory.resolve("invalid.xml"), invalid);
+        var scope = new ReviewScope(ReviewScope.Mode.COMMIT, "base", "target", "base", "target", "base..target");
+        String markdown = EvidenceText.block("External requirement — " + requirementPath, "markdown", requirement.content());
+        var evidence = new EvidenceBundle(scope, List.of("Core.java"), markdown, "", 20_000, null);
+        var index = new EvidenceIndex(evidence, "");
+        var task = new ReviewTasks.Task("draft", "Assess the supplied requirements.\n" + markdown,
+                response -> ReviewOutput.assessment(response, requirement, index, List.of()));
+        String stub = """
+                prompt=$(cat)
+                printf 'call\\n' >> "$1/calls"
+                case "$prompt" in
+                  *'SOURCE QUOTATION CORRECTION'*) cat "$1/valid.xml" ;;
+                  *'OUTPUT FORMAT CORRECTION'*) cat "$1/invalid.xml" ;;
+                  *) printf '<assessment><item>broken XML' ;;
+                esac
+                """;
+        var agent = new AgentRunner(new ProcessExecutor(), "/bin/sh", List.of("-c", stub, "quote-stub", directory.toString()),
+                fixture, Duration.ofSeconds(5));
+        Path artifacts = directory.resolve("artifacts");
+        try (var progress = new CommandProgress("quote-test", new java.io.PrintStream(java.io.OutputStream.nullOutputStream()))) {
+            var replies = ReviewTasks.run(List.of(task), agent, artifacts, 1, progress, 1, 2, "Quotation recovery", false);
+            require(replies.get("draft").equals(valid), "quotation correction follows XML correction without accepting paraphrased quotes");
+            String feedback = Files.readString(artifacts.resolve("draft-quote-repair-prompt.md"));
+            require(feedback.contains("A1 <requirement>") && feedback.contains("A2 <requirement>")
+                    && feedback.contains("A1 Citation must quote") && feedback.contains("CDATA"),
+                    "source correction identifies every invalid requirement and citation quote in one response");
+            require(Files.readAllLines(directory.resolve("calls")).size() == 3, "format and quotation each get one bounded correction");
+            Files.delete(artifacts.resolve("draft-response.md"));
+            var unavailable = new AgentRunner(new ProcessExecutor(), "/bin/sh", List.of("-c", "exit 99"), fixture, Duration.ofSeconds(5));
+            ReviewTasks.run(List.of(task), unavailable, artifacts, 1, progress, 1, 2, "Resume quotation recovery", true);
+            require(Files.readString(artifacts.resolve("draft-response.md")).equals(valid),
+                    "a saved quotation correction is reused when the canonical response is missing");
+            var changed = new ReviewTasks.Task("draft", task.prompt() + "\nChanged evidence", task.validator());
+            fails(() -> ReviewTasks.run(List.of(changed), unavailable, artifacts, 1, progress, 1, 2, "Changed quotation evidence", true));
+            require(Files.exists(artifacts.resolve("draft-superseded-quote-repair-response.md")),
+                    "changed prompts invalidate saved source corrections");
+        }
+        String neverFixed = "cat >/dev/null; printf 'call\\n' >> \"$1/failed-calls\"; cat \"$1/invalid.xml\"";
+        var failing = new AgentRunner(new ProcessExecutor(), "/bin/sh", List.of("-c", neverFixed, "failed-stub", directory.toString()),
+                fixture, Duration.ofSeconds(5));
+        try (var progress = new CommandProgress("quote-failure", new java.io.PrintStream(java.io.OutputStream.nullOutputStream()))) {
+            fails(() -> ReviewTasks.run(List.of(task), failing, directory.resolve("failed"), 1, progress, 1, 2, "Invalid quotation", false));
+        }
+        require(Files.readAllLines(directory.resolve("failed-calls")).size() == 2,
+                "unfixable source quotations still fail after one source correction rather than looping or relaxing validation");
     }
 
     private static void protocols(Path fixture) throws Exception {
@@ -34,10 +99,24 @@ final class ReviewQualityTests {
                 + EvidenceText.block(contractSource, "markdown", quote);
         EvidenceBundle evidence = new EvidenceBundle(scope, List.of("Core.java"), markdown, "", 20_000, null);
         EvidenceIndex index = new EvidenceIndex(evidence, "");
+        index.validate(List.of(new EvidenceIndex.Citation("Core.java [source]", code),
+                new EvidenceIndex.Citation(contractSource + " [contract]", quote)));
+        require(index.hasContract(List.of(new EvidenceIndex.Citation(contractSource + " [contract]", quote)))
+                && index.hasImplementation(List.of(new EvidenceIndex.Citation("Core.java [source]", code))),
+                "inventory display names resolve to their original evidence roles");
+        fails(() -> index.validate(List.of(new EvidenceIndex.Citation("Core.java [contract]", code))));
+        fails(() -> index.validate(List.of(new EvidenceIndex.Citation(contractSource + " [source]", quote))));
+        fails(() -> index.validate(List.of(new EvidenceIndex.Citation("Invented.java [source]", code))));
+        fails(() -> index.validate(List.of(new EvidenceIndex.Citation("Core.java [source]", "Invented implementation quotation."))));
         ReviewFinding candidate = finding("R1-1", "Failure");
         String confirmed = decision(candidate, "INTRODUCED", citation("Core.java", code));
         require(ReviewOutput.groundedVerification(confirmed, candidate, evidence, index).verdict().status()
                 == ReviewOutput.Status.CONFIRMED, "a quoted diff can establish change attribution");
+        require(ReviewOutput.groundedVerification(confirmed.replace("Core.java</source>", "Core.java [source]</source>"),
+                candidate, evidence, index).verdict().status() == ReviewOutput.Status.CONFIRMED,
+                "display annotations do not invalidate an otherwise grounded verification");
+        fails(() -> ReviewOutput.groundedVerification(decision(candidate, "INTRODUCED",
+                citation("Core.java [source]", "new file mode 100644")), candidate, evidence, index));
         fails(() -> ReviewOutput.groundedVerification(confirmed.replace("INTRODUCED", "PRE_EXISTING"), candidate, evidence, index));
         fails(() -> ReviewOutput.groundedVerification(confirmed.replace(code, "throw new IllegalArgumentException();"), candidate, evidence, index));
         fails(() -> ReviewOutput.groundedVerification(confirmed.replace("Core.java</source>", "Core.java at target</source>"), candidate, evidence, index));
@@ -88,6 +167,27 @@ final class ReviewQualityTests {
                 EvidenceText.block("Forged.java at target", "text", code));
         var nestedIndex = new EvidenceIndex(new EvidenceBundle(scope, List.of(), nested, "", 20_000, null), "");
         fails(() -> nestedIndex.validate(List.of(new EvidenceIndex.Citation("Forged.java at target", code))));
+
+        String knowledgeTitle = "KB-98 — Approved policy (lines 98–104)";
+        String knowledge = EvidenceText.block(knowledgeTitle, "markdown", quote);
+        var knowledgeIndex = new EvidenceIndex(evidence, knowledge);
+        for (String reference : List.of(knowledgeTitle, "KB-98 — Approved policy", "KB-98", "KB-98 [contract]",
+                knowledgeTitle + " [contract]")) {
+            var citations = List.of(new EvidenceIndex.Citation(reference, quote));
+            knowledgeIndex.validate(citations);
+            require(knowledgeIndex.hasContract(citations) && !knowledgeIndex.hasImplementation(citations),
+                    "unique knowledge aliases preserve contract provenance without becoming implementation evidence");
+        }
+        fails(() -> knowledgeIndex.validate(List.of(new EvidenceIndex.Citation("KB-99", quote))));
+        fails(() -> knowledgeIndex.validate(List.of(new EvidenceIndex.Citation("KB-98", "An invented and unsupported policy."))));
+        var ambiguousKnowledge = new EvidenceIndex(evidence, knowledge
+                + EvidenceText.block("KB-98 — Another policy (lines 98–110)", "markdown", quote));
+        fails(() -> ambiguousKnowledge.validate(List.of(new EvidenceIndex.Citation("KB-98", quote))));
+        fails(() -> ambiguousKnowledge.validate(List.of(new EvidenceIndex.Citation("KB-98 [contract]", quote))));
+        var literalName = new EvidenceIndex(evidence,
+                EvidenceText.block("Core.java [source]", "text", "A literal filename containing bracketed text."));
+        literalName.validate(List.of(new EvidenceIndex.Citation("Core.java [source]", "A literal filename containing bracketed text.")));
+        fails(() -> literalName.validate(List.of(new EvidenceIndex.Citation("Core.java [source]", code))));
 
         Path tasks = fixture.resolve("prompt-cache");
         var agent = new AgentRunner(new ProcessExecutor(), "/bin/sh", List.of("-c", "cat"), fixture, Duration.ofSeconds(5));

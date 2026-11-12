@@ -141,6 +141,14 @@ final class RemoteBaselineTests {
         require(Files.readString(timedOut.resolve("baseline-fetch-stderr.log")).contains("slow transport diagnostic"),
                 "timed-out fetches preserve partial transport diagnostics");
         require(git(executor, repo, "for-each-ref", "refs/review-agent/baselines").isEmpty(), "failed fetches leave no private refs");
+
+        git(executor, repo, "push", "-q", "--force", "origin", target + ":refs/heads/main");
+        Path identical = pipeline.run(options);
+        require(Files.readString(identical.resolve("report.md")).contains("no file differences")
+                && Files.readString(identical.resolve("scope.md")).contains("- Resolved base: `" + target + "`"),
+                "a fetched remote tip equal to the target is reported as an empty diff");
+        require(git(executor, repo, "for-each-ref", "refs/review-agent/baselines").isEmpty(),
+                "the empty-diff return also releases the fetched baseline ref");
     }
 
     private static CliOptions options(Path repo, Path outputs, String target, String remote, String branch) {
