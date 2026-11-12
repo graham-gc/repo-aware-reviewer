@@ -37,7 +37,8 @@ final class ScopedKnowledge {
     private static final Set<String> GENERIC_TERMS = Set.of("run", "running", "status", "request", "response", "data",
             "result", "运行", "状态", "请求", "响应", "数据", "结果", "流程", "通过");
 
-    record Result(String markdown, String coverage, int suppliedSections) {
+    record Result(String markdown, String coverage, int suppliedSections, EvidenceCatalog catalog) {
+        Result(String markdown, String coverage, int suppliedSections) { this(markdown, coverage, suppliedSections, EvidenceCatalog.empty()); }
     }
 
     private record Heading(int level, String title, int line, int offset) {
@@ -142,7 +143,7 @@ final class ScopedKnowledge {
         }
         String summary = "\nInitial rule excerpts supplied: " + selection.count
                 + ". Review coverage is limited to supplied excerpts.\n\n";
-        return new Result(selection.markdown(summary), coverage.append(summary).toString(), selection.count);
+        return new Result(selection.markdown(summary), coverage.append(summary).toString(), selection.count, selection.catalog());
     }
 
     Result supplemental(List<EvidenceRequest> requests, int budget, int maxQueries) {
@@ -204,7 +205,7 @@ final class ScopedKnowledge {
         if (lookups.isEmpty()) {
             summary += "No usable behavior queries. Rule coverage is limited to initial matches.\n";
         }
-        return new Result(selection.markdown(summary + notes), coverage.append(summary).toString(), selection.count);
+        return new Result(selection.markdown(summary + notes), coverage.append(summary).toString(), selection.count, selection.catalog());
     }
 
     private List<Match> search(String query) {
@@ -256,6 +257,7 @@ final class ScopedKnowledge {
 
     private final class Selection {
         private final StringBuilder output = new StringBuilder();
+        private final List<EvidenceSource> sources = new ArrayList<>();
         private final int noteBudget;
         private int remaining;
         private int count;
@@ -279,6 +281,8 @@ final class ScopedKnowledge {
                 return "OMITTED (byte limit)";
             }
             output.append(block);
+            sources.add(EvidenceSources.contract(section.label(), document.path().toString(), "document:" + document.sha256(),
+                    section.firstLine(), section.original()));
             remaining -= bytes;
             count++;
             supplied.add(section.id());
@@ -288,6 +292,8 @@ final class ScopedKnowledge {
         String markdown(String notes) {
             return output.append(EvidenceText.linePrefix(notes, noteBudget)).toString();
         }
+
+        EvidenceCatalog catalog() { return new EvidenceCatalog(sources, true); }
     }
 
     private static Pattern changedPaths(GitClient.Change change) {

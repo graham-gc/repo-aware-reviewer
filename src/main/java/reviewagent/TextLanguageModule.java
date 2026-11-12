@@ -130,7 +130,7 @@ public class TextLanguageModule implements LanguageModule {
             if (EvidenceText.bytes(body + heading) > maxBytes - 400) { partial = true; break; }
             body.append(heading);
             for (String path : paths) {
-                if (!directory(path).equals(directory) || !supports(path) || !RepositorySnapshotCollector.allowedTextLocation(path)) continue;
+                if (!directory(path).equals(directory) || !supports(path) || !RepositoryPathPolicy.allowed(path)) continue;
                 String line = "- " + path + "\n";
                 if (EvidenceText.bytes(body + line) > maxBytes - 400) { partial = true; break outer; }
                 body.append(line); included++;

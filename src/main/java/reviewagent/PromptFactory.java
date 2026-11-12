@@ -117,6 +117,10 @@ final class PromptFactory {
     }
 
     String verifyFinding(EvidenceBundle evidence, ReviewFinding candidate, String supplemental) {
+        return verifyFinding(evidence, candidate, supplemental, new EvidenceIndex(evidence, supplemental));
+    }
+
+    String verifyFinding(EvidenceBundle evidence, ReviewFinding candidate, String supplemental, EvidenceIndex index) {
         return """
                 You are the independent candidate verification stage of a read-only code review.
                 Verify only the supplied candidate. Trace its trigger, impact, existing guards, callers and
@@ -152,6 +156,13 @@ final class PromptFactory {
                   <relation>INTRODUCED</relation>
                   <baseline>What the base/diff shows and why this is in scope</baseline>
                   <contract>Exact applicable requirement/rule, or intrinsic correctness invariant</contract>
+                  <support>REACHABLE_FAILURE</support>
+                  <premises><premise>
+                    <statement>One necessary trigger or failure premise, including its actual preconditions</statement>
+                    <basis>IMPLEMENTATION</basis>
+                    <citations><citation><source>Exact evidence ID or block title</source>
+                      <quote>Verbatim excerpt proving this premise</quote></citation></citations>
+                  </premise></premises>
                   <citations><citation><source>Exact evidence block title</source>
                     <quote>Verbatim decisive excerpt from that block</quote></citation></citations>
                   <finding id="%s">
@@ -168,13 +179,25 @@ final class PromptFactory {
                 </verification>
                 ```
                 For REJECTED or INSUFFICIENT_EVIDENCE, omit the finding element and explain the reason.
-                Citations use exact block titles from the inventory and verbatim excerpts of at least 12 characters
+                Citations use exact evidence IDs (EV-...) or block titles and verbatim excerpts of at least 12 characters
                 (whitespace differences are allowed). Include every decisive link, not just a signature or call site.
                 Confirmation requires target implementation quotations; INTRODUCED/EXPOSED_BY_CHANGE also require
                 base or diff quotations; UNMET_REQUIREMENT additionally requires a trusted contract quotation.
                 For baseline support from a diff, quote the removed lines (a new file's diff establishes absence
                 from the base). For target support, quote added lines or target source. Request unchanged base
                 methods explicitly when needed. Include separate citations for the relevant sides of the diff.
+                Classify support as REACHABLE_FAILURE, EXPLICIT_DEFENSIVE_REQUIREMENT, HARDENING or UNRESOLVED.
+                For a reachable failure, enumerate EVERY necessary premise and trace its producer, caller and consumer.
+                Prove each premise using IMPLEMENTATION or CONTRACT quotations; unproved premises use ASSUMPTION.
+                A CONFIRMED verdict cannot contain an ASSUMPTION, HARDENING or UNRESOLVED support.
+                For example, a consumer lacking an expected-node count does not prove that its producer can return
+                a successful partial snapshot. Read the producer's loop, persistence order and success transition.
+                A stale green report requires stated directory reuse and a consumer that can misinterpret it despite
+                the failing exit status. Do not imply a normal fresh CI directory reproduces that scenario.
+                An EXPLICIT_DEFENSIVE_REQUIREMENT can require rejecting malformed input even when a normal producer
+                cannot emit it; quote that requirement in a CONTRACT premise. Do not dismiss required defenses.
+                Match severity and impact to the proved preconditions. Record hardening and policy questions as
+                unconfirmed candidates, rather than inventing reachable inputs or business rules.
                 Use these canonical status values and English severity values in XML. Descriptive values use the
                 selected output language. Escape XML special characters or use CDATA for descriptive values.
                 Preserve a changed-file location with positive inclusive line numbers for a confirmed finding.
@@ -182,7 +205,7 @@ final class PromptFactory {
                 """.formatted(candidate.id()) + languageInstructions() + acceptanceInstructions() + evidenceRequestInstructions(evidence)
                 + "For the XML response, severity and status values always use the canonical English protocol keywords.\n\n"
                 + "CANDIDATE TO VERIFY\n" + ReviewOutput.findingXml(candidate)
-                + "\n\nEVIDENCE CITATION SOURCE NAMES\n" + new EvidenceIndex(evidence, supplemental).inventory()
+                + "\n\nEVIDENCE CITATION SOURCE NAMES\n" + index.inventory()
                 + "\n\nEVIDENCE FOLLOWS\n=================\n" + evidence.markdown() + supplemental;
     }
 
@@ -203,6 +226,11 @@ final class PromptFactory {
 
     String adjudicate(EvidenceBundle evidence, ReviewFinding representative, List<ReviewOutput.Decision> group,
                       String supplemental) {
+        return adjudicate(evidence, representative, group, supplemental, new EvidenceIndex(evidence, supplemental));
+    }
+
+    String adjudicate(EvidenceBundle evidence, ReviewFinding representative, List<ReviewOutput.Decision> group,
+                      String supplemental, EvidenceIndex index) {
         return """
                 You are the independent publication adjudication stage of a read-only code review.
                 Reconsider this issue using all grouped candidates and ALL verdicts, including negative verdicts.
@@ -216,7 +244,7 @@ final class PromptFactory {
 
                 GROUPED CANDIDATES AND PRELIMINARY VERDICTS
                 """ + group.stream().map(PromptFactory::decisionSummary).collect(Collectors.joining())
-                + "\nREPRESENTATIVE VERIFICATION INSTRUCTIONS\n" + verifyFinding(evidence, representative, supplemental);
+                + "\nREPRESENTATIVE VERIFICATION INSTRUCTIONS\n" + verifyFinding(evidence, representative, supplemental, index);
     }
 
     static String decisionSummary(ReviewOutput.Decision decision) {
@@ -224,11 +252,17 @@ final class PromptFactory {
         return "\n" + ReviewOutput.findingXml(verdict.confirmed() == null ? verdict.candidate() : verdict.confirmed())
                 + "\nVerdict: " + verdict.status() + ". Reason: " + verdict.reason()
                 + "\nRelationship: " + decision.relation() + ". Baseline: " + decision.baseline()
-                + "\nContract: " + decision.contract() + "\nCitations: " + decision.citations() + "\n";
+                + "\nContract: " + decision.contract() + "\nSupport and premises: " + decision.support()
+                + "\nCitations: " + decision.citations() + "\n";
     }
 
     String assessRequirements(EvidenceBundle evidence, String supplemental, String decisions,
                               String previousResponse, boolean audit) {
+        return assessRequirements(evidence, supplemental, decisions, previousResponse, audit, new EvidenceIndex(evidence, supplemental));
+    }
+
+    String assessRequirements(EvidenceBundle evidence, String supplemental, String decisions,
+                              String previousResponse, boolean audit, EvidenceIndex index) {
         return (audit ? """
                 You are the independent requirement assessment auditor of a read-only code review.
                 Correct the draft below against the ORIGINAL requirements and actual source. Actively challenge
@@ -251,6 +285,8 @@ final class PromptFactory {
                   <requirementText>That requirement expressed faithfully in the selected output language</requirementText>
                   <behavior>One observable behavior being assessed</behavior>
                   <status>INSUFFICIENT_EVIDENCE</status>
+                  <policyBasis>EXPLICIT</policyBasis>
+                  <policyReason>Why the verbatim requirement specifies this exact acceptance criterion</policyReason>
                   <reasoning>Evidence-based assessment, with source locations</reasoning>
                   <boundaries>Relevant success and failure paths checked, and any unverified boundary</boundaries>
                   <gap>Exact unmet requirement or missing evidence; say none only when supported</gap>
@@ -261,6 +297,16 @@ final class PromptFactory {
                 instead of using PARTIAL. Conclusive statuses require included implementation quotations.
                 Do not strengthen a requirement. NOT_SATISFIED needs an explicit violated clause; absence of evidence
                 means INSUFFICIENT_EVIDENCE. Test source alone does not establish runtime success or implementation.
+                policyBasis is EXPLICIT or UNSPECIFIED. Check the quoted clause against the ENTIRE original document:
+                does it actually require the proposed behavior, exact number, tie-breaking priority and scope?
+                Unspecified policy requires INSUFFICIENT_EVIDENCE, even when the implementation chooses a policy.
+                For example, "nonzero on failure" does not require exit code 2 to override a business failure.
+                A real quotation does not license a stronger requirementText or behavior. Challenge those separately.
+                During the independent audit, explicitly challenge numeric priorities, overlapping failure states,
+                inferred producer behavior, and any item whose boundaries or gap say policy is unspecified.
+                Reconcile duplicate behaviors and opposite statuses before returning. Distinct boundaries may be
+                separate items, but do not repeat the same behavior merely because multiple files implement it.
+                Use a localized empty-gap value (None in English, 无 in Simplified Chinese).
                 Descriptions, including requirementText, use the selected output language. Only requirement and
                 citation quotes retain verbatim source text for validation; those raw quotes are not rendered in
                 the final report. XML names and status values remain English.
@@ -276,7 +322,7 @@ final class PromptFactory {
                 """ + languageInstructions() + acceptanceInstructions() + evidenceRequestInstructions(evidence)
                 + "\nCANDIDATE DECISIONS (not substitutes for source evidence)\n" + decisions
                 + "\nPRIOR ASSESSMENT\n" + previousResponse
-                + "\nEVIDENCE CITATION SOURCE NAMES\n" + new EvidenceIndex(evidence, supplemental).inventory()
+                + "\nEVIDENCE CITATION SOURCE NAMES\n" + index.inventory()
                 + "\nEVIDENCE FOLLOWS\n=================\n" + evidence.markdown() + supplemental;
     }
 
@@ -314,6 +360,10 @@ final class PromptFactory {
                 EVIDENCE REQUEST PROTOCOL (one unbulleted line per request, outside XML):
                 REQUEST_FILE|target|path/to/source.ext|10:90|Why this source is decisive
                 REQUEST_FILE|base|path/to/source.ext|symbol:Name|Why this declaration is decisive
+                REQUEST_FILE|target|src/main/**/controller/*.java|index|Find the tracked controller files
+                Repository indexes work for every language. Use . to list the root recursively. An index is
+                metadata, not implementation evidence. If a language dependency helper rejects a directory,
+                use repository indexing and then read the exact tracked file; do not stop at the failed helper.
                 Use base or target. File selectors are all, an inclusive range of at most 200 lines, or a symbol
                 supported by the registered language module. Symbol excerpts also have the 200-line limit.
                 REQUEST_LANGUAGE|target|language-id|tracked/context/file|resource|selector|Why needed
@@ -368,7 +418,7 @@ final class PromptFactory {
     }
 
     private String reportStructure() {
-        String headings = String.join("\n", ReviewOutput.headings(language)) + "\n";
+        String headings = String.join("\n", ReviewReport.headings(language)) + "\n";
         return """
                 Return a final Markdown report with exactly these top-level headings, in this order:
                 %s

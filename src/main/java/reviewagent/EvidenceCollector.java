@@ -27,6 +27,7 @@ final class EvidenceCollector {
         int supplementBudget = maxEvidenceBytes / 5;
         int initialBudget = maxEvidenceBytes - supplementBudget;
         StringBuilder out = new StringBuilder();
+        List<EvidenceSource> sources = new ArrayList<>();
         StringBuilder coverage = new StringBuilder("# Review coverage\n\n## Initial evidence by changed file\n\n");
         out.append("# Review evidence\n\n");
         out.append("## Immutable scope\n\n")
@@ -35,7 +36,7 @@ final class EvidenceCollector {
                 .append("- Target commit: `").append(scope.targetCommit()).append("`\n")
                 .append("- Diff: `").append(scope.diffExpression()).append("`\n\n");
 
-        appendDocument(out, "External requirement", requirement);
+        appendDocument(out, sources, "External requirement", requirement);
         ScopedKnowledge scopedKnowledge;
         Set<String> scopedPaths = Set.of();
         if (knowledgeMode == CliOptions.KnowledgeMode.SCOPED) {
@@ -51,7 +52,7 @@ final class EvidenceCollector {
             scopedKnowledge = new ScopedKnowledge(knowledge, scopedPaths);
         } else {
             scopedKnowledge = null;
-            appendDocument(out, "Human-maintained knowledge base", knowledge);
+            appendDocument(out, sources, "Human-maintained knowledge base", knowledge);
         }
 
         out.append("## Review instructions from trusted base\n\n");
@@ -59,8 +60,10 @@ final class EvidenceCollector {
         for (String file : BASELINE_RULE_FILES) {
             if (!scopedPaths.contains(file) && git.existsAt(scope.baseCommit(), file)) {
                 foundRule = true;
-                out.append(EvidenceText.block(file + " at base", "text",
-                        git.regularBlobAt(scope.baseCommit(), file, initialBudget)));
+                EvidenceSource source = EvidenceSources.contract(file + " at base", file, scope.baseCommit(), 1,
+                        git.regularBlobAt(scope.baseCommit(), file, initialBudget));
+                sources.add(source);
+                out.append(source.markdown());
             }
         }
         if (!foundRule) {
@@ -86,6 +89,7 @@ final class EvidenceCollector {
         if (scopedKnowledge != null) {
             ScopedKnowledge.Result selection = scopedKnowledge.initial(reviewChanges, remaining / 4);
             out.append(selection.markdown());
+            sources.addAll(selection.catalog().sources());
             knowledgeCoverage = selection.coverage();
             remaining -= EvidenceText.bytes(selection.markdown());
         }
@@ -101,7 +105,9 @@ final class EvidenceCollector {
             if (!scopedPaths.contains(file) && tracked.contains(file)) {
                 String block;
                 try {
-                    block = readBlock(scope.targetCommit(), file, manifestBudget);
+                    EvidenceSource source = readSource(scope, file, manifestBudget);
+                    block = source.markdown();
+                    sources.add(source);
                 } catch (IOException unavailable) {
                     omittedManifests.add(file);
                     continue;
@@ -123,6 +129,7 @@ final class EvidenceCollector {
                 if (bytes > languageBudget) throw new IOException("Language context exceeds its byte budget");
                 if (!context.isEmpty()) {
                     out.append(context);
+                    sources.addAll(LegacyEvidenceAdapter.read(context, scope, languages).sources());
                     remaining -= bytes;
                     languageBudget -= bytes;
                     coverage.append("Language context ").append(language.id()).append(": INCLUDED (").append(bytes).append(" bytes).\n");
@@ -157,6 +164,8 @@ final class EvidenceCollector {
             }
             String block = EvidenceText.block(title, "diff", patch);
             out.append(block);
+            sources.add(EvidenceSource.diff(change.path(), change.previousPath(), patch, scope,
+                    EvidenceCatalog.implementation(languages, change.path())));
             int bytes = EvidenceText.bytes(block);
             diffBudget -= bytes;
             remaining -= bytes;
@@ -188,7 +197,9 @@ final class EvidenceCollector {
                 context = "NOT APPLICABLE (deleted)";
             } else {
                 try {
-                    String block = readBlock(scope.targetCommit(), file, remaining / (reviewChanges.size() - index));
+                    EvidenceSource source = readSource(scope, file, remaining / (reviewChanges.size() - index));
+                    String block = source.markdown();
+                    sources.add(source);
                     out.append(block);
                     remaining -= EvidenceText.bytes(block);
                     context = "INCLUDED";
@@ -207,10 +218,11 @@ final class EvidenceCollector {
         out.append(summary);
         coverage.append('\n').append(summary).append(knowledgeCoverage);
         return new EvidenceBundle(scope, changes.stream().map(GitClient.Change::path).toList(),
-                out.toString(), coverage.toString(), supplementBudget, scopedKnowledge);
+                out.toString(), coverage.toString(), supplementBudget, scopedKnowledge, new EvidenceCatalog(sources, true));
     }
 
-    private String readBlock(String commit, String file, int quota) throws IOException, InterruptedException {
+    private EvidenceSource readSource(ReviewScope scope, String file, int quota) throws IOException, InterruptedException {
+        String commit = scope.targetCommit();
         String title = EvidenceText.oneLine(file) + " at " + commit;
         int room = quota - EvidenceText.bytes(EvidenceText.block(title, "text", ""));
         if (room <= 0) {
@@ -221,22 +233,25 @@ final class EvidenceCollector {
         if (EvidenceText.bytes(block) > quota) {
             throw new IOException("Decoded text exceeds the evidence budget");
         }
-        return block;
+        return EvidenceSources.file(commit, file, 1, title, content, scope, languages);
     }
 
     private static boolean binaryPatch(String patch) {
         return patch.contains("\nBinary files ") || patch.contains("\nGIT binary patch\n");
     }
 
-    private static void appendDocument(StringBuilder out, String title, InputDocument document) {
+    private static void appendDocument(StringBuilder out, List<EvidenceSource> sources, String title, InputDocument document) {
         out.append("## ").append(title).append("\n\n");
         if (document == null) {
             out.append("Not provided. Do not claim requirement acceptance or knowledge-base compliance.\n\n");
             return;
         }
+        EvidenceSource source = EvidenceSources.contract(title + " — " + document.path(), document.path().toString(),
+                "document:" + document.sha256(), 1, document.content());
+        sources.add(source);
         out.append("- Path: `").append(document.path()).append("`\n")
                 .append("- SHA-256: `").append(document.sha256()).append("`\n\n")
-                .append(EvidenceText.block(title + " — " + document.path(), "markdown", document.content()));
+                .append(source.markdown());
     }
 
 }

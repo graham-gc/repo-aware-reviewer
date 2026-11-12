@@ -111,45 +111,12 @@ final class LanguageRegistry {
                         || module.capabilities().contains(LanguageModule.Capability.DECLARATION_LOOKUP)
                         || module.capabilities().contains(LanguageModule.Capability.DEPENDENCY_EVIDENCE))
                 .map(LanguageModule::requestInstructions).filter(text -> !text.isBlank()).collect(java.util.stream.Collectors.joining("\n"));
-        String navigation = modules.stream().filter(module -> module instanceof TextLanguageModule).map(LanguageModule::id)
-                .collect(java.util.stream.Collectors.joining(", "));
         return review + "\nAVAILABLE EVIDENCE HELPERS\n" + helpers
-                + (navigation.isEmpty() ? "" : "\nBasic file-navigation module IDs: " + navigation
-                + ". REQUEST_LANGUAGE|target|module-id|tracked/source-or-project-file|repository-relative-directory|index|reason\n"
-                + "Use . for the root. These helpers list filenames only and do not resolve imports or dependencies.\n");
+                + "\nRepository navigation is language-neutral: REQUEST_FILE|target|directory/or/**/pattern|index|reason\n"
+                + "Use . for the root; read returned files with all, line-range, or symbol selectors. Indexes are metadata only.\n";
     }
 
-    static LanguageModule.Repository repository(GitClient git) {
-        return new LanguageModule.Repository() {
-            private final Map<String, Map<String, GitClient.TrackedFile>> trees = new LinkedHashMap<>();
-            private final Map<String, String> blobs = new LinkedHashMap<>();
-            private int cachedBytes;
-            private Map<String, GitClient.TrackedFile> tree(String revision) throws IOException, InterruptedException {
-                if (!trees.containsKey(revision)) {
-                    var entries = new LinkedHashMap<String, GitClient.TrackedFile>();
-                    for (var file : git.trackedFiles(revision)) if (file.regular()) entries.put(file.path(), file);
-                    trees.put(revision, entries);
-                }
-                return trees.get(revision);
-            }
-            public List<String> paths(String revision) throws IOException, InterruptedException {
-                return List.copyOf(tree(revision).keySet());
-            }
-            public String read(String revision, String path, int maxBytes) throws IOException, InterruptedException {
-                var file = tree(revision).get(path);
-                if (file == null) throw new IOException("No regular tracked file at that revision");
-                if (file.size() > maxBytes) throw new IOException("File exceeds the available byte budget");
-                String source = blobs.get(file.objectId());
-                if (source == null) {
-                    source = git.blob(file.objectId());
-                    if (source.indexOf('\0') >= 0) throw new IOException("File is not text");
-                    int bytes = EvidenceText.bytes(source);
-                    if (bytes <= 8_000_000 - cachedBytes) { blobs.put(file.objectId(), source); cachedBytes += bytes; }
-                }
-                return source;
-            }
-        };
-    }
+    static LanguageModule.Repository repository(GitClient git) { return new GitRepository(git); }
 
     static LanguageModule.Environment environment(LanguageModule.Repository repository, ProcessExecutor executor, Path cache) {
         return new LanguageModule.Environment(repository, cache, (command, directory, timeout) -> {

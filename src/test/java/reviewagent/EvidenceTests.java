@@ -589,7 +589,10 @@ final class EvidenceTests {
     private static String grounding(String source, String quote) {
         return "<relation>INTRODUCED</relation><baseline>The diff adds the failing behavior.</baseline>"
                 + "<contract>The operation must preserve its invariant.</contract><citations><citation><source>"
-                + source + "</source><quote>" + quote + "</quote></citation></citations>";
+                + source + "</source><quote>" + quote + "</quote></citation></citations>"
+                + "<support>REACHABLE_FAILURE</support><premises><premise><statement>The changed operation executes this path.</statement>"
+                + "<basis>IMPLEMENTATION</basis><citations><citation><source>" + source + "</source><quote>" + quote
+                + "</quote></citation></citations></premise></premises>";
     }
 
     private static void require(boolean condition, String description) {

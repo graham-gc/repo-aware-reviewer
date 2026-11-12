@@ -11,6 +11,7 @@ import java.util.function.BiFunction;
 
 /** Evidence-driven verification, cross-verdict adjudication and independent acceptance audit. */
 final class ReviewQuality {
+    record AssessmentResult(String details, String summary) { }
     private final CliOptions options;
     private final EvidenceBundle evidence;
     private final EvidenceSession session;
@@ -33,7 +34,7 @@ final class ReviewQuality {
     }
 
     List<ReviewOutput.Decision> verify(List<ReviewFinding> findings) throws IOException, InterruptedException {
-        return verifyRounds(findings, (candidate, supplemental) -> prompts.verifyFinding(evidence, candidate, supplemental),
+        return verifyRounds(findings, (candidate, supplemental) -> prompts.verifyFinding(evidence, candidate, supplemental, session.index()),
                 "verification", 5, "Verifying candidate issues");
     }
 
@@ -52,7 +53,7 @@ final class ReviewQuality {
         List<ReviewFinding> positives = preliminary.stream().filter(d -> d.verdict().status() == ReviewOutput.Status.CONFIRMED)
                 .map(d -> d.verdict().confirmed()).toList();
         List<ReviewOutput.Decision> adjudicated = verifyRounds(positives, (candidate, supplemental) -> prompts.adjudicate(evidence, candidate,
-                related.get(candidate.id()), supplemental) + "\nINDEPENDENTLY AUDITED REQUIREMENT ASSESSMENT\n"
+                related.get(candidate.id()), supplemental, session.index()) + "\nINDEPENDENTLY AUDITED REQUIREMENT ASSESSMENT\n"
                 + "Recheck any contradiction between the proposed finding and this assessment against the source.\n" + assessment,
                 "adjudication", 7, "Adjudicating findings before publication");
         return resolveConflicts(adjudicated, groups, OutputLanguage.parse(options.language()));
@@ -73,7 +74,7 @@ final class ReviewQuality {
                     "同一问题的发布前裁决仍有相反结论，保留待确认。 ") + verdict.reason();
             return new ReviewOutput.Decision(new ReviewOutput.Verification(verdict.candidate(),
                     ReviewOutput.Status.INSUFFICIENT_EVIDENCE, reason, null), ReviewOutput.Relation.UNRESOLVED,
-                    decision.baseline(), decision.contract(), decision.citations());
+                    decision.baseline(), decision.contract(), decision.citations(), decision.support());
         }).toList();
     }
 
@@ -87,11 +88,11 @@ final class ReviewQuality {
             EvidenceIndex index = session.index();
             String supplemental = session.markdown();
             var requests = pending.stream().map(candidate -> new ReviewTasks.Task(candidate.id(), prompt.apply(candidate, supplemental),
-                    reply -> ReviewOutput.groundedVerification(reply, candidate, evidence, index))).toList();
+                    reply -> ReviewGrounding.verification(reply, candidate, evidence, index))).toList();
             String path = round == 1 ? folder : folder + "/round-" + round;
             var replies = tasks(requests, path, stage, description + " (round " + round + ")");
             for (ReviewFinding candidate : pending) {
-                results.put(candidate.id(), ReviewOutput.groundedVerification(replies.get(candidate.id()), candidate, evidence, index));
+                results.put(candidate.id(), ReviewGrounding.verification(replies.get(candidate.id()), candidate, evidence, index));
             }
             StringBuilder evidenceRequests = new StringBuilder();
             for (String reply : replies.values()) evidenceRequests.append(ReviewOutput.requestText(reply, "verification")).append('\n');
@@ -105,40 +106,44 @@ final class ReviewQuality {
         return findings.stream().map(candidate -> results.get(candidate.id())).toList();
     }
 
-    String assess(InputDocument requirement, String decisions) throws IOException, InterruptedException {
+    AssessmentResult assess(InputDocument requirement, String decisions) throws IOException, InterruptedException {
         OutputLanguage language = OutputLanguage.parse(options.language());
-        if (requirement == null) return ReviewOutput.assessmentMarkdown(List.of(), language);
+        if (requirement == null) {
+            String text = ReviewReport.assessmentMarkdown(List.of(), language);
+            return new AssessmentResult(text, text);
+        }
         EvidenceIndex index = session.index();
-        String draftPrompt = prompts.assessRequirements(evidence, session.markdown(), decisions, "None", false);
+        String draftPrompt = prompts.assessRequirements(evidence, session.markdown(), decisions, "None", false, index);
         var draft = tasks(List.of(new ReviewTasks.Task("draft", draftPrompt,
-                reply -> ReviewOutput.assessment(reply, requirement, index, List.of()))), "assessment", 6, "Assessing requirement behaviors");
+                reply -> ReviewGrounding.assessment(reply, requirement, index, List.of()))), "assessment", 6, "Assessing requirement behaviors");
         String previous = draft.get("draft");
-        List<ReviewOutput.AssessmentItem> items = ReviewOutput.assessment(previous, requirement, index, List.of());
+        List<ReviewOutput.AssessmentItem> items = ReviewGrounding.assessment(previous, requirement, index, List.of());
         session.load(ReviewOutput.requestText(previous, "assessment"), "Requirement assessment draft");
         saveEvidence();
         int round = 1;
         while (true) {
             EvidenceIndex currentIndex = session.index();
             List<ReviewOutput.AssessmentItem> previousItems = items;
-            String prompt = prompts.assessRequirements(evidence, session.markdown(), decisions, previous, true);
+            String prompt = prompts.assessRequirements(evidence, session.markdown(), decisions, previous, true, currentIndex);
             var audit = tasks(List.of(new ReviewTasks.Task("audit", prompt,
-                    reply -> ReviewOutput.assessment(reply, requirement, currentIndex, previousItems))),
+                    reply -> ReviewGrounding.assessment(reply, requirement, currentIndex, previousItems))),
                     round == 1 ? "assessment" : "assessment/round-" + round, 6, "Auditing requirement behaviors (round " + round + ")");
             previous = audit.get("audit");
-            items = ReviewOutput.assessment(previous, requirement, currentIndex, previousItems);
+            items = ReviewGrounding.assessment(previous, requirement, currentIndex, previousItems);
             boolean material = session.load(ReviewOutput.requestText(previous, "assessment"), "Requirement assessment audit round " + round);
             saveEvidence();
             if (!material) break;
             round++;
         }
-        String markdown = ReviewOutput.assessmentMarkdown(items, language);
+        String markdown = ReviewReport.assessmentMarkdown(items, language);
         Files.writeString(directory.resolve("requirement-assessment.md"), markdown, StandardCharsets.UTF_8);
-        return markdown;
+        return new AssessmentResult(markdown, ReviewReport.assessmentSummary(items, language));
     }
 
     void saveEvidence() throws IOException {
         Files.writeString(directory.resolve("supplemental-evidence.md"), session.markdown(), StandardCharsets.UTF_8);
         Files.writeString(directory.resolve("coverage.md"), evidence.coverage() + session.coverage(), StandardCharsets.UTF_8);
+        Files.writeString(directory.resolve("evidence-index.md"), session.catalog().manifest(), StandardCharsets.UTF_8);
     }
 
     private Map<String, String> tasks(List<ReviewTasks.Task> tasks, String folder, int stage, String description)
@@ -156,7 +161,10 @@ final class ReviewQuality {
                     .append(EvidenceText.oneLine(verdict.reason())).append(" Relationship: ").append(decision.relation())
                     .append(". Baseline: ").append(EvidenceText.oneLine(decision.baseline()))
                     .append(". Contract: ").append(EvidenceText.oneLine(decision.contract())).append('\n');
-            for (var citation : decision.citations()) out.append("  - ").append(EvidenceText.oneLine(citation.source()))
+            out.append("  - Support: ").append(decision.support().kind()).append('\n');
+            for (var premise : decision.support().premises()) out.append("  - Premise [").append(premise.basis()).append("]: ")
+                    .append(EvidenceText.oneLine(premise.statement())).append('\n');
+            for (var citation : decision.citations()) out.append("  - ").append(ReviewReport.citationReference(citation, OutputLanguage.EN))
                     .append(": ").append(EvidenceText.oneLine(citation.quote())).append('\n');
         }
         return out.toString();
@@ -170,8 +178,19 @@ final class ReviewQuality {
             case UNMET_REQUIREMENT -> language.text("Explicit requirement or rule not met", "未满足明确需求或规则");
             default -> throw new IllegalArgumentException("Unpublishable finding relationship");
         };
+        String references = decision.citations().stream().map(c -> ReviewReport.citationReference(c, language))
+                .distinct().collect(java.util.stream.Collectors.joining("; "));
+        String premises = decision.support().premises().stream().map(ReviewSupport.Premise::statement)
+                .collect(java.util.stream.Collectors.joining("; "));
+        String support = language.text(decision.support().kind().name(), switch (decision.support().kind()) {
+            case REACHABLE_FAILURE -> "可达故障";
+            case EXPLICIT_DEFENSIVE_REQUIREMENT -> "明确防御要求";
+            case HARDENING -> "加固建议";
+            case UNRESOLVED -> "尚未确定";
+        });
         return new ReviewFinding(finding.id(), finding.title(), finding.severity(), finding.path(), finding.line(), finding.endLine(),
-                finding.trigger(), finding.impact(), finding.evidence(), relation + ": " + finding.diffRelation());
+                finding.trigger(), finding.impact(), support + ": " + references + (premises.isEmpty() ? "" : " — " + premises),
+                relation + ": " + finding.diffRelation());
     }
 
     static String unresolved(List<ReviewOutput.Decision> preliminary, List<ReviewOutput.Decision> adjudicated,

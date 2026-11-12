@@ -10,12 +10,13 @@ import java.util.Set;
 
 final class SupplementalEvidence {
     private static final int MAX_SOURCE_BYTES = 1_000_000;
-    private static final Set<String> BLOCKED_COMPONENTS = Set.of("", ".", "..", ".git", ".claude", ".idea", ".aws", ".ssh");
 
-    record Result(String markdown, String coverage, boolean hasMaterial) {
+    record Result(String markdown, String coverage, boolean hasMaterial, EvidenceCatalog catalog) {
     }
 
-    private record Excerpt(String markdown, String status) {
+    private record Excerpt(String markdown, String status, EvidenceCatalog catalog) {
+        Excerpt(String markdown, String status) { this(markdown, status, EvidenceCatalog.empty()); }
+        Excerpt(EvidenceSource source, String status) { this(source.markdown(), status, new EvidenceCatalog(List.of(source), true)); }
     }
 
     private final GitClient git;
@@ -63,6 +64,7 @@ final class SupplementalEvidence {
         int processed = 0;
         int total = maxRequests == 0 ? requests.size() : Math.min(requests.size(), maxRequests);
         int included = 0;
+        EvidenceCatalog catalog = knowledge.catalog();
         for (EvidenceQuery query : requests.values()) {
             if (processed == total) {
                 break;
@@ -76,18 +78,27 @@ final class SupplementalEvidence {
                     throw new IOException("No room in the supplemental evidence budget");
                 }
                 Excerpt excerpt;
-                if (query.command().equals("REQUEST_FILE")) {
+                if (query.operation() == EvidenceQuery.Operation.FIND_FILES) {
+                    excerpt = new Excerpt(new RepositoryBrowser(repository).source(revision, query.resource(), quota), "INDEX_ONLY");
+                } else if (query.operation() == EvidenceQuery.Operation.READ_FILE) {
                     if (evidence.scopedKnowledge() != null && evidence.scopedKnowledge().isSourcePath(query.resource())) {
                         throw new IOException("Use a knowledge query for the scoped knowledge document");
                     }
-                    excerpt = repositoryFile(revision, query.resource(), query.selector(), quota);
+                    excerpt = repositoryFile(evidence.scope(), revision, query.resource(), query.selector(), quota);
                 } else {
                     LanguageModule module = languages.module(query.language());
-                    Path cache = caches.getOrDefault(module.id(), module.defaultCache());
-                    LanguageModule.Session session = sessions.computeIfAbsent(module.id(), ignored ->
-                            module.open(LanguageRegistry.environment(repository, executor, cache)));
-                    LanguageModule.Evidence loaded = session.load(new LanguageModule.Request(revision, query.context(), query.resource(), query.selector()), quota);
-                    excerpt = new Excerpt(loaded.markdown(), EvidenceText.oneLine(loaded.status()));
+                    var browser = new RepositoryBrowser(repository);
+                    if (query.selector().equals("index") && !module.capabilities().contains(LanguageModule.Capability.FILE_INDEX)
+                            && browser.directory(revision, query.resource())) {
+                        excerpt = new Excerpt(browser.source(revision, query.resource(), quota), "INDEX_ONLY (repository navigation fallback)");
+                    } else {
+                        Path cache = caches.getOrDefault(module.id(), module.defaultCache());
+                        LanguageModule.Session session = sessions.computeIfAbsent(module.id(), ignored ->
+                                module.open(LanguageRegistry.environment(repository, executor, cache)));
+                        LanguageModule.Evidence loaded = session.load(new LanguageModule.Request(revision, query.context(), query.resource(), query.selector()), quota);
+                        excerpt = new Excerpt(loaded.markdown(), EvidenceText.oneLine(loaded.status()),
+                                LegacyEvidenceAdapter.read(loaded.markdown(), evidence.scope(), languages));
+                    }
                 }
                 if (excerpt.markdown().isBlank() || excerpt.status().isBlank()) throw new IOException("Language module returned empty evidence or coverage status");
                 int bytes = EvidenceText.bytes(excerpt.markdown());
@@ -95,6 +106,7 @@ final class SupplementalEvidence {
                     throw new IOException("Requested material exceeds the supplemental evidence budget");
                 }
                 prompt.append(excerpt.markdown());
+                catalog = catalog.plus(excerpt.catalog());
                 remaining -= bytes;
                 included++;
                 status = excerpt.status();
@@ -115,17 +127,17 @@ final class SupplementalEvidence {
         String summary = "\nSupplemental requests included: " + included + "/" + processed + ". Invalid: " + invalidLines.size()
                 + ". Skipped by request limit: " + (requests.size() - processed) + ". See `coverage.md` for details.\n";
         return new Result(prompt.append(summary).append(knowledge.markdown()).toString(),
-                coverage.append(summary).append(knowledge.coverage()).toString(), included > 0 || knowledge.suppliedSections() > 0);
+                coverage.append(summary).append(knowledge.coverage()).toString(), included > 0 || knowledge.suppliedSections() > 0, catalog);
     }
 
-    private Excerpt repositoryFile(String revision, String path, String selector, int quota)
+    private Excerpt repositoryFile(ReviewScope scope, String revision, String path, String selector, int quota)
             throws IOException, InterruptedException {
         if (!eligiblePath(path)) {
             throw new IOException("Path is not eligible tracked source, test, schema, or documentation");
         }
         String title = path + " at " + revision;
         if (selector.equals("all")) {
-            return new Excerpt(EvidenceText.block(title, "text", git.regularBlobAt(revision, path, quota)), "INCLUDED");
+            return new Excerpt(EvidenceSources.file(revision, path, 1, title, git.regularBlobAt(revision, path, quota), scope, languages), "INCLUDED");
         }
         int from;
         int to;
@@ -156,24 +168,13 @@ final class SupplementalEvidence {
             throw new IOException("Requested range is beyond the end of the file");
         }
         String location = "lines " + from + "–" + (from + lines.size() - 1);
-        String block = EvidenceText.block(title + " (" + location + ")", "text", String.join("\n", lines));
-        return new Excerpt(block, bySymbol ? "INCLUDED (" + location + ")" : "INCLUDED");
+        EvidenceSource sourceBlock = EvidenceSources.file(revision, path, from, title + " (" + location + ")",
+                String.join("\n", lines), scope, languages);
+        return new Excerpt(sourceBlock, bySymbol ? "INCLUDED (" + location + ")" : "INCLUDED");
     }
 
     private boolean eligiblePath(String path) {
-        if (path.indexOf('\\') >= 0 || path.chars().anyMatch(Character::isISOControl)) {
-            return false;
-        }
-        String[] parts = path.toLowerCase(Locale.ROOT).split("/", -1);
-        for (String part : parts) {
-            if (BLOCKED_COMPONENTS.contains(part)) {
-                return false;
-            }
-        }
-        String name = parts[parts.length - 1];
-        return !name.equals(".npmrc") && !name.equals("credentials.json") && !name.startsWith("secrets.")
-                && RepositorySnapshotCollector.allowedTextLocation(path)
-                && (RepositorySnapshotCollector.isKnowledgeText(path) || languages.modules().stream().anyMatch(module -> module.isText(path)));
+        return RepositoryPathPolicy.allowed(path) && languages.recognizesText(path);
     }
 
 }
