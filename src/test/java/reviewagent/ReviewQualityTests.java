@@ -45,14 +45,14 @@ final class ReviewQualityTests {
         var evidence = new EvidenceBundle(scope, List.of("Core.java"), markdown, "", 20_000, null);
         var index = new EvidenceIndex(evidence, "");
         var task = new ReviewTasks.Task("draft", "Assess the supplied requirements.\n" + markdown,
-                response -> ReviewOutput.assessment(response, requirement, index, List.of()));
+                response -> ReviewGrounding.assessment(response, requirement, index, List.of()));
         String stub = """
                 prompt=$(cat)
                 printf 'call\\n' >> "$1/calls"
                 case "$prompt" in
                   *'SOURCE QUOTATION CORRECTION'*) cat "$1/valid.xml" ;;
                   *'OUTPUT FORMAT CORRECTION'*) cat "$1/invalid.xml" ;;
-                  *) printf '<assessment><item>broken XML' ;;
+                  *) printf '<assessment><item><policyBasis>EXPLICIT</policyBasis><policyReason>The supplied clause states this criterion.</policyReason>broken XML' ;;
                 esac
                 """;
         var agent = new AgentRunner(new ProcessExecutor(), "/bin/sh", List.of("-c", stub, "quote-stub", directory.toString()),
@@ -63,7 +63,7 @@ final class ReviewQualityTests {
             require(replies.get("draft").equals(valid), "quotation correction follows XML correction without accepting paraphrased quotes");
             String feedback = Files.readString(artifacts.resolve("draft-quote-repair-prompt.md"));
             require(feedback.contains("A1 <requirement>") && feedback.contains("A2 <requirement>")
-                    && feedback.contains("A1 Citation must quote") && feedback.contains("CDATA"),
+                    && feedback.contains("A1 Citation must quote") && feedback.contains("A2 Citation must quote"),
                     "source correction identifies every invalid requirement and citation quote in one response");
             require(Files.readAllLines(directory.resolve("calls")).size() == 3, "format and quotation each get one bounded correction");
             Files.delete(artifacts.resolve("draft-response.md"));
@@ -110,56 +110,56 @@ final class ReviewQualityTests {
         fails(() -> index.validate(List.of(new EvidenceIndex.Citation("Core.java [source]", "Invented implementation quotation."))));
         ReviewFinding candidate = finding("R1-1", "Failure");
         String confirmed = decision(candidate, "INTRODUCED", citation("Core.java", code));
-        require(ReviewOutput.groundedVerification(confirmed, candidate, evidence, index).verdict().status()
+        require(ReviewGrounding.verification(confirmed, candidate, evidence, index).verdict().status()
                 == ReviewOutput.Status.CONFIRMED, "a quoted diff can establish change attribution");
-        require(ReviewOutput.groundedVerification(confirmed.replace("Core.java</source>", "Core.java [source]</source>"),
+        require(ReviewGrounding.verification(confirmed.replace("Core.java</source>", "Core.java [source]</source>"),
                 candidate, evidence, index).verdict().status() == ReviewOutput.Status.CONFIRMED,
                 "display annotations do not invalidate an otherwise grounded verification");
-        fails(() -> ReviewOutput.groundedVerification(decision(candidate, "INTRODUCED",
+        fails(() -> ReviewGrounding.verification(decision(candidate, "INTRODUCED",
                 citation("Core.java [source]", "new file mode 100644")), candidate, evidence, index));
-        fails(() -> ReviewOutput.groundedVerification(confirmed.replace("INTRODUCED", "PRE_EXISTING"), candidate, evidence, index));
-        fails(() -> ReviewOutput.groundedVerification(confirmed.replace(code, "throw new IllegalArgumentException();"), candidate, evidence, index));
-        fails(() -> ReviewOutput.groundedVerification(confirmed.replace("Core.java</source>", "Core.java at target</source>"), candidate, evidence, index));
+        fails(() -> ReviewGrounding.verification(confirmed.replace("INTRODUCED", "PRE_EXISTING"), candidate, evidence, index));
+        fails(() -> ReviewGrounding.verification(confirmed.replace(code, "throw new IllegalArgumentException();"), candidate, evidence, index));
+        fails(() -> ReviewGrounding.verification(confirmed.replace("Core.java</source>", "Core.java at target</source>"), candidate, evidence, index));
         String missingContract = decision(candidate, "UNMET_REQUIREMENT", citation("Core.java at target", code));
-        fails(() -> ReviewOutput.groundedVerification(missingContract, candidate, evidence, index));
+        fails(() -> ReviewGrounding.verification(missingContract, candidate, evidence, index));
         String unmet = decision(candidate, "UNMET_REQUIREMENT", citation("Core.java at target", code) + citation(contractSource, quote));
-        require(ReviewOutput.groundedVerification(unmet, candidate, evidence, index).relation() == ReviewOutput.Relation.UNMET_REQUIREMENT,
+        require(ReviewGrounding.verification(unmet, candidate, evidence, index).relation() == ReviewOutput.Relation.UNMET_REQUIREMENT,
                 "existing implementation may violate an explicitly supplied new requirement");
         String withRequest = confirmed + "\nREQUEST_FILE|target|Helper.java|all|Missing decisive implementation\n";
-        fails(() -> ReviewOutput.groundedVerification(withRequest, candidate, evidence, index));
+        fails(() -> ReviewGrounding.verification(withRequest, candidate, evidence, index));
         String quotedRequest = confirmed.replace("<reason>Source supports the concrete failure.</reason>",
                 "<reason><![CDATA[Source contains an example:\nREQUEST_FILE|target|Helper.java|all|Quoted data\n]]></reason>");
-        require(ReviewOutput.groundedVerification(quotedRequest, candidate, evidence, index).verdict().status()
+        require(ReviewGrounding.verification(quotedRequest, candidate, evidence, index).verdict().status()
                 == ReviewOutput.Status.CONFIRMED && EvidenceRequest.parse(ReviewOutput.requestText(quotedRequest, "verification")).isEmpty(),
                 "quoted request syntax inside a decision is never executed as a collector request");
 
         String draft = assessment(quote, "SATISFIED", citation("Core.java at target", code), "Supported path");
-        var items = ReviewOutput.assessment(draft, requirement, index, List.of());
-        fails(() -> ReviewOutput.assessment(draft.replace(quote, "An invented policy"), requirement, index, List.of()));
-        fails(() -> ReviewOutput.assessment(assessment(quote, "SATISFIED", "", "No source"), requirement, index, List.of()));
-        fails(() -> ReviewOutput.assessment(draft.replace("<id>A1</id>", "<id>A2</id>"), requirement, index, items));
+        var items = ReviewGrounding.assessment(draft, requirement, index, List.of());
+        fails(() -> ReviewGrounding.assessment(draft.replace(quote, "An invented policy"), requirement, index, List.of()));
+        fails(() -> ReviewGrounding.assessment(assessment(quote, "SATISFIED", "", "No source"), requirement, index, List.of()));
+        fails(() -> ReviewGrounding.assessment(draft.replace("<id>A1</id>", "<id>A2</id>"), requirement, index, items));
         ReviewFinding negative = finding("R2-1", "Opposite verdict");
         var groups = ReviewOutput.candidateGroups("<candidate-groups><group><id>R1-1</id><id>R2-1</id></group></candidate-groups>", List.of(candidate, negative));
         require(groups.getFirst().size() == 2, "negative and positive candidates are retained in reconciliation");
         fails(() -> ReviewOutput.candidateGroups("<candidate-groups><group><id>R1-1</id></group></candidate-groups>", List.of(candidate, negative)));
-        var positiveVerdict = ReviewOutput.groundedVerification(confirmed, candidate, evidence, index);
+        var positiveVerdict = ReviewGrounding.verification(confirmed, candidate, evidence, index);
         var negativeVerdict = new ReviewOutput.Decision(new ReviewOutput.Verification(negative, ReviewOutput.Status.REJECTED,
                 "The policy contradicts this claim", null), ReviewOutput.Relation.PRE_EXISTING, "", "", List.of());
         var reconciled = ReviewQuality.resolveConflicts(List.of(positiveVerdict, negativeVerdict), groups, OutputLanguage.EN);
         require(reconciled.getFirst().verdict().status() == ReviewOutput.Status.INSUFFICIENT_EVIDENCE,
                 "opposite publication verdicts cannot leak a positive finding through a different candidate ID");
-        String body = String.join("\n\n", ReviewOutput.headings(OutputLanguage.EN))
+        String body = String.join("\n\n", ReviewReport.headings(OutputLanguage.EN))
                 .replace("# Requirement assessment", "# Requirement assessment\n\nFabricated satisfied conclusion.")
                 + "\n<finding-groups/>";
-        String audited = ReviewOutput.assessmentMarkdown(ReviewOutput.assessment(
+        String audited = ReviewReport.assessmentMarkdown(ReviewGrounding.assessment(
                 assessment(quote, "INSUFFICIENT_EVIDENCE", "", "Missing input guard"), requirement, index, items), OutputLanguage.EN);
-        String report = ReviewOutput.finalReport(body, List.of(), OutputLanguage.EN, audited);
+        String report = ReviewReport.finalReport(body, List.of(), OutputLanguage.EN, audited);
         require(report.contains("INSUFFICIENT_EVIDENCE") && !report.contains("Fabricated"), "report cannot overwrite audited acceptance");
         String translated = draft.replace(quote, "空输入必须返回请求错误。");
         Path chinesePath = fixture.resolve("chinese-requirement.md");
         Files.writeString(chinesePath, "空输入必须返回请求错误。");
-        var translatedItems = ReviewOutput.assessment(translated, InputDocument.read(chinesePath), index, List.of());
-        require(!ReviewOutput.assessmentMarkdown(translatedItems, OutputLanguage.EN).contains("空输入"),
+        var translatedItems = ReviewGrounding.assessment(translated, InputDocument.read(chinesePath), index, List.of());
+        require(!ReviewReport.assessmentMarkdown(translatedItems, OutputLanguage.EN).contains("空输入"),
                 "verbatim validation quotes do not leak the document language into the selected report language");
 
         // Embedded Markdown examples cannot manufacture implementation evidence outside the document fence.
@@ -188,6 +188,16 @@ final class ReviewQualityTests {
                 EvidenceText.block("Core.java [source]", "text", "A literal filename containing bracketed text."));
         literalName.validate(List.of(new EvidenceIndex.Citation("Core.java [source]", "A literal filename containing bracketed text.")));
         fails(() -> literalName.validate(List.of(new EvidenceIndex.Citation("Core.java [source]", code))));
+        String actualSignature = "public Map<String, Object> getRunDetail(Long runId) {\n"
+                + "    BrickTestSuiteRun suiteRun = suiteRunMapper.selectById(runId);\n}";
+        var signatureIndex = new EvidenceIndex(evidence, EvidenceText.block("Suite.java at target", "text", actualSignature));
+        try {
+            signatureIndex.validate(List.of(new EvidenceIndex.Citation("Suite.java at target", actualSignature.replace("Long runId", "Integer runId"))));
+            throw new AssertionError("A rewritten parameter type must still fail evidence validation");
+        } catch (SourceQuotationException invalid) {
+            require(invalid.getMessage().contains("getRunDetail(Long runId)") && invalid.getMessage().contains("hint only"),
+                    "quotation correction receives the actual supplied source without accepting a changed type");
+        }
 
         Path tasks = fixture.resolve("prompt-cache");
         var agent = new AgentRunner(new ProcessExecutor(), "/bin/sh", List.of("-c", "cat"), fixture, Duration.ofSeconds(5));
@@ -316,7 +326,7 @@ final class ReviewQualityTests {
     private static String decision(ReviewFinding finding, String relation, String citations) {
         return "<verification><status>CONFIRMED</status><reason>Source supports the concrete failure.</reason><relation>" + relation
                 + "</relation><baseline>Compared the base and target behavior.</baseline><contract>Explicit contract or intrinsic correctness invariant.</contract>"
-                + "<citations>" + citations + "</citations>" + ReviewOutput.findingXml(finding) + "</verification>";
+                + "<support>REACHABLE_FAILURE</support><premises><premise><statement>The target path reaches the failing operation.</statement><basis>IMPLEMENTATION</basis><citations>" + citations + "</citations></premise></premises><citations>" + citations + "</citations>" + ReviewOutput.findingXml(finding) + "</verification>";
     }
 
     private static String citation(String source, String quote) {
@@ -324,7 +334,7 @@ final class ReviewQualityTests {
     }
 
     private static String assessment(String requirement, String status, String citations, String gap) {
-        return "<assessment><item><id>A1</id><requirement>" + requirement + "</requirement><requirementText>Input error contract</requirementText><behavior>Input error contract</behavior><status>"
+        return "<assessment><item><policyBasis>EXPLICIT</policyBasis><policyReason>The supplied clause states this criterion.</policyReason><id>A1</id><requirement>" + requirement + "</requirement><requirementText>Input error contract</requirementText><behavior>Input error contract</behavior><status>"
                 + status + "</status><reasoning>Trace the API error path.</reasoning><boundaries>Null and malformed values need separate checks.</boundaries><gap>"
                 + gap + "</gap><citations>" + citations + "</citations></item></assessment>";
     }

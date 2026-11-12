@@ -15,6 +15,7 @@ final class EvidenceSession {
     private final StringBuilder coverage = new StringBuilder();
     private int files;
     private int queries;
+    private EvidenceCatalog catalog = EvidenceCatalog.empty();
 
     EvidenceSession(EvidenceBundle evidence, SupplementalEvidence collector, int fileLimit, int knowledgeLimit) {
         this.evidence = evidence;
@@ -60,18 +61,20 @@ final class EvidenceSession {
             coverage.append("Knowledge query limit exhausted; skipped: ").append(newQueries).append(".\n");
         }
         EvidenceBundle round = new EvidenceBundle(evidence.scope(), evidence.changedFiles(), evidence.markdown(),
-                evidence.coverage(), remaining, evidence.scopedKnowledge());
+                evidence.coverage(), remaining, evidence.scopedKnowledge(), evidence.catalog());
         SupplementalEvidence.Result result = collector.collect(round, requests,
                 fileLimit == 0 ? 0 : Math.max(1, fileLimit - files),
                 knowledgeLimit == 0 ? 0 : Math.max(1, knowledgeLimit - queries));
         files += fileLimit == 0 ? newFiles : Math.min(newFiles, Math.max(0, fileLimit - files));
         queries += knowledgeLimit == 0 ? newQueries : Math.min(newQueries, Math.max(0, knowledgeLimit - queries));
         markdown.append(result.markdown());
+        catalog = catalog.plus(result.catalog());
         coverage.append(result.coverage());
         return result.hasMaterial();
     }
 
     String markdown() { return markdown.toString(); }
     String coverage() { return coverage.toString(); }
-    EvidenceIndex index() { return new EvidenceIndex(evidence, markdown()); }
+    EvidenceIndex index() { return new EvidenceIndex(catalog()); }
+    EvidenceCatalog catalog() { return evidence.catalog().plus(catalog); }
 }

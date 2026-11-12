@@ -72,13 +72,14 @@ final class ReviewTasks {
         Path responseFile = directory.resolve(task.id() + "-response.md");
         Path repairFile = directory.resolve(task.id() + "-repair-response.md");
         Path quoteRepairFile = directory.resolve(task.id() + "-quote-repair-response.md");
+        Path decisionRepairFile = directory.resolve(task.id() + "-decision-repair-response.md");
         Path promptFile = directory.resolve(task.id() + "-prompt.md");
         String response = null;
         boolean samePrompt = Files.isRegularFile(promptFile)
                 && Files.readString(promptFile, StandardCharsets.UTF_8).equals(task.prompt());
         // A valid old verdict is not reusable when its instructions or supplied evidence have changed.
         if (resume && samePrompt) {
-            for (Path saved : List.of(responseFile, repairFile, quoteRepairFile)) {
+            for (Path saved : List.of(responseFile, repairFile, quoteRepairFile, decisionRepairFile)) {
                 if (!Files.isRegularFile(saved)) {
                     continue;
                 }
@@ -103,7 +104,7 @@ final class ReviewTasks {
             // Invalidate before recording the new prompt: an interrupted invocation must not associate an
             // old response (or repair) with the new evidence on the next resume.
             if (!samePrompt) {
-                for (Path old : List.of(responseFile, repairFile, quoteRepairFile, promptFile)) {
+                for (Path old : List.of(responseFile, repairFile, quoteRepairFile, decisionRepairFile, promptFile)) {
                     if (Files.isRegularFile(old)) Files.move(old,
                             old.resolveSibling(old.getFileName().toString().replace(task.id() + "-", task.id() + "-superseded-")),
                             java.nio.file.StandardCopyOption.REPLACE_EXISTING);
@@ -120,14 +121,20 @@ final class ReviewTasks {
                 task.validator().validate(response);
             } catch (IOException invalid) {
                 boolean quotation = invalid instanceof SourceQuotationException;
-                String kind = quotation ? "quote-repair" : "repair";
+                boolean decision = invalid instanceof ReviewDecisionException;
+                String kind = quotation ? "quote-repair" : decision ? "decision-repair" : "repair";
                 if (!attempted.add(kind)) {
                     throw new IOException("Task " + task.id() + " returned invalid structured output after bounded output correction: "
                             + invalid.getMessage(), invalid);
                 }
-                Files.writeString(directory.resolve(task.id() + (quotation ? "-quote-invalid-response.md" : "-invalid-response.md")),
+                Files.writeString(directory.resolve(task.id() + (quotation ? "-quote-invalid-response.md" : decision ? "-decision-invalid-response.md" : "-invalid-response.md")),
                         response, StandardCharsets.UTF_8);
-                String correction = quotation
+                String correction = decision
+                        ? "DECISION EVIDENCE CORRECTION\n"
+                            + "The response is structurally readable but its conclusion lacks required proof or conflicts with its policy basis. "
+                            + "Re-evaluate the verdict and its premises against supplied evidence. Downgrade unsupported conclusions to "
+                            + "INSUFFICIENT_EVIDENCE; request missing code when useful. Never invent a premise, policy, quote or source location. "
+                        : quotation
                         ? "SOURCE QUOTATION CORRECTION\n"
                             + "The response contains quotations absent from the supplied source. Re-copy each invalid requirement "
                             + "or citation directly and exactly from the original evidence block. Fix matching quotations consistently. "

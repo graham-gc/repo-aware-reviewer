@@ -27,6 +27,7 @@ public final class AllTests {
         ReviewOutputTests.run();
         EvidenceTests.run();
         ReviewQualityTests.run();
+        ReviewQualityRegressionTests.run();
         GoLanguageTests.run();
         LanguageModuleTests.run();
         System.out.println("All tests passed");

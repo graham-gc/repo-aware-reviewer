@@ -4,13 +4,8 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
 
 final class RepositorySnapshotCollector {
-    private static final List<String> SKIPPED_SEGMENTS = List.of(
-            "/node_modules/", "/vendor/", "/third_party/", "/third-party/", "/generated/",
-            "/dist/", "/build/", "/target/", "/.next/", "/coverage/");
-
     private final GitClient git;
     private final LanguageRegistry languages;
 
@@ -83,20 +78,7 @@ final class RepositorySnapshotCollector {
     }
 
     static boolean allowedTextLocation(String path) {
-        String normalized = "/" + path.toLowerCase(Locale.ROOT).replace('\\', '/');
-        for (String segment : SKIPPED_SEGMENTS) {
-            if (normalized.contains(segment)) {
-                return false;
-            }
-        }
-        String name = normalized.substring(normalized.lastIndexOf('/') + 1);
-        if (name.equals(".env") || (name.startsWith(".env.") && !name.equals(".env.example"))) {
-            return false;
-        }
-        if (name.endsWith(".lock") || name.endsWith(".min.js") || name.endsWith(".map")) {
-            return false;
-        }
-        return true;
+        return RepositoryPathPolicy.allowed(path);
     }
 }
 

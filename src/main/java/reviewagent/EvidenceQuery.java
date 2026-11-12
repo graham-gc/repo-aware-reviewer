@@ -5,6 +5,11 @@ import java.util.List;
 
 record EvidenceQuery(String command, String side, String language, String context, String resource,
                      String selector, String reason) {
+    enum Operation { READ_FILE, FIND_FILES, LANGUAGE_RESOURCE }
+    Operation operation() {
+        return command.equals("REQUEST_FILE") ? selector.equals("index") ? Operation.FIND_FILES : Operation.READ_FILE
+                : Operation.LANGUAGE_RESOURCE;
+    }
     static EvidenceQuery parse(String line, LanguageRegistry languages) throws IOException {
         String[] fields = line.split("\\|", line.startsWith("REQUEST_LANGUAGE|") ? 7 : 5);
         if (line.length() > 1200 || fields.length < 2 || !(fields[1].equals("base") || fields[1].equals("target")))

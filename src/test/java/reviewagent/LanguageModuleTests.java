@@ -50,10 +50,10 @@ final class LanguageModuleTests {
                     && RepositorySnapshotCollector.isKnowledgeText("src/FILE." + extension.toUpperCase(java.util.Locale.ROOT)), "format parity: " + extension);
         }
         for (String name : List.of("dockerfile", "makefile", "rakefile", "gemfile", "procfile", "jenkinsfile", "pom.xml", "package.json", "requirements.txt",
-                "pyproject.toml", "cargo.toml", "go.mod", "go.sum", "readme", "license", "agents.md", "claude.md", "review.md", ".dockerignore", ".env.example", ".editorconfig", ".npmrc")) {
+                "pyproject.toml", "cargo.toml", "go.mod", "go.sum", "readme", "license", "agents.md", "claude.md", "review.md", ".dockerignore", ".env.example", ".editorconfig")) {
             require(RepositorySnapshotCollector.isKnowledgeText(name), "special filename parity: " + name);
         }
-        for (String path : List.of(".env", ".env.py", "node_modules/app.js", "vendor/lib.py", "generated/message.proto", "Cargo.lock", "app.min.js", "app.js.map"))
+        for (String path : List.of(".env", ".env.py", ".npmrc", "node_modules/app.js", "vendor/lib.py", "generated/message.proto", "Cargo.lock", "app.min.js", "app.js.map"))
             require(!RepositorySnapshotCollector.isKnowledgeText(path), "common exclusion retained: " + path);
         require(!registry.module("python").capabilities().contains(LanguageModule.Capability.DECLARATION_LOOKUP)
                 && registry.module("go").capabilities().contains(LanguageModule.Capability.DEPENDENCY_EVIDENCE), "capabilities distinguish text navigation and semantic helpers");

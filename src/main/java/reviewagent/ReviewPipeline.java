@@ -68,16 +68,17 @@ final class ReviewPipeline {
         if (!resume || options.prepareOnly()) {
             write(runDirectory.resolve("scope.md"), scopeText);
             write(runDirectory.resolve("evidence.md"), evidence.markdown());
+            write(runDirectory.resolve("evidence-index.md"), evidence.catalog().manifest());
             write(runDirectory.resolve("coverage.md"), evidence.coverage());
         }
 
         if (evidence.changedFiles().isEmpty()) {
             OutputLanguage language = OutputLanguage.parse(options.language());
-            write(runDirectory.resolve("report.md"), ReviewOutput.emptyDiffReport(scope, language, requirement != null));
+            write(runDirectory.resolve("report.md"), ReviewReport.emptyDiffReport(scope, language, requirement != null));
             write(runDirectory.resolve("coverage.md"), evidence.coverage()
                     + "\nReview and requirement assessment skipped: the baseline and target have no file differences. No model was called by this execution.\n");
             if (requirement != null) {
-                write(runDirectory.resolve("requirement-assessment.md"), ReviewOutput.emptyDiffAssessment(language, true) + "\n");
+                write(runDirectory.resolve("requirement-assessment.md"), ReviewReport.emptyDiffAssessment(language, true) + "\n");
             }
             progress.finish(totalSteps, "No changes between baseline and target; wrote report.md without model calls");
             return runDirectory;
@@ -148,7 +149,7 @@ final class ReviewPipeline {
         progress.step(4, totalSteps, "Reviewing supplemental evidence");
         if (discoveryMaterial) {
             EvidenceBundle augmented = new EvidenceBundle(evidence.scope(), evidence.changedFiles(),
-                    evidence.markdown() + supplemental.markdown(), evidence.coverage(), 0, evidence.scopedKnowledge());
+                    evidence.markdown() + supplemental.markdown(), evidence.coverage(), 0, evidence.scopedKnowledge(), supplemental.catalog());
             String prompt = prompts.independentDiscovery(augmented, """
                     Inspect the supplemental evidence and newly supplied business rules for concrete regressions.
                     This pass runs after evidence collection. Use the material already supplied and record remaining
@@ -176,10 +177,11 @@ final class ReviewPipeline {
         verificationCoverage += "\nCandidates: " + findings.size() + ". Confirmed before deduplication: " + preliminaryCount + ".\n";
 
         progress.step(6, totalSteps, "Assessing and independently auditing requirements");
-        String assessment = quality.assess(requirement, verificationCoverage);
+        ReviewQuality.AssessmentResult assessed = quality.assess(requirement, verificationCoverage);
+        String assessment = assessed.summary();
 
         progress.step(7, totalSteps, "Reconciling verdicts before publication");
-        List<ReviewOutput.Decision> adjudicated = quality.adjudicate(preliminary, assessment);
+        List<ReviewOutput.Decision> adjudicated = quality.adjudicate(preliminary, assessed.details());
         verificationCoverage += ReviewQuality.coverage("Publication adjudication", adjudicated);
         OutputLanguage language = OutputLanguage.parse(options.language());
         List<ReviewFinding> confirmed = adjudicated.stream()
@@ -195,10 +197,10 @@ final class ReviewPipeline {
                 supplemental.markdown(), verificationCoverage) + "\nAUDITED REQUIREMENT ASSESSMENT\n" + assessment;
         write(runDirectory.resolve("verify-prompt.md"), reportPrompt);
         var reportReplies = ReviewTasks.run(List.of(new ReviewTasks.Task("report", reportPrompt,
-                reply -> ReviewOutput.finalReport(reply, confirmed, language, assessment))), agent, runDirectory,
+                reply -> ReviewReport.finalReport(reply, confirmed, language, assessment))), agent, runDirectory,
                 options.reviewParallelism(), progress, 8, totalSteps, "Finalizing report", resume);
         String response = reportReplies.get("report");
-        String report = ReviewOutput.finalReport(response, confirmed, language, assessment)
+        String report = ReviewReport.finalReport(response, confirmed, language, assessment)
                 + ReviewQuality.unresolved(preliminary, adjudicated, language);
         write(runDirectory.resolve("report.md"), report);
         progress.finish(totalSteps, "Wrote report.md");
