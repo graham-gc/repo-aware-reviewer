@@ -264,6 +264,10 @@ final class PromptFactory {
                 Descriptions, including requirementText, use the selected output language. Only requirement and
                 citation quotes retain verbatim source text for validation; those raw quotes are not rendered in
                 the final report. XML names and status values remain English.
+                Copy requirement clauses directly from the External requirement block, not from memory or from
+                knowledge-base summaries. Preserve original conjunctions, punctuation, and Markdown inside the excerpt.
+                A supplied scoped knowledge section can be cited by its unique KB-number ID, its title without
+                the line-position suffix, or its complete evidence title. The quotation itself must still be exact.
                 Escape XML special characters or use CDATA. Citation quotes must be verbatim (at least 12 characters).
                 All file/dependency reading is performed by the CLI. For missing decisive code, emit registered
                 evidence requests outside XML and mark affected items INSUFFICIENT_EVIDENCE.

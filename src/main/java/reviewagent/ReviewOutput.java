@@ -26,6 +26,8 @@ final class ReviewOutput {
             "(?ms)^ {0,3}(`{3,}|~{3,})[ \\t]*(?i:xml)?[ \\t]*\\R(.*?)^ {0,3}\\1[ \\t]*(?:\\R|$)");
     private static final Set<String> FINDING_FIELDS = Set.of("id", "title", "severity", "path", "line", "endLine",
             "trigger", "impact", "evidence", "diffRelation");
+    private static final Set<String> ASSESSMENT_FIELDS = Set.of("id", "requirement", "requirementText", "behavior",
+            "status", "reasoning", "boundaries", "gap", "citations");
 
     enum Status {
         CONFIRMED, REJECTED, INSUFFICIENT_EVIDENCE
@@ -140,19 +142,37 @@ final class ReviewOutput {
                                            List<AssessmentItem> previous) throws IOException {
         var items = new ArrayList<AssessmentItem>();
         var ids = new HashSet<String>();
-        for (Element element : children(xml(response, "assessment").root(), "item")) {
-            Map<String, Element> fields = fields(element, Set.of("id", "requirement", "requirementText", "behavior", "status", "reasoning", "boundaries", "gap", "citations"));
+        List<Element> elements = children(xml(response, "assessment").root(), "item");
+        var quoteErrors = new ArrayList<String>();
+        String original = EvidenceIndex.normalize(requirement.content());
+        for (Element element : elements) {
+            Map<String, Element> fields = fields(element, ASSESSMENT_FIELDS);
+            String quote = text(fields, "requirement");
+            if (!original.contains(EvidenceIndex.normalize(quote))) {
+                quoteErrors.add(text(fields, "id") + " <requirement>: " + EvidenceText.oneLine(quote));
+            }
+            try {
+                index.validate(citations(fields.get("citations")));
+            } catch (SourceQuotationException invalid) {
+                quoteErrors.add(text(fields, "id") + " " + invalid.getMessage());
+            }
+        }
+        if (!quoteErrors.isEmpty()) {
+            throw new SourceQuotationException("Assessment requirement and citation quotations must match supplied sources verbatim. "
+                    + "These requirement or citation excerpts do not match their supplied sources:\n" + String.join("\n", quoteErrors)
+                    + "\nRe-copy an applicable contiguous excerpt exactly from the External requirement evidence block, "
+                    + "including its original conjunctions and punctuation. Put paraphrases only in requirementText. "
+                    + "Correct matching requirement citations as well; do not invent or strengthen a requirement.");
+        }
+        for (Element element : elements) {
+            Map<String, Element> fields = fields(element, ASSESSMENT_FIELDS);
             String id = text(fields, "id");
             if (!id.matches("A[1-9][0-9]*") || !ids.add(id)) throw new IOException("Invalid or repeated requirement assessment ID");
             String quote = text(fields, "requirement");
-            if (!EvidenceIndex.normalize(requirement.content()).contains(EvidenceIndex.normalize(quote))) {
-                throw new IOException("Assessment requirement must quote the supplied requirements document verbatim");
-            }
             AssessmentStatus status;
             try { status = AssessmentStatus.valueOf(text(fields, "status")); }
             catch (IllegalArgumentException invalid) { throw new IOException("Unknown atomic requirement status", invalid); }
             var citations = citations(fields.get("citations"));
-            index.validate(citations);
             if (status != AssessmentStatus.INSUFFICIENT_EVIDENCE && (!index.hasImplementation(citations) || !index.hasTarget(citations))) {
                 throw new IOException("A conclusive requirement assessment requires implementation quotations");
             }
@@ -179,10 +199,18 @@ final class ReviewOutput {
     private static List<EvidenceIndex.Citation> citations(Element element) throws IOException {
         if (element == null) return List.of();
         var citations = new ArrayList<EvidenceIndex.Citation>();
+        var quoteErrors = new ArrayList<String>();
         for (Element citation : children(element, "citation")) {
             var fields = fields(citation, Set.of("source", "quote"));
-            citations.add(new EvidenceIndex.Citation(text(fields, "source"), text(fields, "quote")));
+            String source = text(fields, "source");
+            try {
+                citations.add(new EvidenceIndex.Citation(source, text(fields, "quote")));
+            } catch (IOException invalidQuote) {
+                quoteErrors.add(EvidenceText.oneLine(source) + ": quote must contain nonempty literal source text. "
+                        + "Escape XML markup or wrap the original excerpt in CDATA; do not put nested XML elements inside quote.");
+            }
         }
+        if (!quoteErrors.isEmpty()) throw new SourceQuotationException(String.join("\n", quoteErrors));
         return List.copyOf(citations);
     }
 
@@ -272,6 +300,31 @@ final class ReviewOutput {
                 ? List.of("# 审查范围", "# 功能与业务变更", "# 问题发现", "# 需求验收", "# 知识库反馈", "# 验证限制")
                 : List.of("# Review scope", "# Functional and business change", "# Findings", "# Requirement assessment",
                         "# Knowledge-base feedback", "# Verification limits");
+    }
+
+    static String emptyDiffReport(ReviewScope scope, OutputLanguage language, boolean hasRequirement) {
+        List<String> content = List.of(
+                language.text("Base", "基线") + ": `" + scope.baseCommit() + "`\n\n"
+                        + language.text("Target", "目标") + ": `" + scope.targetCommit() + "`",
+                language.text("The baseline and target contain no file differences.", "基线与目标之间没有文件差异。"),
+                language.text("Skipped: there are no changes to review.", "已跳过：没有需要审查的变更。"),
+                emptyDiffAssessment(language, hasRequirement),
+                language.text("Skipped because there are no code changes.", "没有代码变更，未评估知识库反馈。"),
+                language.text("This execution made no model calls and ran no build, tests, or static analyzer. "
+                                + "Choose an earlier baseline to review a change, or use --commit <ref> to compare a commit with its first parent.",
+                        "本次执行未调用模型，未执行构建、测试或静态检查。请指定更早的基线来审查变更，"
+                                + "或使用 --commit <ref> 比较某次提交与其第一父提交。"));
+        StringBuilder report = new StringBuilder();
+        List<String> titles = headings(language);
+        for (int i = 0; i < titles.size(); i++) report.append(titles.get(i)).append("\n\n").append(content.get(i)).append("\n\n");
+        return report.toString();
+    }
+
+    static String emptyDiffAssessment(OutputLanguage language, boolean hasRequirement) {
+        return hasRequirement
+                ? language.text("Not assessed: an empty diff does not establish that the target satisfies the requirements.",
+                    "未进行需求验收：空 diff 不能证明目标版本已满足需求。")
+                : language.text("No requirements document was supplied; acceptance was not assessed.", "未提供需求文档，未进行需求验收。");
     }
 
     static String findingXml(ReviewFinding finding) {

@@ -71,6 +71,18 @@ final class ReviewPipeline {
             write(runDirectory.resolve("coverage.md"), evidence.coverage());
         }
 
+        if (evidence.changedFiles().isEmpty()) {
+            OutputLanguage language = OutputLanguage.parse(options.language());
+            write(runDirectory.resolve("report.md"), ReviewOutput.emptyDiffReport(scope, language, requirement != null));
+            write(runDirectory.resolve("coverage.md"), evidence.coverage()
+                    + "\nReview and requirement assessment skipped: the baseline and target have no file differences. No model was called by this execution.\n");
+            if (requirement != null) {
+                write(runDirectory.resolve("requirement-assessment.md"), ReviewOutput.emptyDiffAssessment(language, true) + "\n");
+            }
+            progress.finish(totalSteps, "No changes between baseline and target; wrote report.md without model calls");
+            return runDirectory;
+        }
+
         PromptFactory prompts = new PromptFactory(
                 options.language(), options.maxSupplementalRequests(), options.maxKnowledgeQueries());
         String discoveryPrompt = prompts.discovery(evidence);

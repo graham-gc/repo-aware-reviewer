@@ -14,6 +14,7 @@ final class EvidenceIndex {
     record Citation(String source, String quote) { }
     record Source(String text, boolean implementation, boolean baseline, boolean target, boolean contract, boolean diff) { }
     private final Map<String, Source> sources = new LinkedHashMap<>();
+    private final Map<String, String> aliases = new LinkedHashMap<>();
 
     EvidenceIndex(EvidenceBundle evidence, String supplemental) {
         var blocks = BLOCK.matcher(evidence.markdown() + supplemental);
@@ -37,6 +38,17 @@ final class EvidenceIndex {
                     diff || title.contains(" at " + evidence.scope().baseCommit()) || title.endsWith(" at base"),
                     diff || title.contains(" at " + evidence.scope().targetCommit()), contract, diff));
         }
+        var ambiguous = new java.util.HashSet<String>();
+        Pattern knowledgeTitle = Pattern.compile("^((KB-[1-9][0-9]*) — .+) \\(lines [1-9][0-9]*–[1-9][0-9]*\\)$");
+        for (var entry : sources.entrySet()) {
+            var match = knowledgeTitle.matcher(entry.getKey());
+            if (!entry.getValue().contract() || !match.matches()) continue;
+            for (String alias : List.of(match.group(1), match.group(2))) {
+                String previous = aliases.putIfAbsent(alias, entry.getKey());
+                if (previous != null && !previous.equals(entry.getKey())) ambiguous.add(alias);
+            }
+        }
+        ambiguous.forEach(aliases::remove);
     }
 
     String inventory() {
@@ -46,23 +58,47 @@ final class EvidenceIndex {
     }
 
     void validate(List<Citation> citations) throws IOException {
+        var errors = new java.util.ArrayList<String>();
         for (Citation citation : citations) {
-            Source source = sources.get(citation.source());
+            Source source = source(citation.source());
             String quote = normalize(citation.quote());
             if (source == null || quote.length() < 12 || !normalize(source.text()).contains(quote)) {
-                throw new IOException("Citation must quote an included evidence block verbatim: "
-                        + EvidenceText.oneLine(citation.source()));
+                String cause = source == null ? "unknown or ambiguous source reference"
+                        : quote.length() < 12 ? "quote is too short; copy a longer contiguous excerpt (minimum 12 normalized characters)"
+                        : "quote is absent from this source";
+                errors.add(EvidenceText.oneLine(citation.source()) + "; " + cause
+                        + "; invalid quote: " + EvidenceText.oneLine(citation.quote()));
             }
         }
+        if (!errors.isEmpty()) throw new SourceQuotationException("Citation must quote an included evidence block verbatim:\n"
+                + String.join("\n", errors));
+    }
+
+    private Source source(String name) {
+        Source exact = sourceByName(name);
+        if (exact != null) return exact;
+        // inventory() displays the role next to the name. Accept that exact display form too,
+        // but resolve provenance from the indexed block rather than trusting the copied label.
+        int suffix = name.lastIndexOf(" [");
+        if (suffix < 0 || !name.endsWith("]")) return null;
+        String role = name.substring(suffix + 2, name.length() - 1);
+        if (!role.equals("source") && !role.equals("contract")) return null;
+        Source indexed = sourceByName(name.substring(0, suffix));
+        return indexed != null && indexed.contract() == role.equals("contract") ? indexed : null;
+    }
+
+    private Source sourceByName(String name) {
+        Source exact = sources.get(name);
+        return exact != null ? exact : sources.get(aliases.get(name));
     }
 
     boolean hasImplementation(List<Citation> citations) {
-        return citations.stream().map(c -> sources.get(c.source())).anyMatch(s -> s != null && s.implementation());
+        return citations.stream().map(c -> source(c.source())).anyMatch(s -> s != null && s.implementation());
     }
 
     boolean hasBaseline(List<Citation> citations) {
         return citations.stream().anyMatch(c -> {
-            Source source = sources.get(c.source());
+            Source source = source(c.source());
             return source != null && source.baseline() && source.implementation()
                     && (!source.diff() || source.text().contains("new file mode ") || quotesDiffSide(c, source, '-'));
         });
@@ -70,7 +106,7 @@ final class EvidenceIndex {
 
     boolean hasTarget(List<Citation> citations) {
         return citations.stream().anyMatch(c -> {
-            Source source = sources.get(c.source());
+            Source source = source(c.source());
             return source != null && source.target() && source.implementation()
                     && (!source.diff() || quotesDiffSide(c, source, '+'));
         });
@@ -85,7 +121,7 @@ final class EvidenceIndex {
     }
 
     boolean hasContract(List<Citation> citations) {
-        return citations.stream().map(c -> sources.get(c.source())).anyMatch(s -> s != null && s.contract());
+        return citations.stream().map(c -> source(c.source())).anyMatch(s -> s != null && s.contract());
     }
 
     static String normalize(String text) {
