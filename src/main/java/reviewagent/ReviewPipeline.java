@@ -122,104 +122,160 @@ final class ReviewPipeline {
             return runDirectory;
         }
 
-        progress.step(2, totalSteps, "Independent reviewers (0 of " + discoveries.size() + " complete)");
+        OutputLanguage outputLanguage = OutputLanguage.parse(options.language());
+        var executionIssues = new ArrayList<String>();
+        List<ReviewFinding> published = List.of();
+        String assessmentSnapshot = requirement == null ? ReviewReport.assessmentMarkdown(List.of(), outputLanguage)
+                : outputLanguage.text("Not completed: no reconciled requirement assessment is available from this execution.",
+                    "未完成：本次执行尚未产出经过复核和结论对齐的需求验收结果。");
+        if (Files.isRegularFile(runDirectory.resolve("report.md")))
+            AtomicFiles.copy(runDirectory.resolve("report.md"), runDirectory.resolve("report-previous.md"));
+        write(runDirectory.resolve("review-status.md"), "Status: RUNNING\n");
+        write(runDirectory.resolve("report.md"), outputLanguage.text("Review running. Previous reports do not describe this execution.\n",
+                "审查进行中。此前的报告不代表本次执行结果。\n"));
         AgentRunner agent = new AgentRunner(executor, options.agentCommand(), options.agentArgs(),
-                options.repo(), options.agentTimeout());
-        var responses = ReviewTasks.run(discoveries, agent, runDirectory.resolve("discovery"), options.reviewParallelism(),
-                progress, 2, totalSteps, "Independent reviewers", resume);
-        var findings = new ArrayList<ReviewFinding>();
-        StringBuilder discoveryNotes = new StringBuilder();
-        StringBuilder rawCandidates = new StringBuilder();
-        for (var response : responses.entrySet()) {
-            ReviewOutput.Discovery parsed = ReviewOutput.discovery(response.getValue(), response.getKey(), evidence.changedFiles());
-            findings.addAll(parsed.findings());
-            discoveryNotes.append("\n## ").append(response.getKey()).append("\n\n").append(parsed.notes());
-            rawCandidates.append("\n## ").append(response.getKey()).append("\n\n").append(response.getValue()).append('\n');
-        }
-        String candidates = rawCandidates.toString();
+                options.repo(), options.agentTimeout(), options.agentPolicy());
+        Throwable executionFailure = null;
+        try {
+            progress.step(2, totalSteps, "Independent reviewers (0 of " + discoveries.size() + " complete)");
+            var responses = ReviewTasks.runIsolated(discoveries, agent, runDirectory.resolve("discovery"), options.reviewParallelism(),
+                    progress, 2, totalSteps, "Independent reviewers", resume);
+            var findings = new ArrayList<ReviewFinding>();
+            StringBuilder discoveryNotes = new StringBuilder();
+            StringBuilder rawCandidates = new StringBuilder();
+            for (var response : responses.entrySet()) {
+                var outcome = response.getValue();
+                if (!outcome.valid()) {
+                    executionIssues.add("discovery/" + response.getKey() + " [" + outcome.failureKind() + "]; see discovery/"
+                            + response.getKey() + "-error.txt");
+                    continue;
+                }
+                ReviewOutput.Discovery parsed = ReviewOutput.discovery(outcome.response(), response.getKey(), evidence.changedFiles());
+                findings.addAll(parsed.findings());
+                discoveryNotes.append("\n## ").append(response.getKey()).append("\n\n").append(parsed.notes());
+                rawCandidates.append("\n## ").append(response.getKey()).append("\n\n").append(outcome.response()).append('\n');
+            }
+            if (responses.values().stream().noneMatch(ReviewTasks.Outcome::valid)) {
+                throw new ReviewStageException("All independent discovery reviewers failed; see discovery task artifacts");
+            }
+            String candidates = rawCandidates.toString();
 
-        progress.step(3, totalSteps, "Loading requested evidence");
-        EvidenceSession supplemental = new EvidenceSession(evidence, new SupplementalEvidence(git, executor, options.languageCaches()),
-                options.maxSupplementalRequests(), options.maxKnowledgeQueries());
-        boolean discoveryMaterial = supplemental.load(discoveryNotes.toString(), "Discovery evidence requests");
-        write(runDirectory.resolve("scope.md"), scopeText);
-        write(runDirectory.resolve("candidates.md"), candidates);
-        write(runDirectory.resolve("supplemental-evidence.md"), supplemental.markdown());
-        ReviewQuality quality = new ReviewQuality(options, evidence, supplemental, prompts, agent, runDirectory, progress, totalSteps);
-        quality.saveEvidence();
-
-        progress.step(4, totalSteps, "Reviewing supplemental evidence");
-        if (discoveryMaterial) {
-            EvidenceBundle augmented = new EvidenceBundle(evidence.scope(), evidence.changedFiles(),
-                    evidence.markdown() + supplemental.markdown(), evidence.coverage(), 0, evidence.scopedKnowledge(), supplemental.catalog());
-            String prompt = prompts.independentDiscovery(augmented, """
-                    Inspect the supplemental evidence and newly supplied business rules for concrete regressions.
-                    This pass runs after evidence collection. Use the material already supplied and record remaining
-                    evidence gaps in prose. Do not issue additional evidence requests in this pass.
-                    """);
-            var followup = ReviewTasks.run(List.of(new ReviewTasks.Task("S1", prompt,
-                    reply -> ReviewOutput.discovery(reply, "S1", evidence.changedFiles()))), agent,
-                    runDirectory.resolve("discovery"), options.reviewParallelism(), progress, 4, totalSteps,
-                    "Supplemental evidence reviewer", resume);
-            String response = followup.get("S1");
-            ReviewOutput.Discovery parsed = ReviewOutput.discovery(response, "S1", evidence.changedFiles());
-            findings.addAll(parsed.findings());
-            discoveryNotes.append("\n## S1\n\n").append(parsed.notes());
-            rawCandidates.append("\n## S1\n\n").append(response).append('\n');
-            write(runDirectory.resolve("candidates.md"), rawCandidates.toString());
-            supplemental.load(parsed.notes(), "Supplemental discovery evidence requests");
+            progress.step(3, totalSteps, "Loading requested evidence");
+            EvidenceSession supplemental = new EvidenceSession(evidence, new SupplementalEvidence(git, executor, options.languageCaches()),
+                    options.maxSupplementalRequests(), options.maxKnowledgeQueries());
+            boolean discoveryMaterial = supplemental.load(discoveryNotes.toString(), "Discovery evidence requests");
+            write(runDirectory.resolve("scope.md"), scopeText);
+            write(runDirectory.resolve("candidates.md"), candidates);
+            write(runDirectory.resolve("supplemental-evidence.md"), supplemental.markdown());
+            ReviewQuality quality = new ReviewQuality(options, evidence, supplemental, prompts, agent, runDirectory, progress, totalSteps);
             quality.saveEvidence();
+
+            progress.step(4, totalSteps, "Reviewing supplemental evidence");
+            if (discoveryMaterial) {
+                EvidenceBundle augmented = new EvidenceBundle(evidence.scope(), evidence.changedFiles(),
+                        evidence.markdown() + supplemental.markdown(), evidence.coverage(), 0, evidence.scopedKnowledge(), supplemental.catalog());
+                String prompt = prompts.independentDiscovery(augmented, """
+                        Inspect the supplemental evidence and newly supplied business rules for concrete regressions.
+                        This pass runs after evidence collection. Use the material already supplied and record remaining
+                        evidence gaps in prose. Do not issue additional evidence requests in this pass.
+                        """);
+                var followup = ReviewTasks.runIsolated(List.of(new ReviewTasks.Task("S1", prompt,
+                        reply -> ReviewOutput.discovery(reply, "S1", evidence.changedFiles()))), agent,
+                        runDirectory.resolve("discovery"), options.reviewParallelism(), progress, 4, totalSteps,
+                        "Supplemental evidence reviewer", resume);
+                if (!followup.get("S1").valid()) {
+                    executionIssues.add("discovery/S1 [" + followup.get("S1").failureKind() + "]; see discovery/S1-error.txt");
+                } else {
+                    String response = followup.get("S1").response();
+                    ReviewOutput.Discovery parsed = ReviewOutput.discovery(response, "S1", evidence.changedFiles());
+                    findings.addAll(parsed.findings());
+                    discoveryNotes.append("\n## S1\n\n").append(parsed.notes());
+                    rawCandidates.append("\n## S1\n\n").append(response).append('\n');
+                    write(runDirectory.resolve("candidates.md"), rawCandidates.toString());
+                    supplemental.load(parsed.notes(), "Supplemental discovery evidence requests");
+                    quality.saveEvidence();
+                }
+            }
+
+            progress.step(5, totalSteps, findings.isEmpty() ? "No candidate findings to verify"
+                    : "Verifying candidate issues (0 of " + findings.size() + " complete)");
+            List<ReviewOutput.Decision> preliminary = quality.verify(findings);
+            String verificationCoverage = ReviewQuality.coverage("Individual candidate verification", preliminary);
+            verificationCoverage += "\nCandidates: " + findings.size() + ". Confirmed before deduplication: "
+                    + preliminary.stream().filter(d -> d.verdict().status() == ReviewOutput.Status.CONFIRMED).count() + ".\n";
+
+            progress.step(6, totalSteps, "Assessing and independently auditing requirements");
+            ReviewQuality.AssessmentResult assessed = quality.assess(requirement, verificationCoverage);
+
+            progress.step(7, totalSteps, "Verifying unmet requirements and reconciling verdicts before publication");
+            AssessmentFindings.Plan assessmentPlan = quality.planAssessment(assessed);
+            List<ReviewOutput.Decision> requirementDecisions = quality.verifyAssessment(assessmentPlan);
+            preliminary = java.util.stream.Stream.concat(preliminary.stream(), requirementDecisions.stream()).toList();
+            verificationCoverage += ReviewQuality.coverage("Unmet requirement candidate verification", requirementDecisions);
+            verificationCoverage += "\nCandidates including unmet requirements: " + preliminary.size() + ". Confirmed before publication: "
+                    + preliminary.stream().filter(d -> d.verdict().status() == ReviewOutput.Status.CONFIRMED).count() + ".\n";
+            List<ReviewOutput.Decision> adjudicated = quality.adjudicate(preliminary, assessed.details());
+            assessed = quality.reconcileAssessment(assessed, assessmentPlan, preliminary, adjudicated);
+            String assessment = assessed.summary();
+            assessmentSnapshot = assessment;
+            verificationCoverage += ReviewQuality.coverage("Publication adjudication", adjudicated);
+            OutputLanguage language = OutputLanguage.parse(options.language());
+            List<ReviewFinding> confirmed = adjudicated.stream()
+                    .filter(d -> d.verdict().status() == ReviewOutput.Status.CONFIRMED)
+                    .map(d -> ReviewQuality.publishedFinding(d, language)).toList();
+            published = confirmed;
+            write(runDirectory.resolve("verified-findings.md"), confirmed.stream().map(finding -> finding.markdown(language))
+                    .collect(java.util.stream.Collectors.joining()));
+
+            write(runDirectory.resolve("coverage.md"), evidence.coverage() + supplemental.coverage() + verificationCoverage);
+            ReviewQuality.Completion completion = ReviewQuality.completion(preliminary, adjudicated, assessmentPlan, executionIssues, language);
+
+            progress.step(8, totalSteps, "Deduplicating findings and preparing the report");
+            String reportPrompt = prompts.finalizeReport(evidence, confirmed, discoveryNotes.toString(),
+                    supplemental.markdown(), verificationCoverage) + "\nAUDITED REQUIREMENT ASSESSMENT\n" + assessment
+                    + "\nPROGRAMMATIC CANDIDATE COUNTS\nDiscovery: " + findings.size() + "; unmet requirements: "
+                    + requirementDecisions.size() + "; total: " + preliminary.size()
+                    + "\nPROGRAMMATIC REVIEW COMPLETENESS\n" + completion.markdown();
+            write(runDirectory.resolve("verify-prompt.md"), reportPrompt);
+            var reportReplies = ReviewTasks.run(List.of(new ReviewTasks.Task("report", reportPrompt,
+                    reply -> ReviewReport.finalReport(reply, confirmed, language, assessment))), agent, runDirectory,
+                    options.reviewParallelism(), progress, 8, totalSteps, "Finalizing report", resume);
+            String response = reportReplies.get("report");
+            String report = completion.notice() + ReviewReport.finalReport(response, confirmed, language, assessment)
+                    + ReviewQuality.unresolved(preliminary, adjudicated, language);
+            write(runDirectory.resolve("report.md"), report);
+            write(runDirectory.resolve("review-status.md"), completion.markdown());
+            progress.finish(totalSteps, completion.complete() ? "Wrote report.md" : "Wrote incomplete report.md ("
+                    + completion.pendingChecks() + " checks remain unresolved)");
+            return runDirectory;
+        } catch (ReviewStageException incomplete) {
+            executionIssues.add(incomplete.getMessage());
+            var completion = ReviewQuality.completion(List.of(), List.of(), AssessmentFindings.Plan.empty(), executionIssues, outputLanguage);
+            write(runDirectory.resolve("report.md"), completion.notice()
+                    + ReviewReport.incompleteReport(scope, outputLanguage, published, assessmentSnapshot, executionIssues));
+            write(runDirectory.resolve("review-status.md"), completion.markdown());
+            progress.finish(totalSteps, "Wrote incomplete report.md (required stage did not complete; resume is available)");
+            return runDirectory;
+        } catch (IOException | InterruptedException fatal) {
+            executionFailure = fatal;
+            boolean interrupted = Thread.interrupted();
+            try {
+                String status = fatal instanceof InterruptedException ? "CANCELLED" : "FAILED";
+                write(runDirectory.resolve("review-status.md"), "Status: " + status + "\n\n" + EvidenceText.oneLine(fatal.getMessage()) + "\n");
+                write(runDirectory.resolve("report.md"), outputLanguage.text("> **Review did not complete.** See review-status.md.\n\n",
+                        "> **审查未完成。** 详见 review-status.md。\n\n")
+                        + ReviewReport.incompleteReport(scope, outputLanguage, published, assessmentSnapshot, List.of(status)));
+            } catch (IOException logging) { fatal.addSuppressed(logging); }
+            finally { if (interrupted) Thread.currentThread().interrupt(); }
+            throw fatal;
+        } finally {
+            boolean interrupted = Thread.interrupted();
+            try { agent.timings().write(runDirectory, outputLanguage); }
+            catch (IOException diagnostics) {
+                if (executionFailure != null) executionFailure.addSuppressed(diagnostics);
+                else throw diagnostics;
+            } finally { if (interrupted) Thread.currentThread().interrupt(); }
         }
-
-        progress.step(5, totalSteps, findings.isEmpty() ? "No candidate findings to verify"
-                : "Verifying candidate issues (0 of " + findings.size() + " complete)");
-        List<ReviewOutput.Decision> preliminary = quality.verify(findings);
-        String verificationCoverage = ReviewQuality.coverage("Individual candidate verification", preliminary);
-        verificationCoverage += "\nCandidates: " + findings.size() + ". Confirmed before deduplication: "
-                + preliminary.stream().filter(d -> d.verdict().status() == ReviewOutput.Status.CONFIRMED).count() + ".\n";
-
-        progress.step(6, totalSteps, "Assessing and independently auditing requirements");
-        ReviewQuality.AssessmentResult assessed = quality.assess(requirement, verificationCoverage);
-
-        progress.step(7, totalSteps, "Verifying unmet requirements and reconciling verdicts before publication");
-        AssessmentFindings.Plan assessmentPlan = quality.planAssessment(assessed);
-        List<ReviewOutput.Decision> requirementDecisions = quality.verifyAssessment(assessmentPlan);
-        preliminary = java.util.stream.Stream.concat(preliminary.stream(), requirementDecisions.stream()).toList();
-        verificationCoverage += ReviewQuality.coverage("Unmet requirement candidate verification", requirementDecisions);
-        verificationCoverage += "\nCandidates including unmet requirements: " + preliminary.size() + ". Confirmed before publication: "
-                + preliminary.stream().filter(d -> d.verdict().status() == ReviewOutput.Status.CONFIRMED).count() + ".\n";
-        List<ReviewOutput.Decision> adjudicated = quality.adjudicate(preliminary, assessed.details());
-        assessed = quality.reconcileAssessment(assessed, assessmentPlan, preliminary, adjudicated);
-        String assessment = assessed.summary();
-        verificationCoverage += ReviewQuality.coverage("Publication adjudication", adjudicated);
-        OutputLanguage language = OutputLanguage.parse(options.language());
-        List<ReviewFinding> confirmed = adjudicated.stream()
-                .filter(d -> d.verdict().status() == ReviewOutput.Status.CONFIRMED)
-                .map(d -> ReviewQuality.publishedFinding(d, language)).toList();
-        write(runDirectory.resolve("verified-findings.md"), confirmed.stream().map(finding -> finding.markdown(language))
-                .collect(java.util.stream.Collectors.joining()));
-
-        write(runDirectory.resolve("coverage.md"), evidence.coverage() + supplemental.coverage() + verificationCoverage);
-        ReviewQuality.Completion completion = ReviewQuality.completion(preliminary, adjudicated, assessmentPlan, language);
-
-        progress.step(8, totalSteps, "Deduplicating findings and preparing the report");
-        String reportPrompt = prompts.finalizeReport(evidence, confirmed, discoveryNotes.toString(),
-                supplemental.markdown(), verificationCoverage) + "\nAUDITED REQUIREMENT ASSESSMENT\n" + assessment
-                + "\nPROGRAMMATIC CANDIDATE COUNTS\nDiscovery: " + findings.size() + "; unmet requirements: "
-                + requirementDecisions.size() + "; total: " + preliminary.size()
-                + "\nPROGRAMMATIC REVIEW COMPLETENESS\n" + completion.markdown();
-        write(runDirectory.resolve("verify-prompt.md"), reportPrompt);
-        var reportReplies = ReviewTasks.run(List.of(new ReviewTasks.Task("report", reportPrompt,
-                reply -> ReviewReport.finalReport(reply, confirmed, language, assessment))), agent, runDirectory,
-                options.reviewParallelism(), progress, 8, totalSteps, "Finalizing report", resume);
-        String response = reportReplies.get("report");
-        String report = completion.notice() + ReviewReport.finalReport(response, confirmed, language, assessment)
-                + ReviewQuality.unresolved(preliminary, adjudicated, language);
-        write(runDirectory.resolve("report.md"), report);
-        write(runDirectory.resolve("review-status.md"), completion.markdown());
-        progress.finish(totalSteps, completion.complete() ? "Wrote report.md" : "Wrote incomplete report.md ("
-                + completion.pendingChecks() + " checks remain unresolved)");
-        return runDirectory;
     }
 
     private static void requireMatchingResumeFile(Path path, String expected, boolean required) throws IOException {
@@ -233,6 +289,8 @@ final class ReviewPipeline {
         if (path.getFileName().toString().equals("scope.md")) {
             previous = previous.replaceAll("(?m)^- Review parallelism:.*\\R?", "");
             expected = expected.replaceAll("(?m)^- Review parallelism:.*\\R?", "");
+            previous = previous.replaceAll("(?m)^- Verification evidence:.*\\R?", "");
+            expected = expected.replaceAll("(?m)^- Verification evidence:.*\\R?", "");
         }
         if (!previous.equals(expected)) {
             throw new IOException("Cannot resume because " + path.getFileName()
@@ -273,6 +331,7 @@ final class ReviewPipeline {
                 - File and language request count limit: %s
                 - Knowledge query count limit: %s
                 - Review parallelism: %s
+                - Verification evidence: %s
                 - Output language: %s
                 - Dynamic verification: not run
                 """.formatted(options.repo(), scope.mode(), scope.requestedBase(), scope.requestedTarget(),
@@ -280,7 +339,7 @@ final class ReviewPipeline {
                 options.knowledgeMode().name().toLowerCase(Locale.ROOT),
                 options.maxSupplementalRequests() == 0 ? "unlimited" : options.maxSupplementalRequests(),
                 options.maxKnowledgeQueries() == 0 ? "unlimited" : options.maxKnowledgeQueries(),
-                options.reviewParallelism(), options.language())
+                options.reviewParallelism(), options.verificationEvidence().name().toLowerCase(Locale.ROOT), options.language())
                 + (options.baseRemote() == null ? "" : "- Baseline remote: `" + options.baseRemote() + "`\n"
                     + "- Baseline remote branch: `" + RemoteBaseline.branchRef(options.base()) + "`\n")
                 + "- Language modules: " + LanguageRegistry.defaults().modules().stream().map(LanguageModule::id)
@@ -296,7 +355,7 @@ final class ReviewPipeline {
     }
 
     private static void write(Path path, String content) throws IOException {
-        Files.writeString(path, content, StandardCharsets.UTF_8);
+        AtomicFiles.write(path, content);
     }
 }
 

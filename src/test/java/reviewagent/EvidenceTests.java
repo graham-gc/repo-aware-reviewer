@@ -290,6 +290,7 @@ final class EvidenceTests {
                             [ "$attempt" -lt 100 ] || exit 34
                             sleep 0.01
                         done
+                        printf 'HTTP 401: authentication failed' >&2
                         exit 7
                         ;;
                     block) printf '%s' "$$" > "$1/cancelled.pid"; exec sleep 10 ;;
@@ -308,9 +309,11 @@ final class EvidenceTests {
                 require(expected.getMessage().contains("See task artifacts"), "agent failures identify their diagnostic directory");
             }
         }
-        require(Duration.ofNanos(System.nanoTime() - started).toSeconds() < 5, "failed stage cancels its other model calls");
+        require(Duration.ofNanos(System.nanoTime() - started).toSeconds() < 5, "global authentication failure cancels its other model calls");
         long pid = Long.parseLong(Files.readString(signals.resolve("cancelled.pid")));
         require(ProcessHandle.of(pid).map(handle -> !handle.isAlive()).orElse(true), "cancelled model subprocess is stopped");
+        require(Files.readString(fixture.resolve("failed-tasks/block-execution.log")).contains("terminationReason=CANCELLED"),
+                "a peer cancelled by a global failure is not mislabeled as an original timeout");
     }
 
     private static void checkRequestLimits(Path fixture) throws Exception {

@@ -6,81 +6,187 @@ import java.nio.file.Path;
 import java.nio.file.Files;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
 final class AgentRunner {
     private final ProcessExecutor executor;
     private final List<String> command;
     private final Path workingDirectory;
     private final Duration timeout;
+    private final AgentPolicy policy;
+    private final ThreadLocal<Budget> taskBudget = new ThreadLocal<>();
+    private final AtomicInteger active = new AtomicInteger();
+    private final ReviewTimings timings = new ReviewTimings();
+    ReviewTimings timings() { return timings; }
 
-    AgentRunner(ProcessExecutor executor, String executable, List<String> args,
-                Path workingDirectory, Duration timeout) {
+    AgentRunner(ProcessExecutor executor, String executable, List<String> args, Path workingDirectory, Duration timeout) {
+        this(executor, executable, args, workingDirectory, timeout, AgentPolicy.defaults(timeout));
+    }
+
+    AgentRunner(ProcessExecutor executor, String executable, List<String> args, Path workingDirectory,
+                Duration timeout, AgentPolicy policy) {
         this.executor = executor;
         this.command = new ArrayList<>();
         this.command.add(executable);
         this.command.addAll(args);
         this.workingDirectory = workingDirectory;
         this.timeout = timeout;
+        this.policy = policy;
     }
 
-    String invoke(String prompt) throws IOException, InterruptedException {
-        return invoke(prompt, null);
+    final class TaskScope implements AutoCloseable {
+        private TaskScope() {
+            if (taskBudget.get() != null) throw new IllegalStateException("Nested agent task");
+            taskBudget.set(new Budget());
+        }
+        @Override public void close() { taskBudget.remove(); }
+        int calls() { return taskBudget.get().calls; }
     }
+    TaskScope task() { return new TaskScope(); }
+
+    private final class Budget {
+        final long started = System.nanoTime();
+        int calls;
+        int retries;
+        Duration remaining() throws AgentCallException {
+            long remaining = policy.taskTimeout().toNanos() - (System.nanoTime() - started);
+            if (remaining <= 0) throw new AgentCallException(AgentCallException.Kind.BUDGET_EXHAUSTED, "Agent task elapsed-time budget exhausted");
+            return Duration.ofNanos(remaining);
+        }
+        Duration acquire() throws AgentCallException {
+            if (calls >= policy.maxCalls()) throw new AgentCallException(AgentCallException.Kind.BUDGET_EXHAUSTED,
+                    "Agent task call budget exhausted (" + policy.maxCalls() + " calls, including retries and corrections)");
+            Duration remaining = remaining();
+            calls++;
+            return remaining.compareTo(timeout) < 0 ? remaining : timeout;
+        }
+    }
+
+    String invoke(String prompt) throws IOException, InterruptedException { return invoke(prompt, null); }
 
     static List<String> defaultArguments() {
         return List.of("-p", "--tools", "", "--strict-mcp-config", "--mcp-config", "{\"mcpServers\":{}}");
     }
 
     String invoke(String prompt, Path logPrefix) throws IOException, InterruptedException {
-        Path stdout = logPrefix == null ? null : Path.of(logPrefix + "-stdout.log");
-        Path stderr = logPrefix == null ? null : Path.of(logPrefix + "-stderr.log");
-        long started = System.nanoTime();
-        CommandResult result;
-        try {
-            result = executor.run(command, workingDirectory, prompt, timeout, stdout, stderr);
-        } catch (IOException | InterruptedException failure) {
+        Budget budget = taskBudget.get();
+        if (budget == null) budget = new Budget();
+        while (true) {
+            Duration allowed = budget.acquire();
             try {
-                recordExecution(logPrefix, null, started);
-            } catch (IOException logFailure) {
-                failure.addSuppressed(logFailure);
+                return once(prompt, logPrefix, allowed, budget.calls);
+            } catch (AgentCallException failure) {
+                if (!failure.retryable() || budget.retries >= policy.retries() || budget.calls >= policy.maxCalls()) throw failure;
+                if (!executor.cleanupStatus().equals("OBSERVED_PROCESSES_TERMINATED")) {
+                    throw new AgentCallException(failure.kind(), failure.getMessage()
+                            + "; automatic retry suppressed because descendant cleanup could not be verified", failure);
+                }
+                Duration remaining = budget.remaining();
+                if (remaining.compareTo(policy.retryDelay()) <= 0) throw failure;
+                budget.retries++;
+                Thread.sleep(policy.retryDelay());
             }
-            throw failure;
         }
-        recordExecution(logPrefix, result.exitCode(), started);
-        if (result.exitCode() != 0) {
-            throw new IOException("Agent command failed with exit code " + result.exitCode()
-                    + System.lineSeparator() + result.stderr());
-        }
-        String response;
-        try {
-            response = result.strictUtf8Stdout();
-        } catch (CharacterCodingException error) {
-            throw new IOException("Agent command returned invalid UTF-8 on stdout", error);
-        }
-        return validateResponse(response);
     }
 
-    private void recordExecution(Path prefix, Integer exitCode, long started) throws IOException {
-        if (prefix == null) {
-            return;
+    private String once(String prompt, Path prefix, Duration allowed, int callNumber) throws IOException, InterruptedException {
+        Path attempt = attemptPrefix(prefix);
+        if (attempt != null) AtomicFiles.write(Path.of(attempt + "-prompt.md"), prompt);
+        Path stdout = attempt == null ? null : Path.of(attempt + "-stdout.log");
+        Path stderr = attempt == null ? null : Path.of(attempt + "-stderr.log");
+        long started = System.nanoTime();
+        Instant startedAt = Instant.now();
+        Integer exit = null;
+        String reason = "IO_FAILURE";
+        int concurrent = active.incrementAndGet();
+        try {
+            CommandResult result = executor.run(command, workingDirectory, prompt, allowed, stdout, stderr);
+            exit = result.exitCode();
+            if (exit != 0) throw commandFailure(exit, result.stderr());
+            String response;
+            try { response = result.strictUtf8Stdout(); }
+            catch (CharacterCodingException invalid) {
+                throw new AgentCallException(AgentCallException.Kind.INVALID_ENCODING, "Agent command returned invalid UTF-8 on stdout", invalid);
+            }
+            if (response.indexOf('\uFFFD') >= 0) throw new AgentCallException(AgentCallException.Kind.INVALID_ENCODING,
+                    "Agent response contains U+FFFD (Unicode replacement character)");
+            if (response.isBlank()) throw new AgentCallException(AgentCallException.Kind.EMPTY_RESPONSE, "Agent command returned no output (cause unknown)");
+            reason = "SUCCEEDED";
+            return response;
+        } catch (CommandTimeoutException expired) {
+            reason = "TIMEOUT";
+            throw new AgentCallException(AgentCallException.Kind.TIMEOUT, expired.getMessage(), expired);
+        } catch (CommandStartException unavailable) {
+            reason = "CONFIGURATION";
+            throw new AgentCallException(AgentCallException.Kind.CONFIGURATION, unavailable.getMessage(), unavailable);
+        } catch (CommandInputException closed) {
+            reason = "STDIN_CLOSED";
+            throw new AgentCallException(AgentCallException.Kind.STDIN_CLOSED, closed.getMessage(), closed);
+        } catch (AgentCallException failure) {
+            reason = failure.kind().name();
+            throw failure;
+        } catch (InterruptedException cancelled) {
+            reason = "CANCELLED";
+            throw cancelled;
+        } finally {
+            boolean interrupted = Thread.interrupted();
+            try {
+                active.decrementAndGet();
+                timings.call(prefix, started, System.nanoTime(), EvidenceText.bytes(prompt), reason);
+                if (attempt != null) {
+                    byte[] input = prompt.getBytes(StandardCharsets.UTF_8);
+                    String record = "executable=" + EvidenceText.oneLine(command.getFirst())
+                            + "\nworkingDirectory=" + EvidenceText.oneLine(workingDirectory.toString())
+                            + "\nstartedAt=" + startedAt + "\ntimeoutSeconds=" + timeout.toSeconds()
+                            + "\nallowedMillis=" + allowed.toMillis()
+                            + "\nelapsedMillis=" + Duration.ofNanos(System.nanoTime() - started).toMillis()
+                            + "\nexitCode=" + (exit == null ? "unavailable" : exit)
+                            + "\nterminationReason=" + reason + "\nprocessCleanup=" + executor.cleanupStatus() + "\ninputBytes=" + input.length
+                            + "\npromptSha256=" + InputDocument.sha256(input)
+                            + "\ncommandFingerprint=" + InputDocument.sha256(String.join("\0", command).getBytes(StandardCharsets.UTF_8))
+                            + "\ntaskCall=" + callNumber + "\nconcurrentCallsAtStart=" + concurrent
+                            + "\nattemptDirectory=" + attempt.getParent().getFileName() + "\n";
+                    record += "maxCallsPerTask=" + policy.maxCalls() + "\ntaskTimeoutSeconds=" + policy.taskTimeout().toSeconds()
+                            + "\ntransportRetriesPerTask=" + policy.retries() + "\nupstreamRetryPolicy=unknown (controlled by agent command)\n";
+                    AtomicFiles.write(Path.of(attempt + "-execution.log"), record);
+                    // Compatibility views point to the latest attempt; all attempt directories remain immutable.
+                    for (String suffix : List.of("-stdout.log", "-stderr.log", "-execution.log")) {
+                        Path saved = Path.of(attempt + suffix);
+                        if (Files.isRegularFile(saved)) AtomicFiles.copy(saved, Path.of(prefix + suffix));
+                    }
+                }
+            } finally { if (interrupted) Thread.currentThread().interrupt(); }
         }
-        String record = "executable=" + EvidenceText.oneLine(command.getFirst())
-                + "\ntimeoutSeconds=" + timeout.toSeconds()
-                + "\nelapsedMillis=" + Duration.ofNanos(System.nanoTime() - started).toMillis()
-                + "\nexitCode=" + (exitCode == null ? "unavailable (execution did not complete)" : exitCode) + "\n";
-        Files.writeString(Path.of(prefix + "-execution.log"), record, StandardCharsets.UTF_8);
+    }
+
+    private static Path attemptPrefix(Path prefix) throws IOException {
+        if (prefix == null) return null;
+        Path root = Files.createDirectories(Path.of(prefix + "-attempts"));
+        for (int number = 1; ; number++) {
+            try { return Files.createDirectory(root.resolve("attempt-%04d".formatted(number))).resolve("call"); }
+            catch (java.nio.file.FileAlreadyExistsException collision) { /* Keep all earlier attempts, including resumed calls. */ }
+        }
+    }
+
+    private static AgentCallException commandFailure(int exit, String stderr) {
+        String text = stderr.toLowerCase(java.util.Locale.ROOT);
+        AgentCallException.Kind kind;
+        if (text.matches("(?s).*(?:\\bhttp(?: status)?[ :]+(?:401|403)\\b|invalid[_ ]api[_ ]key|authentication failed|not authenticated).*"))
+            kind = AgentCallException.Kind.CONFIGURATION;
+        else if (text.matches("(?s).*(?:prompt is too long|maximum context length|context window exceeded|input too long).*"))
+            kind = AgentCallException.Kind.INPUT_LIMIT;
+        else if (text.matches("(?s).*(?:\\b(?:http(?: status)?|status(?: code)?)[ :=]+(?:429|502|503|504)\\b|econnreset|eai_again|connection reset by peer|temporarily unavailable).*"))
+            kind = AgentCallException.Kind.TRANSIENT;
+        else kind = AgentCallException.Kind.COMMAND_EXIT;
+        return new AgentCallException(kind, "Agent command failed with exit code " + exit + " (" + kind + "); see stderr log");
     }
 
     static String validateResponse(String response) throws IOException {
-        if (response.indexOf('\uFFFD') >= 0) {
-            throw new IOException("Agent response contains U+FFFD (Unicode replacement character)");
-        }
-        if (response.isBlank()) {
-            throw new IOException("Agent command returned no output");
-        }
+        if (response.indexOf('\uFFFD') >= 0) throw new IOException("Agent response contains U+FFFD (Unicode replacement character)");
+        if (response.isBlank()) throw new IOException("Agent command returned no output");
         return response;
     }
 }
-

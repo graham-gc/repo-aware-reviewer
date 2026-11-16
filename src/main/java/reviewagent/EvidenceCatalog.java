@@ -49,6 +49,17 @@ final class EvidenceCatalog {
     }
 
     static EvidenceCatalog empty() { return new EvidenceCatalog(List.of(), false); }
+    private EvidenceCatalog(EvidenceCatalog original, Set<String> included) {
+        var selected = new LinkedHashMap<String, EvidenceSource>();
+        original.sources.forEach((id, source) -> { if (included.contains(id)) selected.put(id, source); });
+        sources = java.util.Collections.unmodifiableMap(selected);
+        original.aliases.forEach((alias, id) -> { if (included.contains(id)) aliases.put(alias, id); });
+        original.references.forEach((id, reference) -> { if (included.contains(id)) references.put(id, reference); });
+        authoritative = original.authoritative;
+    }
+
+    /** Keep original SRC aliases and ambiguity decisions; never renumber a task's subset. */
+    EvidenceCatalog select(Set<String> included) { return new EvidenceCatalog(this, included); }
     List<EvidenceSource> sources() { return List.copyOf(sources.values()); }
     boolean authoritative() { return authoritative; }
     EvidenceCatalog plus(EvidenceCatalog other) {

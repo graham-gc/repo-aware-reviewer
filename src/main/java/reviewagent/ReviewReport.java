@@ -21,6 +21,7 @@ final class ReviewReport {
                 case SATISFIED -> "满足";
                 case NOT_SATISFIED -> "未满足";
                 case INSUFFICIENT_EVIDENCE -> "证据不足";
+                case NOT_COMPLETED -> "未完成";
             });
             out.append("### ").append(item.id()).append(" — ").append(EvidenceText.oneLine(item.behavior())).append("\n\n")
                     .append("- ").append(language.text("Assessment", "结论")).append(": ").append(status).append('\n')
@@ -52,7 +53,7 @@ final class ReviewReport {
                 "Detailed reasoning, boundaries and verified source spans: [requirement-assessment.md](requirement-assessment.md).",
                 "完整依据、边界核查及核准的源码行号见 [requirement-assessment.md](requirement-assessment.md)。")).append("\n\n");
         var ordered = items.stream().sorted(Comparator.comparingInt(item -> switch (item.status()) {
-            case NOT_SATISFIED -> 0; case INSUFFICIENT_EVIDENCE -> 1; case SATISFIED -> 2;
+            case NOT_COMPLETED -> 0; case NOT_SATISFIED -> 1; case INSUFFICIENT_EVIDENCE -> 2; case SATISFIED -> 3;
         })).toList();
         for (AssessmentItem item : ordered) {
             out.append("- **").append(item.id()).append(" · ").append(status(item.status(), language)).append("** — ")
@@ -66,6 +67,7 @@ final class ReviewReport {
     private static String status(ReviewOutput.AssessmentStatus status, OutputLanguage language) {
         return language.text(status.name(), switch (status) {
             case SATISFIED -> "满足"; case NOT_SATISFIED -> "未满足"; case INSUFFICIENT_EVIDENCE -> "证据不足";
+            case NOT_COMPLETED -> "未完成";
         });
     }
 
@@ -145,6 +147,30 @@ final class ReviewReport {
                 ? List.of("# 审查范围", "# 功能与业务变更", "# 问题发现", "# 需求验收", "# 知识库反馈", "# 验证限制")
                 : List.of("# Review scope", "# Functional and business change", "# Findings", "# Requirement assessment",
                         "# Knowledge-base feedback", "# Verification limits");
+    }
+
+    static String incompleteReport(ReviewScope scope, OutputLanguage language, List<ReviewFinding> published,
+                                   String assessment, List<String> failures) {
+        String findings = published.isEmpty()
+                ? language.text("No publishable conclusions are available from the completed stages. This does not mean the change has no defects.",
+                    "已完成阶段尚无可发布的结论，这不代表变更没有问题。")
+                : language.text("The following candidates passed publication adjudication; final report grouping may be unfinished.\n\n",
+                    "以下候选已通过发布裁决；最终报告去重可能尚未完成。\n\n")
+                    + published.stream().map(finding -> finding.markdown(language)).collect(java.util.stream.Collectors.joining());
+        List<String> content = List.of(
+                language.text("Base", "基线") + ": `" + scope.baseCommit() + "`\n\n"
+                        + language.text("Target", "目标") + ": `" + scope.targetCommit() + "`",
+                language.text("Review execution did not finish all required stages. No generated narrative is substituted for missing analysis.",
+                    "本次执行未完成全部必要审查环节，缺失分析没有对应结论。"),
+                findings, assessment,
+                language.text("Not completed in this report.", "本报告未完成此项反馈。"),
+                language.text("Static review only; no target build or tests were run. Unfinished checks are execution failures, not evidence-based business verdicts.\n\n",
+                    "仅做静态审查，未执行目标仓库构建或测试。未完成检查表示执行未完成，不是业务证据不足的判断。\n\n")
+                        + failures.stream().map(failure -> "- " + EvidenceText.oneLine(failure)).collect(java.util.stream.Collectors.joining("\n")));
+        StringBuilder report = new StringBuilder();
+        List<String> titles = headings(language);
+        for (int i = 0; i < titles.size(); i++) report.append(titles.get(i)).append("\n\n").append(content.get(i)).append("\n\n");
+        return report.toString();
     }
 
     static String emptyDiffReport(ReviewScope scope, OutputLanguage language, boolean hasRequirement) {

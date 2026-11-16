@@ -52,6 +52,12 @@ final class AssessmentFindingsTests {
         require(grouped.getFirst().verdict().status() == ReviewOutput.Status.CONFIRMED
                 && !ReviewQuality.completion(grouped, List.of(), OutputLanguage.EN).complete(),
                 "invalid output is not a contrary semantic verdict, while the overall incomplete state is preserved");
+        var unfinished = new ReviewOutput.Decision(new ReviewOutput.Verification(candidate,
+                ReviewOutput.Status.INSUFFICIENT_EVIDENCE, "Invocation timed out", null, true), ReviewOutput.Relation.UNRESOLVED, "", "", List.of());
+        var interruptedAssessment = AssessmentFindings.reconcile(items, plan, List.of(unfinished), OutputLanguage.EN);
+        require(interruptedAssessment.getFirst().status() == ReviewOutput.AssessmentStatus.NOT_COMPLETED
+                && ReviewReport.assessmentSummary(interruptedAssessment, OutputLanguage.ZH_CN).contains("未完成"),
+                "an invocation failure is displayed as unfinished acceptance, distinct from business evidence insufficiency");
         lateFindingsWorkflow();
     }
 

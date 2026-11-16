@@ -46,7 +46,7 @@ final class KnowledgePipeline {
         KnowledgePromptFactory prompts = new KnowledgePromptFactory();
         List<String> observations = new ArrayList<>();
         AgentRunner agent = options.prepareOnly() ? null : new AgentRunner(executor,
-                options.agentCommand(), options.agentArgs(), options.repo(), options.agentTimeout());
+                options.agentCommand(), options.agentArgs(), options.repo(), options.agentTimeout(), options.agentPolicy());
         for (int i = 0; i < chunks; i++) {
             String label = "chunk " + (i + 1) + " of " + chunks;
             progress.step(i, totalSteps, (agent == null ? "Preparing " : "Analyzing ") + label);
@@ -57,7 +57,7 @@ final class KnowledgePipeline {
             write(chunksDir.resolve("chunk-" + number + ".txt"), chunk);
             write(promptsDir.resolve("extract-" + number + ".md"), prompt);
             if (agent != null) {
-                String observation = agent.invoke(prompt);
+                String observation = agent.invoke(prompt, observationsDir.resolve("chunk-" + number));
                 observations.add("\n\n## Chunk " + (i + 1) + "\n\n" + observation);
                 write(observationsDir.resolve("observation-" + number + ".md"), observation);
             }
@@ -74,7 +74,7 @@ final class KnowledgePipeline {
         String combined = String.join("", observations);
         String synthesisPrompt = prompts.synthesize(snapshot, inventory, combined, options.language());
         write(promptsDir.resolve("synthesis.md"), synthesisPrompt);
-        String candidate = agent.invoke(synthesisPrompt);
+        String candidate = agent.invoke(synthesisPrompt, runDir.resolve("synthesis"));
         write(runDir.resolve("candidate-knowledge.md"), candidate);
         progress.finish(totalSteps, "Wrote candidate-knowledge.md");
         return runDir;
@@ -122,6 +122,6 @@ final class KnowledgePipeline {
     }
 
     private static void write(Path path, String content) throws IOException {
-        Files.writeString(path, content, StandardCharsets.UTF_8);
+        AtomicFiles.write(path, content);
     }
 }

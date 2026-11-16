@@ -44,6 +44,7 @@ final class AssessmentFindings {
             if (origin == null && !unmapped.contains(item.id())) return item;
             ReviewOutput.Decision decision = origin == null ? null : byId.get(origin.candidate().id());
             boolean confirmed = decision != null && decision.verdict().status() == ReviewOutput.Status.CONFIRMED;
+            boolean unfinished = origin != null && (decision == null || decision.verdict().validationFailed());
             String explanation = origin == null
                     ? language.text("No quoted changed-file implementation location supports a review candidate; manual review is required.",
                         "所引证据无法定位到可复核的变更实现，需人工确认其适用范围。")
@@ -51,7 +52,8 @@ final class AssessmentFindings {
                     : language.text("Candidate ", "候选 ") + origin.candidate().id() + ": " + label(decision, language) + ". " + decision.verdict().reason();
             String reasoning = confirmed ? explanation : language.text("The initial unmet assessment was not confirmed. ", "初审的未满足判断尚未获得确认。 ") + explanation;
             return new ReviewOutput.AssessmentItem(item.id(), item.requirement(), item.requirementText(), item.behavior(),
-                    confirmed ? ReviewOutput.AssessmentStatus.NOT_SATISFIED : ReviewOutput.AssessmentStatus.INSUFFICIENT_EVIDENCE,
+                    confirmed ? ReviewOutput.AssessmentStatus.NOT_SATISFIED
+                        : unfinished ? ReviewOutput.AssessmentStatus.NOT_COMPLETED : ReviewOutput.AssessmentStatus.INSUFFICIENT_EVIDENCE,
                     reasoning, confirmed ? item.boundaries() : language.text("Initial boundary notes, pending confirmation: ", "初审边界记录，尚待确认：") + item.boundaries(),
                     confirmed ? item.gap() : explanation, confirmed ? decision.citations() : item.citations(), item.policyBasis(),
                     confirmed ? item.policyReason() : language.text("Initial policy rationale, pending confirmation: ", "初审规则依据，尚待确认：") + item.policyReason());
@@ -84,7 +86,7 @@ final class AssessmentFindings {
     }
 
     private static String label(ReviewOutput.Decision decision, OutputLanguage language) {
-        if (decision.verdict().validationFailed()) return language.text("INVALID_RESPONSE", "回复校验失败");
+        if (decision.verdict().validationFailed()) return language.text("NOT_COMPLETED", "复核未完成");
         return language.text(decision.verdict().status().name(), switch (decision.verdict().status()) {
             case CONFIRMED -> "已确认"; case REJECTED -> "已驳回"; case INSUFFICIENT_EVIDENCE -> "证据不足";
         });

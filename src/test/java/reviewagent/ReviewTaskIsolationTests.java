@@ -41,8 +41,12 @@ final class ReviewTaskIsolationTests {
             require(resumed.values().stream().allMatch(ReviewTasks.Outcome::valid) && !Files.exists(dir.resolve("bad-error.txt")),
                     "resume reuses the valid peer, retries the invalid response and clears its error only after validation");
             fails(() -> ReviewTasks.run(List.of(tasks.getFirst()), agent, dir.resolve("strict"), 1, progress, 1, 2, "Strict phase", false));
-            fails(() -> ReviewTasks.runIsolated(tasks, shell(dir, "exit 9"), dir.resolve("transport"), 1,
-                    progress, 1, 2, "Transport failure", false));
+            var unavailable = ReviewTasks.runIsolated(tasks, shell(dir, "exit 9"), dir.resolve("transport"), 1,
+                    progress, 1, 2, "Transport failure", false);
+            require(unavailable.values().stream().allMatch(outcome -> !outcome.valid() && outcome.failureKind().equals("COMMAND_EXIT")),
+                    "a candidate invocation failure remains unfinished without cancelling independent checks");
+            fails(() -> ReviewTasks.runIsolated(tasks, shell(dir, "printf 'HTTP 401: authentication failed' >&2; exit 1"),
+                    dir.resolve("authentication"), 1, progress, 1, 2, "Authentication failure", false));
         }
     }
 

@@ -9,7 +9,18 @@ record CliOptions(Path repo, String commit, String branch, String base, String b
                   Path requirement, Path knowledge, KnowledgeMode knowledgeMode, Path outputDir, Path resumeDirectory,
                   String agentCommand, List<String> agentArgs,
                   boolean prepareOnly, int maxEvidenceBytes, int maxSupplementalRequests, int maxKnowledgeQueries,
-                  int reviewParallelism, Duration agentTimeout, String language, java.util.Map<String, Path> languageCaches) {
+                  int reviewParallelism, Duration agentTimeout, String language, java.util.Map<String, Path> languageCaches, AgentPolicy agentPolicy, VerificationEvidenceMode verificationEvidence) {
+    enum VerificationEvidenceMode {
+        SCOPED, FULL;
+        static VerificationEvidenceMode parse(String value) {
+            return switch (value) {
+                case "scoped" -> SCOPED;
+                case "full" -> FULL;
+                default -> throw new IllegalArgumentException("--verification-evidence must be scoped or full");
+            };
+        }
+    }
+
     enum KnowledgeMode {
         FULL, SCOPED;
 
@@ -45,7 +56,11 @@ record CliOptions(Path repo, String commit, String branch, String base, String b
         int maxSupplementalRequests = 0;
         int maxKnowledgeQueries = 0;
         int reviewParallelism = 3;
+        VerificationEvidenceMode verificationEvidence = VerificationEvidenceMode.SCOPED;
         Duration timeout = Duration.ofMinutes(15);
+        Duration taskTimeout = null;
+        int agentRetries = 1;
+        int agentMaxCalls = 5;
         String language = "en";
         var languageCaches = new java.util.LinkedHashMap<String, Path>();
 
@@ -71,8 +86,12 @@ record CliOptions(Path repo, String commit, String branch, String base, String b
                 case "--max-evidence-bytes" -> maxEvidenceBytes = Integer.parseInt(value(args, ++i, "--max-evidence-bytes"));
                 case "--max-supplemental-requests" -> maxSupplementalRequests = Integer.parseInt(value(args, ++i, "--max-supplemental-requests"));
                 case "--max-knowledge-queries" -> maxKnowledgeQueries = Integer.parseInt(value(args, ++i, "--max-knowledge-queries"));
+                case "--verification-evidence" -> verificationEvidence = VerificationEvidenceMode.parse(value(args, ++i, "--verification-evidence"));
                 case "--review-parallelism" -> reviewParallelism = Integer.parseInt(value(args, ++i, "--review-parallelism"));
                 case "--agent-timeout-seconds" -> timeout = Duration.ofSeconds(Long.parseLong(value(args, ++i, "--agent-timeout-seconds")));
+                case "--agent-retries" -> agentRetries = Integer.parseInt(value(args, ++i, "--agent-retries"));
+                case "--agent-max-calls-per-task" -> agentMaxCalls = Integer.parseInt(value(args, ++i, "--agent-max-calls-per-task"));
+                case "--agent-task-timeout-seconds" -> taskTimeout = Duration.ofSeconds(Long.parseLong(value(args, ++i, "--agent-task-timeout-seconds")));
                 case "--language" -> language = OutputLanguage.parse(value(args, ++i, "--language")).code();
                 case "--language-cache" -> {
                     String[] cache = value(args, ++i, "--language-cache").split("=", 2);
@@ -131,7 +150,8 @@ record CliOptions(Path repo, String commit, String branch, String base, String b
                 absolute(requirement), absolute(knowledge), knowledgeMode, outputDir.toAbsolutePath().normalize(), absolute(resumeDirectory),
                 agentCommand, List.copyOf(agentArgs), prepareOnly, maxEvidenceBytes,
                 maxSupplementalRequests, maxKnowledgeQueries, reviewParallelism, timeout, language,
-                java.util.Collections.unmodifiableMap(languageCaches));
+                java.util.Collections.unmodifiableMap(languageCaches),
+                new AgentPolicy(agentRetries, agentMaxCalls, taskTimeout == null ? timeout.multipliedBy(2) : taskTimeout, Duration.ofSeconds(1)), verificationEvidence);
     }
 
     private static Path absolute(Path path) {

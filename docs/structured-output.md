@@ -50,7 +50,7 @@ Model responses remain in their original artifacts. Applied delimiter recoveries
 
 Individual candidate verification and publication adjudication isolate replies still invalid after bounded format/source/decision corrections. Those candidates have no confirmed finding, remain unverified, and appear in the report's incomplete banner and `review-status.md`. Other candidate tasks finish. Resume revalidates saved results, reuses valid matching tasks and retries invalid tasks.
 
-`COMPLETE` describes successfully validated review output; it is not code approval or runtime verification. `INCOMPLETE` identifies candidate checks that could not produce validated results. An empty diff is `SKIPPED`. Transport failures, storage failures and failures in necessary shared review stages still stop the run.
+`COMPLETE` describes successfully validated review output; it is not code approval or runtime verification. `INCOMPLETE` identifies candidate checks that could not produce validated results. An empty diff is `SKIPPED`. Independent invocation failures also mark checks unfinished without cancelling their peers. Required shared-stage failures block dependent conclusions and produce a deterministic incomplete report; authentication/configuration and storage failures still stop execution. See [runtime recovery](runtime-reliability.md).
 
 Regression coverage is in `ReviewXmlTests`, `CitationRangeTests`, `ReviewTaskIsolationTests`, and the existing output/quality suites. These tests use local fixtures and simulated model replies; they do not establish semantic precision or recall for a real model.
 
@@ -58,7 +58,7 @@ Regression coverage is in `ReviewXmlTests`, `CitationRangeTests`, `ReviewTaskIso
 
 Every audited `NOT_SATISFIED` item is considered for a `REQ-A...` candidate using its bound target implementation citations. Candidates need a real changed-file anchor and go through the same independent verification, supplemental evidence rounds, grouping and publication adjudication as discovery candidates. Provisional severity and location can be corrected; the original unmet label is not evidence that a defect exists.
 
-Only a confirmed candidate retains a conclusive unmet status in the final acceptance section. Rejected, invalid or inconclusive candidates remain insufficient evidence, with their reviewer reason. They are never automatically promoted to satisfied. Items without a changed-code anchor stay visible for manual review and make completion `INCOMPLETE`. The original audit is saved in `requirement-assessment-audited.md`; `assessment-findings.md` records item/candidate mappings and outcomes.
+Only a confirmed candidate retains a conclusive unmet status in the final acceptance section. Rejected or inconclusive decisions remain insufficient evidence, with their reviewer reason. Invalid or failed candidate checks are displayed as programmatic `NOT_COMPLETED` assessments, distinct from business evidence gaps. Model assessment replies cannot claim this execution status themselves. They are never automatically promoted to satisfied. Items without a changed-code anchor stay visible for manual review and make completion `INCOMPLETE`. The original audit is saved in `requirement-assessment-audited.md`; `assessment-findings.md` records item/candidate mappings and outcomes.
 
 An invalid response is not an opposite semantic verdict and cannot veto an independently confirmed peer merely by sharing its group. It still marks the run incomplete. Genuine opposite validated verdicts retain the existing publication-conflict safeguard.
 

@@ -17,7 +17,7 @@ record InputDocument(Path path, String sha256, String content) {
         return new InputDocument(path, sha256(bytes), new String(bytes, StandardCharsets.UTF_8));
     }
 
-    private static String sha256(byte[] bytes) {
+    static String sha256(byte[] bytes) {
         try {
             return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
         } catch (NoSuchAlgorithmException impossible) {

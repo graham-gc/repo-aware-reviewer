@@ -12,8 +12,15 @@ final class EvidenceIndex {
         Citation { locations = List.copyOf(locations); }
     }
     private final EvidenceCatalog catalog;
+    private final java.util.Set<String> nativeTargetPaths;
 
-    EvidenceIndex(EvidenceCatalog catalog) { this.catalog = catalog; }
+    EvidenceIndex(EvidenceCatalog catalog) { this(catalog, catalog); }
+    EvidenceIndex(EvidenceCatalog provided, EvidenceCatalog available) {
+        catalog = provided;
+        // Metadata can tighten location policy, but omitted sources can never supply quotations.
+        nativeTargetPaths = available.sources().stream().filter(s -> s.authoritative() && s.role(EvidenceSource.Role.TARGET)
+                && s.role(EvidenceSource.Role.IMPLEMENTATION)).map(EvidenceSource::path).collect(java.util.stream.Collectors.toSet());
+    }
     EvidenceIndex(EvidenceBundle evidence, String supplemental) {
         this(evidence.catalog().plus(LegacyEvidenceAdapter.read(supplemental, evidence.scope(), LanguageRegistry.defaults())));
     }
@@ -162,8 +169,7 @@ final class EvidenceIndex {
                     && source.role(EvidenceSource.Role.TARGET);
         }).flatMap(c -> c.locations().stream())
                 .filter(l -> l.path().equals(finding.path()) && l.side() != EvidenceSource.Side.REMOVED).toList();
-        boolean nativePath = catalog.sources().stream().anyMatch(s -> s.authoritative() && s.path().equals(finding.path())
-                && s.role(EvidenceSource.Role.TARGET) && s.role(EvidenceSource.Role.IMPLEMENTATION));
+        boolean nativePath = nativeTargetPaths.contains(finding.path());
         long covered = finding.line();
         for (var span : candidates.stream().sorted(java.util.Comparator.comparingInt(EvidenceSource.Location::firstLine)).toList()) {
             if (span.lastLine() < covered) continue;

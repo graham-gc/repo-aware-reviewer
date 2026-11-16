@@ -73,8 +73,11 @@ final class ReviewQualityTests {
                     "a saved quotation correction is reused when the canonical response is missing");
             var changed = new ReviewTasks.Task("draft", task.prompt() + "\nChanged evidence", task.validator());
             fails(() -> ReviewTasks.run(List.of(changed), unavailable, artifacts, 1, progress, 1, 2, "Changed quotation evidence", true));
-            require(Files.exists(artifacts.resolve("draft-superseded-quote-repair-response.md")),
-                    "changed prompts invalidate saved source corrections");
+            try (var archived = Files.list(artifacts)) {
+                require(archived.anyMatch(path -> path.getFileName().toString().startsWith("draft-superseded-")
+                        && path.getFileName().toString().endsWith("quote-repair-response.md")),
+                        "changed prompts archive and invalidate saved source corrections");
+            }
         }
         String neverFixed = "cat >/dev/null; printf 'call\\n' >> \"$1/failed-calls\"; cat \"$1/invalid.xml\"";
         var failing = new AgentRunner(new ProcessExecutor(), "/bin/sh", List.of("-c", neverFixed, "failed-stub", directory.toString()),

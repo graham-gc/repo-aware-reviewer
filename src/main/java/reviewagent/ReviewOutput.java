@@ -34,7 +34,7 @@ final class ReviewOutput {
         }
     }
 
-    enum AssessmentStatus { SATISFIED, NOT_SATISFIED, INSUFFICIENT_EVIDENCE }
+    enum AssessmentStatus { SATISFIED, NOT_SATISFIED, INSUFFICIENT_EVIDENCE, NOT_COMPLETED }
     enum PolicyBasis { EXPLICIT, UNSPECIFIED }
 
     record AssessmentItem(String id, String requirement, String requirementText, String behavior, AssessmentStatus status,
@@ -136,7 +136,10 @@ final class ReviewOutput {
             String id = text(fields, "id");
             if (!id.matches("A[1-9][0-9]*") || !ids.add(id)) throw new IOException("Invalid or repeated requirement assessment ID");
             AssessmentStatus status;
-            try { status = AssessmentStatus.valueOf(text(fields, "status")); }
+            try {
+                status = AssessmentStatus.valueOf(text(fields, "status"));
+                if (status == AssessmentStatus.NOT_COMPLETED) throw new IllegalArgumentException("Programmatic status only");
+            }
             catch (IllegalArgumentException invalid) { throw new IOException("Unknown atomic requirement status", invalid); }
             PolicyBasis policy;
             try { policy = PolicyBasis.valueOf(text(fields, "policyBasis")); }

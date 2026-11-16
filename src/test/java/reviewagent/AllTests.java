@@ -34,6 +34,8 @@ public final class AllTests {
         AssessmentCorrectionTests.run();
         CitationRangeTests.run();
         ReviewTaskIsolationTests.run();
+        AgentStabilityTests.run();
+        VerificationEvidenceTests.run();
         GoLanguageTests.run();
         LanguageModuleTests.run();
         System.out.println("All tests passed");

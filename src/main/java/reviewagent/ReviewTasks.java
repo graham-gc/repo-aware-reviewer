@@ -24,7 +24,8 @@ final class ReviewTasks {
     record Task(String id, String prompt, Validator validator) {
     }
 
-    record Outcome(String response, String error) {
+    record Outcome(String response, String error, String failureKind) {
+        Outcome(String response, String error) { this(response, error, error == null ? "" : "INVALID_OUTPUT"); }
         boolean valid() { return error == null; }
     }
 
@@ -53,22 +54,44 @@ final class ReviewTasks {
         if (tasks.isEmpty()) {
             return Map.of();
         }
+        long batchStarted = System.nanoTime();
         try (var workers = Executors.newFixedThreadPool(Math.min(parallelism, tasks.size()), Thread.ofVirtual().factory())) {
             var completions = new ExecutorCompletionService<Reply>(workers);
             var futures = new ArrayList<Future<Reply>>();
+            var globalFailure = new java.util.concurrent.atomic.AtomicBoolean();
             try {
                 for (Task task : tasks) {
                     futures.add(completions.submit(() -> {
-                        try {
+                        if (globalFailure.get()) {
+                            state(directory, task, "BLOCKED", "GLOBAL_FAILURE");
+                            return new Reply(task.id(), new Outcome(null, "Blocked by a global failure", "GLOBAL_FAILURE"));
+                        }
+                        state(directory, task, "RUNNING", "");
+                        try (var budget = agent.task()) {
                             String response = invoke(task, agent, directory, resume);
                             Files.deleteIfExists(directory.resolve(task.id() + "-error.txt"));
+                            state(directory, task, "SUCCEEDED", "");
+                            agent.timings().task(budget.calls() == 0, true);
                             return new Reply(task.id(), new Outcome(response, null));
                         } catch (IOException failure) {
-                            Files.writeString(directory.resolve(task.id() + "-error.txt"), failure.getMessage(), StandardCharsets.UTF_8);
-                            if (isolateInvalidOutput && failure instanceof InvalidReviewResponseException) {
-                                return new Reply(task.id(), new Outcome(null, failure.getMessage()));
+                            agent.timings().task(false, false);
+                            boolean isolated = failure instanceof InvalidReviewResponseException
+                                    || failure instanceof AgentCallException call && !call.fatal();
+                            if (!isolated) globalFailure.set(true);
+                            AtomicFiles.write(directory.resolve(task.id() + "-error.txt"), failure.getMessage());
+                            String kind = failure instanceof AgentCallException call ? call.kind().name()
+                                    : failure instanceof InvalidReviewResponseException ? "INVALID_OUTPUT" : "IO_FAILURE";
+                            state(directory, task, "FAILED", kind);
+                            if (isolated) {
+                                return new Reply(task.id(), new Outcome(null, failure.getMessage(), kind));
                             }
                             throw failure;
+                        } catch (InterruptedException cancelled) {
+                            agent.timings().task(false, false);
+                            boolean interrupted = Thread.interrupted();
+                            try { state(directory, task, "CANCELLED", "CANCELLED"); }
+                            finally { if (interrupted) Thread.currentThread().interrupt(); }
+                            throw cancelled;
                         }
                     }));
                 }
@@ -79,10 +102,16 @@ final class ReviewTasks {
                     replies.put(reply.id(), reply.outcome());
                     if (!reply.outcome().valid()) invalidOutputs++;
                     progress.step(stage, stages, description + " (" + completed + " of " + tasks.size() + " complete"
-                            + (invalidOutputs == 0 ? "" : "; " + invalidOutputs + " invalid outputs") + ")");
+                            + (invalidOutputs == 0 ? "" : "; " + invalidOutputs + " failed checks") + ")");
                 }
                 var ordered = new LinkedHashMap<String, Outcome>();
                 tasks.forEach(task -> ordered.put(task.id(), replies.get(task.id())));
+                if (!isolateInvalidOutput && ordered.values().stream().anyMatch(outcome -> !outcome.valid())) {
+                    throw new ReviewStageException(description + " did not complete: " + ordered.entrySet().stream()
+                            .filter(entry -> !entry.getValue().valid()).map(entry -> entry.getKey() + " [" + entry.getValue().failureKind()
+                                    + "]: " + entry.getValue().error()).collect(java.util.stream.Collectors.joining("; "))
+                            + ". See task artifacts in " + directory);
+                }
                 return ordered;
             } catch (ExecutionException failure) {
                 throw new IOException(description + " failed: " + failure.getCause().getMessage()
@@ -91,7 +120,13 @@ final class ReviewTasks {
                 futures.forEach(future -> future.cancel(true));
                 workers.shutdownNow();
             }
-        }
+        } finally { agent.timings().stage(directory, batchStarted, System.nanoTime()); }
+    }
+
+    private static void state(Path directory, Task task, String status, String failure) throws IOException {
+        AtomicFiles.write(directory.resolve(task.id() + "-state.properties"), "status=" + status
+                + "\npromptSha256=" + InputDocument.sha256(task.prompt().getBytes(StandardCharsets.UTF_8))
+                + "\nfailureKind=" + failure + "\nupdatedAt=" + java.time.Instant.now() + "\n");
     }
 
     private static String invoke(Task task, AgentRunner agent, Path directory, boolean resume)
@@ -116,15 +151,16 @@ final class ReviewTasks {
                 try {
                     validate(task, cached, directory);
                 } catch (IOException invalid) {
+                    if (invalid instanceof ArtifactIOException) throw invalid;
                     response = cached;
                     cachedFailure = invalid;
                     continue;
                 }
                 if (!saved.equals(responseFile) || !cached.equals(raw)) {
                     if (response != null) {
-                        Files.writeString(directory.resolve(task.id() + "-invalid-response.md"), response, StandardCharsets.UTF_8);
+                        AtomicFiles.write(directory.resolve(task.id() + "-invalid-response.md"), response);
                     }
-                    Files.writeString(responseFile, cached, StandardCharsets.UTF_8);
+                    AtomicFiles.write(responseFile, cached);
                 }
                 return cached;
             }
@@ -135,19 +171,20 @@ final class ReviewTasks {
             if (!samePrompt) {
                 for (Path old : List.of(responseFile, repairFile, quoteRepairFile, decisionRepairFile, promptFile)) {
                     if (Files.isRegularFile(old)) Files.move(old,
-                            old.resolveSibling(old.getFileName().toString().replace(task.id() + "-", task.id() + "-superseded-")),
+                            old.resolveSibling(old.getFileName().toString().replace(task.id() + "-", task.id() + "-superseded-" + java.util.UUID.randomUUID() + "-")),
                             java.nio.file.StandardCopyOption.REPLACE_EXISTING);
                 }
             }
-            Files.writeString(promptFile, task.prompt(), StandardCharsets.UTF_8);
+            AtomicFiles.write(promptFile, task.prompt());
             response = agent.invoke(task.prompt(), directory.resolve(task.id()));
-            Files.writeString(responseFile, response, StandardCharsets.UTF_8);
+            AtomicFiles.write(responseFile, response);
         }
         var attempted = new java.util.HashSet<String>();
         while (true) {
             try {
                 validate(task, response, directory);
             } catch (IOException invalid) {
+                if (invalid instanceof ArtifactIOException) throw invalid;
                 boolean quotation = invalid instanceof SourceQuotationException;
                 boolean decision = invalid instanceof ReviewDecisionException;
                 String kind = quotation ? "quote-repair" : decision ? "decision-repair" : "repair";
@@ -155,8 +192,8 @@ final class ReviewTasks {
                     throw new InvalidReviewResponseException("Task " + task.id() + " returned invalid structured output after bounded output correction: "
                             + invalid.getMessage(), invalid);
                 }
-                Files.writeString(directory.resolve(task.id() + (quotation ? "-quote-invalid-response.md" : decision ? "-decision-invalid-response.md" : "-invalid-response.md")),
-                        response, StandardCharsets.UTF_8);
+                AtomicFiles.write(directory.resolve(task.id() + (quotation ? "-quote-invalid-response.md" : decision ? "-decision-invalid-response.md" : "-invalid-response.md")),
+                        response);
                 String correction = decision
                         ? "DECISION EVIDENCE CORRECTION\n"
                             + "The response is structurally readable but its conclusion lacks required proof or conflicts with its policy basis. "
@@ -181,13 +218,13 @@ final class ReviewTasks {
                 String repairPrompt = task.prompt() + "\n\n" + correction + task.validator().correctionInstructions(invalid)
                         + "Return the complete corrected response.\nValidation error: " + invalid.getMessage()
                         + "\n\nPREVIOUS RESPONSE\n" + response;
-                Files.writeString(directory.resolve(task.id() + "-" + kind + "-prompt.md"), repairPrompt, StandardCharsets.UTF_8);
+                AtomicFiles.write(directory.resolve(task.id() + "-" + kind + "-prompt.md"), repairPrompt);
                 String raw = agent.invoke(repairPrompt, directory.resolve(task.id() + "-" + kind));
-                Files.writeString(directory.resolve(task.id() + "-" + kind + "-response.md"), raw, StandardCharsets.UTF_8);
+                AtomicFiles.write(directory.resolve(task.id() + "-" + kind + "-response.md"), raw);
                 response = corrected(task, raw, invalid, directory, task.id() + "-" + kind + "-applied-response.md");
                 continue;
             }
-            Files.writeString(responseFile, response, StandardCharsets.UTF_8);
+            AtomicFiles.write(responseFile, response);
             return response;
         }
     }
@@ -198,9 +235,11 @@ final class ReviewTasks {
                 AgentRunner.validateResponse(response);
                 task.validator().validate(response);
             } finally {
-                if (!diagnostics.notes().isEmpty()) Files.writeString(directory.resolve(task.id() + "-normalization.log"),
-                        String.join("\n", diagnostics.notes()) + "\n", StandardCharsets.UTF_8,
-                        java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+                try {
+                    if (!diagnostics.notes().isEmpty()) Files.writeString(directory.resolve(task.id() + "-normalization.log"),
+                            String.join("\n", diagnostics.notes()) + "\n", StandardCharsets.UTF_8,
+                            java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+                } catch (IOException storage) { throw new ArtifactIOException(storage); }
             }
         }
     }
@@ -208,7 +247,7 @@ final class ReviewTasks {
     private static String corrected(Task task, String raw, IOException failure, Path directory, String artifact) throws IOException {
         try (var diagnostics = ResponseDiagnostics.capture()) {
             String corrected = task.validator().corrected(raw, failure);
-            if (!corrected.equals(raw)) Files.writeString(directory.resolve(artifact), corrected, StandardCharsets.UTF_8);
+            if (!corrected.equals(raw)) AtomicFiles.write(directory.resolve(artifact), corrected);
             if (!diagnostics.notes().isEmpty()) Files.writeString(directory.resolve(task.id() + "-normalization.log"),
                     String.join("\n", diagnostics.notes()) + "\n", StandardCharsets.UTF_8,
                     java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);

@@ -8,7 +8,7 @@ import java.util.List;
 record KnowledgeOptions(Path repo, String ref, Path outputDir, String agentCommand,
                         List<String> agentArgs, boolean prepareOnly, int chunkBytes,
                         long maxTotalBytes, int maxFileBytes, Duration agentTimeout,
-                        String language) {
+                        String language, AgentPolicy agentPolicy) {
     static KnowledgeOptions parse(String[] args) {
         Path repo = null;
         String ref = "HEAD";
@@ -20,6 +20,9 @@ record KnowledgeOptions(Path repo, String ref, Path outputDir, String agentComma
         long maxTotalBytes = 20_000_000L;
         int maxFileBytes = 1_000_000;
         Duration timeout = Duration.ofMinutes(15);
+        Duration taskTimeout = null;
+        int agentRetries = 1;
+        int agentMaxCalls = 5;
         String language = "en";
 
         for (int i = 2; i < args.length; i++) {
@@ -35,6 +38,9 @@ record KnowledgeOptions(Path repo, String ref, Path outputDir, String agentComma
                 case "--max-file-bytes" -> maxFileBytes = Integer.parseInt(value(args, ++i, "--max-file-bytes"));
                 case "--agent-timeout-seconds" -> timeout = Duration.ofSeconds(
                         Long.parseLong(value(args, ++i, "--agent-timeout-seconds")));
+                case "--agent-retries" -> agentRetries = Integer.parseInt(value(args, ++i, "--agent-retries"));
+                case "--agent-max-calls-per-task" -> agentMaxCalls = Integer.parseInt(value(args, ++i, "--agent-max-calls-per-task"));
+                case "--agent-task-timeout-seconds" -> taskTimeout = Duration.ofSeconds(Long.parseLong(value(args, ++i, "--agent-task-timeout-seconds")));
                 case "--language" -> language = OutputLanguage.parse(value(args, ++i, "--language")).code();
                 default -> throw new IllegalArgumentException("Unknown knowledge option: " + args[i]);
             }
@@ -54,7 +60,8 @@ record KnowledgeOptions(Path repo, String ref, Path outputDir, String agentComma
         }
         return new KnowledgeOptions(repo.toAbsolutePath().normalize(), ref,
                 outputDir.toAbsolutePath().normalize(), agentCommand, List.copyOf(agentArgs),
-                prepareOnly, chunkBytes, maxTotalBytes, maxFileBytes, timeout, language);
+                prepareOnly, chunkBytes, maxTotalBytes, maxFileBytes, timeout, language,
+                new AgentPolicy(agentRetries, agentMaxCalls, taskTimeout == null ? timeout.multipliedBy(2) : taskTimeout, Duration.ofSeconds(1)));
     }
 
     private static String value(String[] args, int index, String option) {
