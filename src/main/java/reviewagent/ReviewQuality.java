@@ -181,12 +181,17 @@ final class ReviewQuality {
 
     private static ReviewOutput.Decision invalidCandidate(ReviewFinding candidate, String folder, ReviewTasks.Outcome outcome, OutputLanguage language) {
         String reason = language.text("Response remained invalid after bounded corrections; this candidate was not verified. See ",
-                "回复经过有限纠正后仍未通过校验，该候选未完成复核。详见 ") + "`" + folder + "/" + candidate.id() + "-error.txt`.";
+                "回复经过有限纠正后仍未通过校验，该候选未完成复核。详见 ") + failureLink(folder, candidate.id());
         if (!outcome.failureKind().equals("INVALID_OUTPUT")) reason = language.text("Task did not complete (", "任务执行失败（")
                 + outcome.failureKind() + language.text("); no validated decision is available. See ", "），该候选未完成复核。详见 ")
-                + "`" + folder + "/" + candidate.id() + "-error.txt`.";
+                + failureLink(folder, candidate.id());
         return new ReviewOutput.Decision(new ReviewOutput.Verification(candidate, ReviewOutput.Status.INSUFFICIENT_EVIDENCE,
                 reason, null, true), ReviewOutput.Relation.UNRESOLVED, "", "", List.of());
+    }
+
+    private static String failureLink(String folder, String id) {
+        String path = folder + "/" + id + "-state.properties";
+        return "[" + path + "](" + path + ").";
     }
 
     AssessmentFindings.Plan planAssessment(AssessmentResult assessed) throws IOException {

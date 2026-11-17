@@ -15,6 +15,8 @@ The CLI treats model output as untrusted serialization. A readable XML tree does
 | Input | Handling |
 | --- | --- |
 | Raw or fenced XML; CRLF; declarations/comments around the root | Accept the envelope and preserve adjacent request lines. |
+| A protocol fence follows a Python, Java, JSON or other code block | Track every fence language and remove only the actual protocol wrapper. Preserve surrounding prose and code verbatim. |
+| Backtick/tilde protocol fences, longer closing fences, or a Markdown fence closed by EOF | Recognize the wrapper only around an existing complete XML root. An XML root inside a different-language code block is rejected. Unrelated empty fences are preserved. |
 | XML-like source inside CDATA | Preserve the text, including literal protocol delimiters. |
 | Missing scalar closer with one valid closing-parent boundary | Insert the delimiter only when strict parsing and the full structural schema yield one candidate. Preserve all scalar text. |
 | Missing adjacent container closers before an existing ancestor close | Consider a bounded insertion; require unique structural validity. |
@@ -49,6 +51,8 @@ Implementation premises may cite the target, the baseline, or an applicable diff
 Model responses remain in their original artifacts. Applied delimiter recoveries are recorded in `*-normalization.log`, including the affected field and response-block line. The log is scoped to each validation attempt, including cached replies. No recovered code text is substituted silently.
 
 Individual candidate verification and publication adjudication isolate replies still invalid after bounded format/source/decision corrections. Those candidates have no confirmed finding, remain unverified, and appear in the report's incomplete banner and `review-status.md`. Other candidate tasks finish. Resume revalidates saved results, reuses valid matching tasks and retries invalid tasks.
+
+Unfinished-check references point to the task's `*-state.properties` at the same relative path in local and exported reports. These checkpoints include a fixed failure category and summary, plus parsed XML line/column when available. Raw `*-error.txt` files remain local because validator messages may quote source text or model output. Exported categories describe the validation or invocation failure; they do not establish whether the candidate is a defect. See [diagnostic fields](runtime-reliability.md#checkpoints-and-diagnostics).
 
 `COMPLETE` describes successfully validated review output; it is not code approval or runtime verification. `INCOMPLETE` identifies candidate checks that could not produce validated results. An empty diff is `SKIPPED`. Independent invocation failures also mark checks unfinished without cancelling their peers. Required shared-stage failures block dependent conclusions and produce a deterministic incomplete report; authentication/configuration and storage failures still stop execution. See [runtime recovery](runtime-reliability.md).
 

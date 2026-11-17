@@ -81,7 +81,7 @@ final class ReviewTasks {
                             AtomicFiles.write(directory.resolve(task.id() + "-error.txt"), failure.getMessage());
                             String kind = failure instanceof AgentCallException call ? call.kind().name()
                                     : failure instanceof InvalidReviewResponseException ? "INVALID_OUTPUT" : "IO_FAILURE";
-                            state(directory, task, "FAILED", kind);
+                            state(directory, task, "FAILED", kind, failure);
                             if (isolated) {
                                 return new Reply(task.id(), new Outcome(null, failure.getMessage(), kind));
                             }
@@ -124,9 +124,14 @@ final class ReviewTasks {
     }
 
     private static void state(Path directory, Task task, String status, String failure) throws IOException {
+        state(directory, task, status, failure, null);
+    }
+
+    private static void state(Path directory, Task task, String status, String failure, IOException cause) throws IOException {
         AtomicFiles.write(directory.resolve(task.id() + "-state.properties"), "status=" + status
                 + "\npromptSha256=" + InputDocument.sha256(task.prompt().getBytes(StandardCharsets.UTF_8))
-                + "\nfailureKind=" + failure + "\nupdatedAt=" + java.time.Instant.now() + "\n");
+                + "\nfailureKind=" + failure + "\nupdatedAt=" + java.time.Instant.now() + "\n"
+                + FailureDiagnostics.properties(cause, failure));
     }
 
     private static String invoke(Task task, AgentRunner agent, Path directory, boolean resume)

@@ -36,10 +36,17 @@ final class ReviewTaskIsolationTests {
                     "an invalid candidate stays untrusted while a concurrent peer completes");
             require(Files.readString(dir.resolve("bad-error.txt")).contains("bounded output correction")
                     && Files.readString(dir.resolve("bad-repair-response.md")).equals(MALFORMED + "\n"), "invalid output and error artifacts are preserved");
+            String diagnostic = Files.readString(dir.resolve("bad-state.properties"));
+            require(diagnostic.contains("status=FAILED") && diagnostic.contains("failureKind=INVALID_OUTPUT")
+                    && diagnostic.contains("failureCategory=") && !diagnostic.contains("minimax") && !diagnostic.contains("EV-invalid"),
+                    "shareable diagnostics preserve failure categories without model text or source quotations");
             var retry = shell(dir, "prompt=$(cat); case \"$prompt\" in *GOOD_TASK*) exit 87;; *) cat <<'FIXED'\n" + REJECTED + "\nFIXED\n;; esac");
             var resumed = ReviewTasks.runIsolated(tasks, retry, dir, 2, progress, 1, 2, "Resume candidates", true);
             require(resumed.values().stream().allMatch(ReviewTasks.Outcome::valid) && !Files.exists(dir.resolve("bad-error.txt")),
                     "resume reuses the valid peer, retries the invalid response and clears its error only after validation");
+            require(Files.readString(dir.resolve("bad-state.properties")).contains("failureCategory=\n")
+                    && Files.readString(dir.resolve("bad-state.properties")).contains("status=SUCCEEDED"),
+                    "a validated resume clears the previous diagnostic category");
             fails(() -> ReviewTasks.run(List.of(tasks.getFirst()), agent, dir.resolve("strict"), 1, progress, 1, 2, "Strict phase", false));
             var unavailable = ReviewTasks.runIsolated(tasks, shell(dir, "exit 9"), dir.resolve("transport"), 1,
                     progress, 1, 2, "Transport failure", false);
@@ -101,6 +108,9 @@ final class ReviewTaskIsolationTests {
                 && Files.readString(run.resolve("verified-findings.md")).isEmpty(), "failed candidates cannot become published findings");
         require(Files.isRegularFile(run.resolve("verification/R1-1-error.txt"))
                 && Files.readString(run.resolve("verification/R1-2-response.md")).contains("REJECTED"), "the valid peer and failure record both survive");
+        require(report.contains("[verification/R1-1-state.properties](verification/R1-1-state.properties)")
+                && Files.isRegularFile(run.resolve("verification/R1-1-state.properties")),
+                "unfinished candidates link to existing shareable status diagnostics instead of private raw errors");
 
         String resumeScript = "prompt=$(cat); case \"$prompt\" in 'You are the independent candidate verification'*'"
                 + "<finding id=\"R1-1\">'*) cat <<'FIXED'\n" + REJECTED + "\nFIXED\n;; "

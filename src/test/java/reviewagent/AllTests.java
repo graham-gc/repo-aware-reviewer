@@ -26,6 +26,8 @@ public final class AllTests {
         RemoteBaselineTests.run();
         ReviewOutputTests.run();
         ReviewXmlTests.run();
+        FailureDiagnosticsTests.run();
+        GithubReviewScriptTests.run();
         EvidenceTests.run();
         ReviewQualityTests.run();
         ReviewQualityRegressionTests.run();

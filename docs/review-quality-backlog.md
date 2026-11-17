@@ -8,6 +8,23 @@ Publication now preserves this disagreement as a distinct programmatic `DISPUTED
 
 The minimized regression replays the original three-candidate/two-positive disagreement through verification, publication, rendering and resume using a fake model. It verifies a prominent review-required item without promoting missing business policy to a confirmed defect. Fresh real-model runs remain necessary to assess semantic quality and runtime; these tests do not establish a speedup or overall detection rate.
 
+### Export and envelope follow-up — 2026-11-17
+
+Two general Agent defects were reproduced independently of model reasoning:
+
+- Incomplete reports referred to task `*-error.txt` files that the GitLab adapter did not export before deleting its temporary run. Task checkpoints now carry fixed failure categories/summaries and optional XML parser positions; reports reference those checkpoints, and exports preserve their relative paths. Raw errors, source quotations and model streams remain local. GitHub also preserves available diagnostics when the CLI returns incomplete or failed output, without masking its exit code.
+- A regex recognized only XML/unlabelled fences. The closing fence of an earlier Python/Java/JSON example could be mistaken for an opener, leaving an empty XML fence after extracting the protocol root. Stateful fence tracking now removes the actual protocol envelope and preserves all other code and prose. EOF-closed Markdown wrappers still require a complete XML root; source validation is unchanged.
+
+Other observations from local run `repo-aware-gitlab-20261117-190928` remain qualified:
+
+| Observation | Agent/model boundary and current conclusion | Evidence needed before another behavior change |
+| --- | --- | --- |
+| A confirmed finding and a review-required group overlap | Same file/line does not establish identical behavior: the pending group also includes a different input case. Grouping is model-provided; each positive member is independently adjudicated, so an erroneous group cannot silently discard a distinct positive. Semantic overlap is still a presentation limitation, not a reproduced status-routing failure here. | A general case with identical trigger, behavior and contract whose validated verdict is duplicated, lost or routed to the wrong status. Do not merge by path/line or reviewer majority. |
+| A pending candidate alleges production impact without callers | The report labels it as a candidate to check and explicitly limits verified impact. That does not make the allegation established. Existing tests preserve a previously grounded correction and exclude a later rejected candidate from the summary. A never-confirmed candidate can still be overbroad; phrase quality alone does not prove the Agent fabricated a finding. | A validated correction that the Agent replaces with the original allegation, or a pending allegation rendered as a confirmed fact. Such a reproduction warrants a general publication fix. |
+| Eighteen calls for a one-file change take about six minutes | At parallelism 1, the recorded 381.574 s workflow includes 380.990 s inside launched model processes. This includes CLI startup, routing/network and service response, not just model inference. Five correction calls account for 87.907 s; one unchanged follow-up is already skipped. The small local-overhead remainder does not prove that all calls are necessary, nor that they are redundant. | Trace which initial, supplemental, correction and adjudication calls could be removed while retaining independent verification and evidence coverage; compare identical inputs/configuration. Invocation count and prompt size are Agent-controlled, while backend latency and semantic mistakes are not fully controllable. |
+
+The old export lacks the raw failing response/error, so the exact cause of its unfinished candidate cannot be recovered retrospectively. Offline tests establish the new export paths, protocol boundaries and safe metadata, not a real-model precision or latency improvement. No playground-specific production rule, heuristic verdict promotion or new model retry was added for these observations.
+
 Recorded: 2026-11-12. These are observations about this review agent, not approved business rules for a reviewed repository.
 
 Reference case: local run `20261112-134821-c21dbab92fd4`, comparing `80507ae77a035aca11550670f23de607f354d676` with `c21dbab92fd42799fb6cb6ed7400ef3bd5b1eb41`. Generated artifacts are local, ignored files under `review-output/`; they are not included in this document. No target build or tests were run for this assessment.

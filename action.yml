@@ -49,7 +49,7 @@ runs:
       run: bash "$GITHUB_ACTION_PATH/scripts/github-review.sh" review
 
     - name: Upload review report and coverage
-      if: steps.review.outputs.directory != ''
+      if: always() && steps.review.outputs.directory != ''
       uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
       with:
         name: repo-aware-review-pr-${{ steps.prepare.outputs.number }}-${{ github.run_attempt }}
@@ -58,6 +58,9 @@ runs:
           ${{ steps.review.outputs.directory }}/report.md
           ${{ steps.review.outputs.directory }}/scope.md
           ${{ steps.review.outputs.directory }}/coverage.md
+          ${{ steps.review.outputs.directory }}/review-status.md
+          ${{ steps.review.outputs.directory }}/timings.md
+          ${{ steps.review.outputs.directory }}/**/*-state.properties
 
     - name: Comment on the pull request
       if: steps.review.outputs.directory != '' && inputs.publish-comment == 'true'

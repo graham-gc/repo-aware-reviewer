@@ -147,7 +147,7 @@ final class ReviewPipeline {
                 var outcome = response.getValue();
                 if (!outcome.valid()) {
                     executionIssues.add("discovery/" + response.getKey() + " [" + outcome.failureKind() + "]; see discovery/"
-                            + response.getKey() + "-error.txt");
+                            + response.getKey() + "-state.properties");
                     continue;
                 }
                 ReviewOutput.Discovery parsed = ReviewOutput.discovery(outcome.response(), response.getKey(), evidence.changedFiles());
@@ -184,7 +184,7 @@ final class ReviewPipeline {
                         runDirectory.resolve("discovery"), options.reviewParallelism(), progress, 4, totalSteps,
                         "Supplemental evidence reviewer", resume);
                 if (!followup.get("S1").valid()) {
-                    executionIssues.add("discovery/S1 [" + followup.get("S1").failureKind() + "]; see discovery/S1-error.txt");
+                    executionIssues.add("discovery/S1 [" + followup.get("S1").failureKind() + "]; see discovery/S1-state.properties");
                 } else {
                     String response = followup.get("S1").response();
                     ReviewOutput.Discovery parsed = ReviewOutput.discovery(response, "S1", evidence.changedFiles());
