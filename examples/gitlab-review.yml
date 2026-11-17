@@ -1,0 +1,31 @@
+# Install as .gitlab-ci.yml in a dedicated, trusted review project.
+# Keep this configuration on a protected branch; do not take it from a reviewed feature branch.
+stages: [review]
+
+workflow:
+  rules:
+    - if: '$CI_COMMIT_REF_PROTECTED == "true" && $CI_PIPELINE_SOURCE == "trigger" && $REVIEW_PROJECT_ID && $REVIEW_MR_IID'
+    - if: '$CI_COMMIT_REF_PROTECTED == "true" && $CI_PIPELINE_SOURCE == "web" && $REVIEW_PROJECT_ID && $REVIEW_MR_IID'
+    - when: never
+
+repo_aware_review:
+  stage: review
+  # Set to your built reviewer image pinned by digest in the trusted project's CI variables.
+  image: $REVIEW_AGENT_IMAGE
+  timeout: 2h
+  interruptible: true
+  resource_group: "repo-aware-$REVIEW_PROJECT_ID-$REVIEW_MR_IID"
+  variables:
+    GIT_STRATEGY: none
+    GIT_CHECKOUT: "false"
+    REVIEW_LANGUAGE: en
+    REVIEW_PARALLELISM: "1"
+  script:
+    - export REVIEW_OUTPUT_DIR="$CI_PROJECT_DIR/review-output"
+    - python3 -m repo_aware_gitlab.review
+  artifacts:
+    when: always
+    access: developer
+    expire_in: 7 days
+    paths:
+      - review-output/public/

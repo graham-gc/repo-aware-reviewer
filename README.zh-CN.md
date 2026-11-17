@@ -143,6 +143,7 @@ java -jar build/code-review-agent.jar review \
 
 ## 进一步阅读
 
+- [GitLab CI/CD：MR 自动审查与 `/review` 评论触发](docs/gitlab-integration.zh-CN.md)
 - [候选复核性能与对照方法](docs/review-performance.md)
 - [运行失败、重试、预算与续跑](docs/runtime-reliability.md)
 - [语言支持范围与依赖读取](docs/language-modules.md)

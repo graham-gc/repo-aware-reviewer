@@ -143,6 +143,7 @@ Candidate verification uses relevant complete evidence blocks by default. Add `-
 
 ## Further reading
 
+- [GitLab CI/CD: automatic MR reviews and `/review` comments](docs/gitlab-integration.md)
 - [Verification performance and comparison](docs/review-performance.md)
 - [Runtime failures, retries, budgets and resume](docs/runtime-reliability.md)
 - [Language coverage and dependency reading](docs/language-modules.md)
