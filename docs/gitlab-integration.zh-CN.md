@@ -111,7 +111,7 @@ SQLite 清单只能运行 **一个 Webhook 副本**，重启须保留持久卷�
 
 创建非草稿 MR 或推送新提交即可触发。需要重跑时，**新发一条**仅含 `/review` 的评论，编辑旧评论不会重跑。也可在可信项目的 GitLab 界面选择受保护分支手动运行流水线，传入数字 `REVIEW_PROJECT_ID` 和 `REVIEW_MR_IID`。未指定预期 SHA 时，任务启动时固定当前基线和 MR head。
 
-机器人更新自己带标记的汇总评论，不会每次追加完整新报告；其他用户伪造同样标记的评论会被忽略。超过评论长度预算的完整报告放在产物中。上传内容仅包括报告、范围、覆盖、耗时、执行元数据和 `integration-status.json`，不上传原始提示词、证据包及模型 stdout/stderr。报告仍可能含代码摘录；产物保留七天，示例通过 [artifact access](https://docs.gitlab.com/ci/yaml/#artifactsaccess) 限制 Developer 或更高角色下载。
+机器人更新自己带标记的汇总评论，不会每次追加完整新报告；其他用户伪造同样标记的评论会被忽略。超过评论长度预算的完整报告放在产物中。上传内容仅包括报告、范围、覆盖、耗时、执行元数据、任务检查点和 `integration-status.json`，不上传原始提示词、证据包、原始错误及模型 stdout/stderr。任务 `*-state.properties` 保留相对运行目录的原路径，确保未完成报告中的链接在导出后仍可访问；其中仅有固定的错误类别、摘要及可用的 XML 解析位置，没有原始异常文本。执行日志仍放在 `diagnostics/` 下。报告仍可能含代码摘录；产物保留七天，示例通过 [artifact access](https://docs.gitlab.com/ci/yaml/#artifactsaccess) 限制 Developer 或更高角色下载。
 
 | 任务结果 | 含义 |
 | --- | --- |

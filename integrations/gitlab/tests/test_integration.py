@@ -310,6 +310,33 @@ class IntegrationTests(unittest.TestCase):
             raise AssertionError("completed snapshot must not invoke CLI again")
         self.assertEqual(review(env, api=self.fixture.api, fetcher=forbidden, runner=forbidden), 0)
 
+    def test_failed_task_diagnostics_survive_export_without_raw_errors(self):
+        stages = ("discovery", "verification", "verification/round-2", "verification/requirements", "adjudication", "assessment")
+        def artifacts(args):
+            run = Path(args[args.index("--output-dir") + 1]) / "test-run"
+            links = []
+            for stage in stages:
+                folder = run / stage
+                folder.mkdir(parents=True, exist_ok=True)
+                (folder / "task-state.properties").write_text("status=FAILED\nfailureKind=INVALID_OUTPUT\nfailureCategory=SOURCE_QUOTATION\n")
+                (folder / "task-error.txt").write_text("RAW_ERROR_WITH_SOURCE_AND_SECRET")
+                (folder / "task-response.md").write_text("RAW_MODEL_RESPONSE")
+                (folder / "task-stderr.log").write_text("RAW_PROVIDER_STDERR")
+                links.append(f"[{stage}/task-state.properties]({stage}/task-state.properties)")
+            (run / "report.md").write_text("\n".join(links))
+        env = self.env()
+        self.assertEqual(review(env, api=self.fixture.api, fetcher=self.fake_fetch,
+                                runner=self.fake_runner("INCOMPLETE", 3, after=artifacts)), 3)
+        public = Path(env["REVIEW_OUTPUT_DIR"]) / "public"
+        for stage in stages:
+            self.assertIn("failureCategory=SOURCE_QUOTATION", (public / stage / "task-state.properties").read_text())
+            for suffix in ("error.txt", "response.md", "stderr.log"):
+                self.assertFalse((public / stage / ("task-" + suffix)).exists())
+        exported = "\n".join(path.read_text() for path in public.rglob("*") if path.is_file())
+        self.assertNotIn("RAW_ERROR_WITH_SOURCE_AND_SECRET", exported)
+        self.assertNotIn("RAW_MODEL_RESPONSE", exported)
+        self.assertNotIn("RAW_PROVIDER_STDERR", exported)
+
     def test_mr_changes_during_review_withholds_findings(self):
         result = review(self.env(), api=self.fixture.api, fetcher=self.fake_fetch,
                         runner=self.fake_runner(after=lambda _: setattr(self.fixture, "head", C)))

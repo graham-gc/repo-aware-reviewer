@@ -262,12 +262,15 @@ def review(env=os.environ, *, api=None, fetcher=fetch_snapshot, runner=execute_c
                 for name in PUBLIC_FILES:
                     if (run / name).is_file():
                         shutil.copyfile(run / name, public / name)
-                # Execution metadata is useful for empty responses/timeouts without uploading prompts or raw model streams.
-                for metadata in run.rglob("*-execution.log"):
-                    relative = metadata.relative_to(run)
-                    target = public / "diagnostics" / relative
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copyfile(metadata, target)
+                # These producer-owned files contain categories/positions, never raw model errors or quotes.
+                # Preserve task-state paths because reports link to them relative to their run directory.
+                for pattern, prefix in (("*-state.properties", public), ("*-execution.log", public / "diagnostics")):
+                    for metadata in run.rglob(pattern):
+                        if not metadata.is_file() or metadata.is_symlink():
+                            continue
+                        target = prefix / metadata.relative_to(run)
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copyfile(metadata, target)
                 if (run / "report.md").is_file():
                     report = (run / "report.md").read_text(encoding="utf-8")
                 if (run / "review-status.md").is_file():
