@@ -70,6 +70,16 @@ final class ReviewPublicationTests {
                 "policy disagreement preserves candidate, provenance, implementation proof and change relationship");
         var concerns = ReviewConcerns.collect(List.of(r1, r2, r3), adjudicated, groups);
         require(concerns.size() == 1 && concerns.getFirst().members().size() == 3, "one grouped risk replaces three repeated candidate essays");
+        require(concerns.getFirst().representative().equals(r2.verdict().confirmed()),
+                "the corrected grounded candidate remains the summary even when later defect classification is disputed");
+        var unprovedDiscovery = new ReviewFinding("R2-1", "Speculative outage", ReviewFinding.Severity.HIGH, "calculator.py", 2, 2,
+                "Empty input", "Every production batch crashes", "Unproved allegation", "Removed guard");
+        var policyGap = new ReviewOutput.Decision(new ReviewOutput.Verification(unprovedDiscovery, ReviewOutput.Status.INSUFFICIENT_EVIDENCE,
+                GAP, null), ReviewOutput.Relation.UNRESOLVED, "Baseline handled empty input", "Intent is not specified.", r2.citations());
+        var retained = ReviewConcerns.collect(List.of(r2), List.of(policyGap), List.of(List.of("R2-1")));
+        require(retained.getFirst().representative().equals(r2.verdict().confirmed())
+                && !ReviewConcerns.markdown(retained, OutputLanguage.EN).contains("Every production batch crashes"),
+                "a later policy gap does not reintroduce the raw discovery allegation after grounded impact correction");
         for (var language : OutputLanguage.values()) {
             String response = String.join("\n\n", ReviewReport.headings(language)) + "\n<finding-groups/>";
             String report = ReviewReport.finalReport(response, List.of(), language, "No external requirements supplied.", concerns);
@@ -78,6 +88,8 @@ final class ReviewPublicationTests {
             require(!report.contains("\\n") && !report.contains("[MEDIUM]") && !report.contains("[中]")
                     && !report.contains("No verified findings.") && !report.contains("未发现经复核确认的问题。"),
                     "a review-required risk is neither a confirmed defect nor an empty clean summary; prose is not audit-escaped");
+            String label = language.text("Candidate behavior to check", "待核对的候选行为");
+            require(report.indexOf(label) == report.lastIndexOf(label), "one semantic group has one behavior summary");
             int risk = report.indexOf(language.text("Review required", "需人工确认"));
             require(risk > report.indexOf(ReviewReport.headings(language).get(2))
                     && risk < report.indexOf(ReviewReport.headings(language).get(3)), "risk is in Findings, before requirements and appendices");

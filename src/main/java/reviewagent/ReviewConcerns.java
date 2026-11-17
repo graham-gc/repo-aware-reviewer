@@ -8,7 +8,11 @@ import java.util.List;
 /** Deterministic, grouped human-review items, separate from confirmed defects and execution failures. */
 final class ReviewConcerns {
     enum Kind { DISPUTED, EVIDENCE_GAP, NOT_COMPLETED }
-    record Item(Kind kind, List<ReviewOutput.Decision> members, List<EvidenceIndex.Citation> citations) { }
+    record Item(Kind kind, List<ReviewOutput.Decision> members, List<EvidenceIndex.Citation> citations, ReviewFinding representative) {
+        Item(Kind kind, List<ReviewOutput.Decision> members, List<EvidenceIndex.Citation> citations) {
+            this(kind, members, citations, finding(members.getFirst()));
+        }
+    }
 
     static List<Item> collect(List<ReviewOutput.Decision> preliminary, List<ReviewOutput.Decision> adjudicated,
                               List<List<String>> groups) {
@@ -40,7 +44,12 @@ final class ReviewConcerns {
         var ids = members.stream().map(d -> d.verdict().candidate().id()).collect(java.util.stream.Collectors.toSet());
         var citations = java.util.stream.Stream.concat(preliminary.stream(), adjudicated.stream())
                 .filter(d -> ids.contains(d.verdict().candidate().id())).flatMap(d -> d.citations().stream()).distinct().toList();
-        return new Item(kind, members, citations);
+        // A later policy gap must not restore the discovery stage's unverified downstream allegations.
+        ReviewFinding representative = java.util.stream.Stream.concat(adjudicated.stream(), preliminary.stream())
+                .filter(d -> ids.contains(d.verdict().candidate().id()) && !d.verdict().validationFailed()
+                        && d.verdict().confirmed() != null)
+                .map(d -> d.verdict().confirmed()).findFirst().orElse(finding(members.getFirst()));
+        return new Item(kind, members, citations, representative);
     }
 
     private static boolean pending(ReviewOutput.Decision decision) {
@@ -51,9 +60,9 @@ final class ReviewConcerns {
     static String markdown(List<Item> items, OutputLanguage language) {
         StringBuilder out = new StringBuilder();
         for (Item item : items) {
-            var representative = item.members().stream().filter(d -> d.verdict().status() == ReviewOutput.Status.DISPUTED)
+            var representative = item.members().stream().filter(d -> d.verdict().candidate().id().equals(item.representative().id()))
                     .findFirst().orElse(item.members().getFirst());
-            ReviewFinding finding = finding(representative);
+            ReviewFinding finding = item.representative();
             String label = switch (item.kind()) {
                 case DISPUTED -> language.text("Review required — conflicting decisions", "需人工确认 — 裁决存在分歧");
                 case EVIDENCE_GAP -> language.text("Review required — evidence gap", "需人工确认 — 证据不足");
@@ -65,20 +74,19 @@ final class ReviewConcerns {
             bullet(out, language.text("Candidate location", "候选位置"), item.members().stream().map(ReviewConcerns::finding)
                     .map(f -> "`" + f.path() + ":" + f.line() + (f.endLine() == f.line() ? "" : "–" + f.endLine()) + "`")
                     .distinct().collect(java.util.stream.Collectors.joining("; ")));
-            // In a dispute, use the grounded positive members, not the original, potentially overstated allegations.
-            // Keep every such member's claim in case semantic grouping accidentally joined independent issues.
-            for (String claim : item.members().stream().filter(d -> item.kind() == Kind.DISPUTED
-                            ? d.verdict().status() == ReviewOutput.Status.DISPUTED : pending(d)).map(ReviewConcerns::finding)
-                    .map(f -> ReportText.summary(f.trigger() + " → " + f.impact(), 400)).distinct().toList()) {
-                bullet(out, language.text("Candidate behavior to check", "待核对的候选行为"), claim);
-            }
+            // Reconciliation groups describe one issue; summarize it once and retain every ID in the audit link.
+            bullet(out, language.text("Candidate behavior to check", "待核对的候选行为"),
+                    ReportText.summary(finding.trigger() + " → " + finding.impact(), 400));
             var contrary = item.members().stream().filter(d -> d.verdict().status() != ReviewOutput.Status.DISPUTED
                     && d.verdict().status() != ReviewOutput.Status.CONFIRMED).findFirst().orElse(representative);
-            bullet(out, language.text("Decision / gap summary", "结论或缺口摘要"), ReportText.summary(contrary.verdict().reason(), 400));
+            String gap = item.kind() == Kind.NOT_COMPLETED || contrary.contract().isBlank()
+                    ? contrary.verdict().reason() : contrary.contract();
+            bullet(out, language.text("Decision / gap summary", "结论或缺口摘要"), ReportText.summary(gap, 300));
             String references = item.citations().stream()
                     .map(c -> ReviewReport.citationReference(c, language)).distinct().limit(6)
                     .map(reference -> "`" + reference + "`").collect(java.util.stream.Collectors.joining("; "));
             if (!references.isEmpty()) bullet(out, language.text("Source references", "源码依据"), references);
+            out.append('\n');
             out.append(item.kind() == Kind.NOT_COMPLETED
                     ? language.text("This check has no validated result. Retry or resume it before drawing a conclusion. Details: [coverage.md](coverage.md).\n\n",
                         "此检查尚无有效结果，需重试或续跑后才能形成结论。详情见 [coverage.md](coverage.md)。\n\n")
