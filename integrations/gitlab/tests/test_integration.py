@@ -311,7 +311,7 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(review(env, api=self.fixture.api, fetcher=forbidden, runner=forbidden), 0)
 
     def test_failed_task_diagnostics_survive_export_without_raw_errors(self):
-        stages = ("discovery", "verification", "verification/round-2", "verification/requirements", "adjudication", "assessment")
+        stages = ("", "discovery", "verification", "verification/round-2", "verification/requirements", "adjudication", "assessment", "assessment/round-2")
         def artifacts(args):
             run = Path(args[args.index("--output-dir") + 1]) / "test-run"
             links = []
@@ -322,7 +322,8 @@ class IntegrationTests(unittest.TestCase):
                 (folder / "task-error.txt").write_text("RAW_ERROR_WITH_SOURCE_AND_SECRET")
                 (folder / "task-response.md").write_text("RAW_MODEL_RESPONSE")
                 (folder / "task-stderr.log").write_text("RAW_PROVIDER_STDERR")
-                links.append(f"[{stage}/task-state.properties]({stage}/task-state.properties)")
+                relative = (Path(stage) / "task-state.properties").as_posix()
+                links.append(f"[{relative}]({relative})")
             (run / "report.md").write_text("\n".join(links))
         env = self.env()
         self.assertEqual(review(env, api=self.fixture.api, fetcher=self.fake_fetch,
