@@ -76,6 +76,20 @@ final class ScopedKnowledge {
         return sourcePaths.contains(path);
     }
 
+    /** Resolve only this query's actually supplied sections; another query's matches are not its result. */
+    Set<String> knownSources(String request, EvidenceCatalog available, boolean requireAllMatches) {
+        String[] fields = request.split("\\|", 3);
+        if (fields.length != 3 || !fields[0].equals("REQUEST_KNOWLEDGE") || fields[1].isBlank()
+                || fields[1].length() > 160 || fields[2].isBlank() || request.length() > 700) return Set.of();
+        var matches = search(normalize(fields[1]));
+        if (requireAllMatches && matches.stream().anyMatch(match -> !supplied.contains(match.section().id()))) return Set.of();
+        Set<String> ids = matches.stream().map(Match::section).filter(section -> supplied.contains(section.id()))
+                .map(section -> EvidenceSources.contract(section.label(), document.path().toString(), "document:" + document.sha256(),
+                        section.firstLine(), section.original()).id())
+                .filter(id -> available.source(id) != null).collect(Collectors.toUnmodifiableSet());
+        return requireAllMatches && ids.size() != matches.size() ? Set.of() : ids;
+    }
+
     boolean containsHanText() {
         return document.content().codePoints()
                 .anyMatch(value -> Character.UnicodeScript.of(value) == Character.UnicodeScript.HAN);

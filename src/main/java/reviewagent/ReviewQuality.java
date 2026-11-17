@@ -156,7 +156,6 @@ final class ReviewQuality {
             var replies = ReviewTasks.runIsolated(tasks, agent, taskDirectory, options.reviewParallelism(), progress,
                     stage, stages, description + " (round " + round + ")", options.resumeDirectory() != null);
             StringBuilder evidenceRequests = new StringBuilder();
-            var requesters = new LinkedHashSet<String>();
             var candidateRequests = new LinkedHashMap<String, String>();
             for (ReviewFinding candidate : pending) {
                 var reply = replies.get(candidate.id());
@@ -170,20 +169,23 @@ final class ReviewQuality {
                     candidateRequests.put(candidate.id(), parsedRequests.stream().map(EvidenceRequest::text)
                             .collect(java.util.stream.Collectors.joining("\n")));
                     evidenceRequests.append(requests).append('\n');
-                    if (!parsedRequests.isEmpty()) requesters.add(candidate.id());
                 }
             }
             boolean material = session.load(evidenceRequests.toString(), folder + " round " + round);
             for (String id : replies.keySet()) continuations.put(id, new VerificationContinuation(results.get(id),
                     candidateRequests.getOrDefault(id, ""), session.lastCoverage(),
                     views.get(id).bundle().catalog().sources().stream().map(EvidenceSource::id).collect(java.util.stream.Collectors.toSet())));
-            Set<String> oldIds = available.sources().stream().map(EvidenceSource::id).collect(java.util.stream.Collectors.toSet());
-            Set<String> added = session.catalog().sources().stream().map(EvidenceSource::id).filter(id -> !oldIds.contains(id))
-                    .collect(java.util.stream.Collectors.toSet());
-            // Never omit newly loaded material from the tasks that requested it.
-            for (String id : requesters) retainedEvidence.computeIfAbsent(id, unused -> new LinkedHashSet<>()).addAll(added);
+            boolean delivered = false;
+            for (var entry : candidateRequests.entrySet()) {
+                Set<String> needed = session.delivery(entry.getValue(), views.get(entry.getKey()).bundle().catalog());
+                retainedEvidence.computeIfAbsent(entry.getKey(), unused -> new LinkedHashSet<>()).addAll(needed);
+                if (!needed.isEmpty() && results.get(entry.getKey()).verdict().status() == ReviewOutput.Status.INSUFFICIENT_EVIDENCE) {
+                    delivered = true;
+                    session.recordDelivery(path + "/" + entry.getKey(), needed);
+                }
+            }
             saveEvidence();
-            if (!material) break;
+            if (!material && !delivered) break;
             pending = findings.stream().filter(candidate -> results.get(candidate.id()).verdict().status()
                     == ReviewOutput.Status.INSUFFICIENT_EVIDENCE).toList();
             round++;

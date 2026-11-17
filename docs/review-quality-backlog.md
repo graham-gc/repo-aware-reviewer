@@ -41,6 +41,14 @@ Bounded initial navigation now exposes nearby document/test paths at both pinned
 
 A controlled fake-model fixture reduces a document lookup from three verification calls to two with the same simulated verdict and zero-call resume. This is not a latency estimate or an evaluation of real-model findings. Group-level batched adjudication and broader changes to follow-up eligibility still require separate quality comparisons.
 
+### Reuse without losing candidate delivery — 2026-11-17
+
+Real run `repo-aware-gitlab-20261117-230835` took 357.606 s over 23 calls, compared with 340.140 s and 17 calls previously. Both runs used 14 non-correction calls; corrections increased from three to nine. This does not establish a parser bug or a causal latency effect of the new prompts. It did expose a general evidence-routing gap: discovery read both pinned README files in full, candidate scoping omitted them, and later `1:200` requests were treated as fresh sources because request deduplication used selector spelling. Exact repeated requests could instead be suppressed without delivering the globally known source to the requesting candidate.
+
+Native readers now retain EOF extent metadata separately from presentation IDs. Revision/path/range coverage reuses whole files or continuous excerpt unions without crossing gaps or provenance roles. Request fulfillment retains source identities, and candidate delivery checks what was actually supplied. A pending candidate can receive a cached source without a new global read; a candidate that already has the coverage does not rerun merely because its selector changed. Requests no longer inherit every peer's newly collected source, and knowledge request results remain query-specific. Coverage records reuse and queued source IDs.
+
+`EvidenceDeliveryTests` reproduces exact-request suppression, full-versus-range duplication, repeated covered selectors after delivery, cross-revision/gap rejection, same-batch reuse, peer/query isolation and selective resume with an unavailable backend. The tests use generic source/document fixtures and simulated replies. No business verdict rule or correction gate was changed, and no real-model timing improvement is claimed.
+
 Recorded: 2026-11-12. These are observations about this review agent, not approved business rules for a reviewed repository.
 
 Reference case: local run `20261112-134821-c21dbab92fd4`, comparing `80507ae77a035aca11550670f23de607f354d676` with `c21dbab92fd42799fb6cb6ed7400ef3bd5b1eb41`. Generated artifacts are local, ignored files under `review-output/`; they are not included in this document. No target build or tests were run for this assessment.

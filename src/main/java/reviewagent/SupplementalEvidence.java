@@ -11,7 +11,8 @@ import java.util.Set;
 final class SupplementalEvidence {
     private static final int MAX_SOURCE_BYTES = 1_000_000;
 
-    record Result(String markdown, String coverage, boolean hasMaterial, EvidenceCatalog catalog) {
+    record Result(String markdown, String coverage, boolean hasMaterial, EvidenceCatalog catalog,
+                  java.util.Map<String, Set<String>> resolvedSources) {
     }
 
     private record Excerpt(String markdown, String status, EvidenceCatalog catalog) {
@@ -38,9 +39,23 @@ final class SupplementalEvidence {
         this.caches = java.util.Map.copyOf(caches);
     }
 
+    Set<String> reusable(EvidenceBundle evidence, String request) {
+        if (request.startsWith("REQUEST_KNOWLEDGE|") && evidence.scopedKnowledge() != null)
+            return evidence.scopedKnowledge().knownSources(request, evidence.catalog(), true);
+        try {
+            return reusable(evidence, EvidenceQuery.parse(request, languages));
+        } catch (IOException invalid) { return Set.of(); }
+    }
+
+    private Set<String> reusable(EvidenceBundle evidence, EvidenceQuery query) {
+        if (!eligiblePath(query.resource()) || evidence.scopedKnowledge() != null && evidence.scopedKnowledge().isSourcePath(query.resource())) return Set.of();
+        return FileEvidenceCache.covering(query, evidence.scope(), evidence.catalog());
+    }
+
     Result collect(EvidenceBundle evidence, String candidates, int maxRequests, int maxKnowledgeQueries)
             throws InterruptedException {
         var requests = new LinkedHashMap<List<String>, EvidenceQuery>();
+        var requestKeys = new LinkedHashMap<List<String>, String>();
         var invalidLines = new ArrayList<Integer>();
         List<EvidenceRequest> parsed = EvidenceRequest.parse(candidates);
         for (EvidenceRequest request : parsed) {
@@ -49,6 +64,7 @@ final class SupplementalEvidence {
             try {
                 EvidenceQuery query = EvidenceQuery.parse(line, languages);
                 requests.putIfAbsent(query.key(), query);
+                requestKeys.putIfAbsent(query.key(), request.key());
             } catch (IOException invalid) {
                 invalidLines.add(request.line());
             }
@@ -64,7 +80,13 @@ final class SupplementalEvidence {
         int processed = 0;
         int total = maxRequests == 0 ? requests.size() : Math.min(requests.size(), maxRequests);
         int included = 0;
+        boolean material = knowledge.suppliedSections() > 0;
         EvidenceCatalog catalog = knowledge.catalog();
+        var resolved = new LinkedHashMap<String, Set<String>>();
+        for (EvidenceRequest request : parsed) if (request.text().startsWith("REQUEST_KNOWLEDGE|")) {
+            resolved.put(request.key(), evidence.scopedKnowledge() == null ? Set.of()
+                    : evidence.scopedKnowledge().knownSources(request.text(), evidence.catalog().plus(knowledge.catalog()), false));
+        }
         for (EvidenceQuery query : requests.values()) {
             if (processed == total) {
                 break;
@@ -74,6 +96,15 @@ final class SupplementalEvidence {
             String label = EvidenceText.oneLine(query.label());
             String status;
             try {
+                EvidenceCatalog available = evidence.catalog().plus(catalog);
+                Set<String> cached = reusable(new EvidenceBundle(evidence.scope(), evidence.changedFiles(), "", "", 0,
+                        evidence.scopedKnowledge(), available), query);
+                if (query.command().equals("REQUEST_FILE") && !cached.isEmpty()) {
+                    resolved.put(requestKeys.get(query.key()), cached);
+                    included++;
+                    coverage.append("- ").append(label).append(": REUSED (already collected file coverage).\n");
+                    continue;
+                }
                 if (quota < 256) {
                     throw new IOException("No room in the supplemental evidence budget");
                 }
@@ -107,6 +138,9 @@ final class SupplementalEvidence {
                 }
                 prompt.append(excerpt.markdown());
                 catalog = catalog.plus(excerpt.catalog());
+                resolved.put(requestKeys.get(query.key()), excerpt.catalog().sources().stream().map(EvidenceSource::id)
+                        .collect(java.util.stream.Collectors.toUnmodifiableSet()));
+                material = true;
                 remaining -= bytes;
                 included++;
                 status = excerpt.status();
@@ -127,7 +161,7 @@ final class SupplementalEvidence {
         String summary = "\nSupplemental requests included: " + included + "/" + processed + ". Invalid: " + invalidLines.size()
                 + ". Skipped by request limit: " + (requests.size() - processed) + ". See `coverage.md` for details.\n";
         return new Result(prompt.append(summary).append(knowledge.markdown()).toString(),
-                coverage.append(summary).append(knowledge.coverage()).toString(), included > 0 || knowledge.suppliedSections() > 0, catalog);
+                coverage.append(summary).append(knowledge.coverage()).toString(), material, catalog, java.util.Map.copyOf(resolved));
     }
 
     private Excerpt repositoryFile(ReviewScope scope, String revision, String path, String selector, int quota)
@@ -137,7 +171,7 @@ final class SupplementalEvidence {
         }
         String title = path + " at " + revision;
         if (selector.equals("all")) {
-            return new Excerpt(EvidenceSources.file(revision, path, 1, title, git.regularBlobAt(revision, path, quota), scope, languages), "INCLUDED");
+            return new Excerpt(EvidenceSources.file(revision, path, 1, title, git.regularBlobAt(revision, path, quota), scope, languages).throughEndOfFile(), "INCLUDED");
         }
         int from;
         int to;
@@ -170,6 +204,7 @@ final class SupplementalEvidence {
         String location = "lines " + from + "–" + (from + lines.size() - 1);
         EvidenceSource sourceBlock = EvidenceSources.file(revision, path, from, title + " (" + location + ")",
                 String.join("\n", lines), scope, languages);
+        if (from + lines.size() - 1 == source.lines().count()) sourceBlock = sourceBlock.throughEndOfFile();
         return new Excerpt(sourceBlock, bySymbol ? "INCLUDED (" + location + ")" : "INCLUDED");
     }
 

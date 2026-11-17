@@ -247,7 +247,7 @@ final class EvidenceCollector {
         if (EvidenceText.bytes(block) > quota) {
             throw new IOException("Decoded text exceeds the evidence budget");
         }
-        return EvidenceSources.file(commit, file, 1, title, content, scope, languages);
+        return EvidenceSources.file(commit, file, 1, title, content, scope, languages).throughEndOfFile();
     }
 
     private static boolean binaryPatch(String patch) {

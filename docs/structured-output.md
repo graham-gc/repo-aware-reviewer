@@ -44,6 +44,8 @@ Source correction may suggest other already included blocks containing the exact
 
 Finding ranges must be covered continuously by quoted target-code spans. Adjacent or overlapping excerpts may jointly establish coverage; a gap or a removed-line citation cannot establish target coverage.
 
+Request reuse separately tracks native file coverage and EOF metadata. It preserves the original source IDs and block-relative citation offsets; cached parent blocks remain the sources supplied to the requesting candidate. A source existing in the run-wide pool does not make it citable in a task that has not received it. Diff metadata, legacy labels and scoped knowledge sections cannot be substituted for full native file coverage. See [candidate delivery](runtime-reliability.md#collected-evidence-and-candidate-delivery).
+
 Implementation premises may cite the target, the baseline, or an applicable diff side. A genuine `new file mode` patch header can establish baseline absence; text inside an added code line cannot. These scope facts do not prove a target failure: confirmed findings still require target implementation quotations and location coverage, and reachable-failure support requires a target-backed implementation premise. Explicit defensive requirements require a contract-backed premise.
 
 ## Audit and failure handling
