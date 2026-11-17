@@ -44,11 +44,14 @@ final class ReviewConcerns {
         var ids = members.stream().map(d -> d.verdict().candidate().id()).collect(java.util.stream.Collectors.toSet());
         var citations = java.util.stream.Stream.concat(preliminary.stream(), adjudicated.stream())
                 .filter(d -> ids.contains(d.verdict().candidate().id())).flatMap(d -> d.citations().stream()).distinct().toList();
+        var pendingIds = members.stream().filter(ReviewConcerns::pending).map(d -> d.verdict().candidate().id())
+                .collect(java.util.stream.Collectors.toSet());
         // A later policy gap must not restore the discovery stage's unverified downstream allegations.
         ReviewFinding representative = java.util.stream.Stream.concat(adjudicated.stream(), preliminary.stream())
-                .filter(d -> ids.contains(d.verdict().candidate().id()) && !d.verdict().validationFailed()
+                .filter(d -> pendingIds.contains(d.verdict().candidate().id()) && !d.verdict().validationFailed()
                         && d.verdict().confirmed() != null)
-                .map(d -> d.verdict().confirmed()).findFirst().orElse(finding(members.getFirst()));
+                .map(d -> d.verdict().confirmed()).findFirst()
+                .orElse(finding(members.stream().filter(ReviewConcerns::pending).findFirst().orElseThrow()));
         return new Item(kind, members, citations, representative);
     }
 

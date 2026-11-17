@@ -80,6 +80,11 @@ final class ReviewPublicationTests {
         require(retained.getFirst().representative().equals(r2.verdict().confirmed())
                 && !ReviewConcerns.markdown(retained, OutputLanguage.EN).contains("Every production batch crashes"),
                 "a later policy gap does not reintroduce the raw discovery allegation after grounded impact correction");
+        var refuted = new ReviewOutput.Decision(new ReviewOutput.Verification(candidate("R2-1"), ReviewOutput.Status.REJECTED,
+                "A later source disproves this candidate.", null), ReviewOutput.Relation.PRE_EXISTING, "", "", r2.citations());
+        var remaining = ReviewConcerns.collect(List.of(r2, r1), List.of(refuted), List.of(List.of("R2-1", "R1-1")));
+        require(remaining.getFirst().representative().id().equals("R1-1"),
+                "a superseded positive cannot be the summary after a validated rejection, even when grouped with an unresolved peer");
         for (var language : OutputLanguage.values()) {
             String response = String.join("\n\n", ReviewReport.headings(language)) + "\n<finding-groups/>";
             String report = ReviewReport.finalReport(response, List.of(), language, "No external requirements supplied.", concerns);
