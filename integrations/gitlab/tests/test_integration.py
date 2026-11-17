@@ -322,6 +322,7 @@ class IntegrationTests(unittest.TestCase):
                 (folder / "task-error.txt").write_text("RAW_ERROR_WITH_SOURCE_AND_SECRET")
                 (folder / "task-response.md").write_text("RAW_MODEL_RESPONSE")
                 (folder / "task-stderr.log").write_text("RAW_PROVIDER_STDERR")
+                (folder / "task-validation.log").write_text("event=VALIDATION_REJECTED\nfailureCategory=SOURCE_QUOTATION\n")
                 relative = (Path(stage) / "task-state.properties").as_posix()
                 links.append(f"[{relative}]({relative})")
             (run / "report.md").write_text("\n".join(links))
@@ -331,6 +332,7 @@ class IntegrationTests(unittest.TestCase):
         public = Path(env["REVIEW_OUTPUT_DIR"]) / "public"
         for stage in stages:
             self.assertIn("failureCategory=SOURCE_QUOTATION", (public / stage / "task-state.properties").read_text())
+            self.assertIn("event=VALIDATION_REJECTED", (public / "diagnostics" / stage / "task-validation.log").read_text())
             for suffix in ("error.txt", "response.md", "stderr.log"):
                 self.assertFalse((public / stage / ("task-" + suffix)).exists())
         exported = "\n".join(path.read_text() for path in public.rglob("*") if path.is_file())

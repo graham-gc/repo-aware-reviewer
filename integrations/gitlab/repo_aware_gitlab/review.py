@@ -264,7 +264,8 @@ def review(env=os.environ, *, api=None, fetcher=fetch_snapshot, runner=execute_c
                         shutil.copyfile(run / name, public / name)
                 # These producer-owned files contain categories/positions, never raw model errors or quotes.
                 # Preserve task-state paths because reports link to them relative to their run directory.
-                for pattern, prefix in (("*-state.properties", public), ("*-execution.log", public / "diagnostics")):
+                for pattern, prefix in (("*-state.properties", public), ("*-execution.log", public / "diagnostics"),
+                                        ("*-validation.log", public / "diagnostics")):
                     for metadata in run.rglob(pattern):
                         if not metadata.is_file() or metadata.is_symlink():
                             continue
