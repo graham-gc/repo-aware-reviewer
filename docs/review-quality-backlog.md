@@ -33,6 +33,14 @@ The pipeline now retains the latest completed verification, publication grouping
 
 Offline regression cases exercise final grouping rejection with zero confirmed findings, retained grouped disputes and counts, a successful selective resume, earlier grouping/assessment failures, mixed confirmed/uncertain/disputed/rejected/failed outcomes in both languages, and root/nested multi-task diagnostic links. The invalid group still produces `INCOMPLETE` and CLI exit 3. These changes preserve validated work and diagnostics; they neither approve a malformed response nor settle an unspecified business contract.
 
+### Navigation and follow-up overhead — 2026-11-17
+
+Completed local run `repo-aware-gitlab-20261117-220402` launched 17 calls over 340.140 s. Verification used six reasoning calls across three rounds plus three corrections (45.959 s), while three per-candidate publication calls took 58.135 s. Its two supplemental reads first located document paths, then read a README. The different compatibility verdicts across runs are model judgments; this observation does not establish a semantic Agent bug.
+
+Bounded initial navigation now exposes nearby document/test paths at both pinned revisions without loading their bodies or treating them as approved rules. Follow-up prompts retain the previous candidate-specific gap and requests, shared batch outcomes and newly supplied source identities, explicitly as context rather than proof. Identical underlying candidate/evidence prompts still skip another call. Safe validation-event histories persist after success and are exported so later correction overhead can be classified without disclosing raw model streams. The model's decision rules, source/proof checks, call budgets and per-candidate publication adjudication are unchanged.
+
+A controlled fake-model fixture reduces a document lookup from three verification calls to two with the same simulated verdict and zero-call resume. This is not a latency estimate or an evaluation of real-model findings. Group-level batched adjudication and broader changes to follow-up eligibility still require separate quality comparisons.
+
 Recorded: 2026-11-12. These are observations about this review agent, not approved business rules for a reviewed repository.
 
 Reference case: local run `20261112-134821-c21dbab92fd4`, comparing `80507ae77a035aca11550670f23de607f354d676` with `c21dbab92fd42799fb6cb6ed7400ef3bd5b1eb41`. Generated artifacts are local, ignored files under `review-output/`; they are not included in this document. No target build or tests were run for this assessment.

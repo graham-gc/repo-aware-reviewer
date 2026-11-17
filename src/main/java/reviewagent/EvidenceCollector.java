@@ -99,6 +99,20 @@ final class EvidenceCollector {
         LanguageModule.Repository repository = LanguageRegistry.repository(git);
         List<String> changedPaths = reviewChanges.stream().map(GitClient.Change::path).toList();
         Set<String> tracked = Set.copyOf(repository.paths(scope.targetCommit()));
+        int navigationBudget = Math.min(remaining / 20, 8_000);
+        var navigationPaths = new ArrayList<>(changedPaths);
+        reviewChanges.stream().map(GitClient.Change::previousPath).filter(java.util.Objects::nonNull).forEach(navigationPaths::add);
+        for (String revision : List.of(scope.baseCommit(), scope.targetCommit()).stream().distinct().toList()) {
+            EvidenceSource navigation = RepositoryNavigation.source(repository, revision, navigationPaths, scopedPaths, navigationBudget / 2);
+            if (navigation == null) {
+                coverage.append("Related path navigation at ").append(revision).append(": OMITTED (byte budget).\n");
+            } else {
+                sources.add(navigation);
+                out.append(navigation.markdown());
+                remaining -= EvidenceText.bytes(navigation.markdown());
+                coverage.append("Related path navigation at ").append(revision).append(": INCLUDED (metadata only).\n");
+            }
+        }
         LanguageRegistry.Manifests selectedManifests = languages.manifests(repository, scope.targetCommit(), changedPaths);
         for (String gap : selectedManifests.gaps()) { out.append(gap).append('\n'); coverage.append(gap).append('\n'); }
         for (String file : selectedManifests.paths()) {

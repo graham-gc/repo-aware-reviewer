@@ -18,6 +18,7 @@ final class VerificationEvidenceTests {
         aliasAmbiguity();
         timings();
         supplementalRound();
+        navigationAvoidsLookupRound();
     }
 
     private static EvidenceSource source(String path, String text) {
@@ -150,6 +151,64 @@ final class VerificationEvidenceTests {
                     && Files.readString(root.resolve("verification/round-2/R1-1-prompt.md")).contains("decisive_new_material"),
                     "requested implementation is pinned into the next task even without a lexical candidate match");
             require(Files.isRegularFile(root.resolve("verification/round-2/R2-1-unchanged.txt")), "skipping unchanged evidence is recorded");
+            String followup = Files.readString(root.resolve("verification/round-2/R1-1-prompt.md"));
+            require(followup.contains("VERIFICATION FOLLOW-UP CONTEXT") && followup.contains("Previous model opinion: INSUFFICIENT_EVIDENCE")
+                    && followup.contains("The guard implementation is not yet provided.") && followup.contains("REQUEST_FILE|target|extra.py|all")
+                    && followup.contains("target extra.py all: INCLUDED") && followup.contains("Newly supplied source references")
+                    && followup.contains("not evidence or an approved rule"),
+                    "follow-up carries the candidate's prior gap, own request, processing outcome and newly supplied source identities without promoting old opinions");
+        }
+    }
+
+    private static void navigationAvoidsLookupRound() throws Exception {
+        Path root = Files.createTempDirectory("review-navigation-rounds-");
+        Path repo = Files.createDirectory(root.resolve("repo"));
+        git(repo, "init", "-q");
+        Files.writeString(repo.resolve("alpha.py"), "def inspect_alpha(): return 0\n");
+        Files.writeString(repo.resolve("README.md"), "DOCUMENT_CONTENT_MARKER: interface intent is documented here.\n");
+        git(repo, "add", "--all"); git(repo, "commit", "-qm", "base");
+        Files.writeString(repo.resolve("alpha.py"), "def inspect_alpha(): return 1\n");
+        git(repo, "add", "--all"); git(repo, "commit", "-qm", "target");
+        var options = CliOptions.parse(new String[]{"review", "--repo", repo.toString()});
+        var executor = new ProcessExecutor();
+        var git = new GitClient(repo, executor);
+        var evidence = new EvidenceCollector(git).collect(git.resolve(options), null, null, CliOptions.KnowledgeMode.FULL, 100_000);
+        require(evidence.markdown().contains("- README.md\n") && !evidence.markdown().contains("DOCUMENT_CONTENT_MARKER"),
+                "initial navigation advertises document paths without loading document bodies");
+        String script = """
+                prompt=$(cat)
+                printf x >> calls
+                case "$prompt" in
+                  *DOCUMENT_CONTENT_MARKER*) printf '<verification><status>REJECTED</status><reason>The supplied document resolves the allegation.</reason></verification>';;
+                  *'- README.md'*) printf '<verification><status>INSUFFICIENT_EVIDENCE</status><reason>Read the listed document.</reason></verification>\\nREQUEST_FILE|target|README.md|all|Read the interface documentation\\n';;
+                  *) printf '<verification><status>INSUFFICIENT_EVIDENCE</status><reason>Locate available documentation.</reason></verification>\\nREQUEST_FILE|target|.|index|Find documentation paths\\n';;
+                esac
+                """;
+        for (boolean navigation : List.of(false, true)) {
+            var sources = evidence.catalog().sources().stream()
+                    .filter(source -> navigation || !source.title().startsWith("Related repository paths at ")).toList();
+            String markdown = evidence.markdown();
+            if (!navigation) for (var source : evidence.catalog().sources())
+                if (source.title().startsWith("Related repository paths at ")) markdown = markdown.replace(source.markdown(), "");
+            var bundle = new EvidenceBundle(evidence.scope(), evidence.changedFiles(), markdown, evidence.coverage(),
+                    evidence.supplementBudget(), null, new EvidenceCatalog(sources, true));
+            Path run = Files.createDirectory(root.resolve(navigation ? "with-navigation" : "without-navigation"));
+            try (var progress = new CommandProgress("navigation", new java.io.PrintStream(java.io.OutputStream.nullOutputStream()))) {
+                var session = new EvidenceSession(bundle, new SupplementalEvidence(git, executor, java.util.Map.of()), 0, 0);
+                var agent = new AgentRunner(executor, "/bin/sh", List.of("-c", script), run, Duration.ofSeconds(5));
+                var quality = new ReviewQuality(options, bundle, session, new PromptFactory(), agent, run, progress, 9);
+                var findings = List.of(finding("alpha.py"));
+                require(quality.verify(findings).getFirst().verdict().status() == ReviewOutput.Status.REJECTED,
+                        "navigation changes request routing, not the eventual simulated verdict");
+                String calls = Files.readString(run.resolve("calls"));
+                require(calls.equals(navigation ? "xx" : "xxx"), "bounded initial path hints remove a filename-only reasoning round in a controlled fixture");
+                var resume = CliOptions.parse(new String[]{"review", "--repo", repo.toString(), "--resume", run.toString()});
+                var resumedSession = new EvidenceSession(bundle, new SupplementalEvidence(git, executor, java.util.Map.of()), 0, 0);
+                var unavailable = new AgentRunner(executor, "/bin/sh", List.of("-c", "exit 89"), run, Duration.ofSeconds(5));
+                var resumed = new ReviewQuality(resume, bundle, resumedSession, new PromptFactory(), unavailable, run, progress, 9);
+                require(resumed.verify(findings).getFirst().verdict().status() == ReviewOutput.Status.REJECTED
+                        && Files.readString(run.resolve("calls")).equals(calls), "follow-up context is deterministic and reuses all valid matching rounds on resume");
+            }
         }
     }
     private static void git(Path directory, String... args) throws Exception {

@@ -50,6 +50,8 @@ Implementation premises may cite the target, the baseline, or an applicable diff
 
 Model responses remain in their original artifacts. Applied delimiter recoveries are recorded in `*-normalization.log`, including the affected field and response-block line. The log is scoped to each validation attempt, including cached replies. No recovered code text is substituted silently.
 
+Validation rejections also append safe metadata to `*-validation.log`. Fixed error categories and optional XML parser positions survive successful correction, while raw exception messages and quotations stay in local artifacts. These events describe validation attempts, not model-call counts or semantic correctness.
+
 Individual candidate verification and publication adjudication isolate replies still invalid after bounded format/source/decision corrections. Those candidates have no confirmed finding, remain unverified, and appear in the report's incomplete banner and `review-status.md`. Other candidate tasks finish. Resume revalidates saved results, reuses valid matching tasks and retries invalid tasks.
 
 Unfinished-check references point to the task's `*-state.properties` at the same relative path in local and exported reports. These checkpoints include a fixed failure category and summary, plus parsed XML line/column when available. Raw `*-error.txt` files remain local because validator messages may quote source text or model output. Exported categories describe the validation or invocation failure; they do not establish whether the candidate is a defect. See [diagnostic fields](runtime-reliability.md#checkpoints-and-diagnostics).

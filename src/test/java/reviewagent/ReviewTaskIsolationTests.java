@@ -49,6 +49,9 @@ final class ReviewTaskIsolationTests {
             require(Files.readString(dir.resolve("bad-state.properties")).contains("failureCategory=\n")
                     && Files.readString(dir.resolve("bad-state.properties")).contains("status=SUCCEEDED"),
                     "a validated resume clears the previous diagnostic category");
+            require(Files.readString(dir.resolve("bad-validation.log")).contains("event=VALIDATION_REJECTED")
+                    && !Files.readString(dir.resolve("bad-validation.log")).contains("minimax"),
+                    "successful recovery preserves safe validation history after clearing the task's current failure state");
             fails(() -> ReviewTasks.run(List.of(tasks.getFirst()), agent, dir.resolve("strict"), 1, progress, 1, 2, "Strict phase", false));
             var unavailable = ReviewTasks.runIsolated(tasks, shell(dir, "exit 9"), dir.resolve("transport"), 1,
                     progress, 1, 2, "Transport failure", false);

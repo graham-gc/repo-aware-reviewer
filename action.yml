@@ -61,6 +61,7 @@ runs:
           ${{ steps.review.outputs.directory }}/review-status.md
           ${{ steps.review.outputs.directory }}/timings.md
           ${{ steps.review.outputs.directory }}/**/*-state.properties
+          ${{ steps.review.outputs.directory }}/**/*-validation.log
 
     - name: Comment on the pull request
       if: steps.review.outputs.directory != '' && inputs.publish-comment == 'true'

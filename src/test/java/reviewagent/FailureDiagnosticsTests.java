@@ -28,6 +28,20 @@ final class FailureDiagnosticsTests {
         var second = new IOException(secret, first);
         first.initCause(second);
         require(!FailureDiagnostics.properties(first, "IO_FAILURE").contains(secret), "cyclic exception causes are bounded");
+        var root = java.nio.file.Files.createTempDirectory("safe-validation-events-");
+        try {
+            var events = root.resolve("task-validation.log");
+            ValidationEvents.rejected(events, new SourceQuotationException(secret));
+            ValidationEvents.rejected(events, new IOException(secret, new SAXParseException(secret, null, null, 3, 9)));
+            String history = java.nio.file.Files.readString(events);
+            require(history.split("event=VALIDATION_REJECTED", -1).length == 3
+                    && history.contains("failureCategory=SOURCE_QUOTATION") && history.contains("failureCategory=XML_SYNTAX")
+                    && history.contains("failureLine=3") && !history.contains(secret),
+                    "append-only correction history retains safe categories and parser positions without raw exception content");
+        } finally {
+            java.nio.file.Files.deleteIfExists(root.resolve("task-validation.log"));
+            java.nio.file.Files.delete(root);
+        }
     }
     private static void require(boolean value, String message) { if (!value) throw new AssertionError(message); }
 }

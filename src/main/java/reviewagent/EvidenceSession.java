@@ -16,6 +16,7 @@ final class EvidenceSession {
     private int files;
     private int queries;
     private EvidenceCatalog catalog = EvidenceCatalog.empty();
+    private String lastCoverage = "";
 
     EvidenceSession(EvidenceBundle evidence, SupplementalEvidence collector, int fileLimit, int knowledgeLimit) {
         this.evidence = evidence;
@@ -25,6 +26,12 @@ final class EvidenceSession {
     }
 
     boolean load(String replies, String phase) throws InterruptedException {
+        int coverageStart = coverage.length();
+        try { return loadRound(replies, phase); }
+        finally { lastCoverage = coverage.substring(coverageStart); }
+    }
+
+    private boolean loadRound(String replies, String phase) throws InterruptedException {
         StringBuilder fresh = new StringBuilder();
         int newFiles = 0;
         int newQueries = 0;
@@ -75,6 +82,7 @@ final class EvidenceSession {
 
     String markdown() { return markdown.toString(); }
     String coverage() { return coverage.toString(); }
+    String lastCoverage() { return lastCoverage; }
     EvidenceIndex index() { return new EvidenceIndex(catalog()); }
     EvidenceCatalog catalog() { return evidence.catalog().plus(catalog); }
 }

@@ -239,6 +239,9 @@ final class ReviewTasks {
             try {
                 AgentRunner.validateResponse(response);
                 task.validator().validate(response);
+            } catch (IOException invalid) {
+                if (!(invalid instanceof ArtifactIOException)) ValidationEvents.rejected(directory.resolve(task.id() + "-validation.log"), invalid);
+                throw invalid;
             } finally {
                 try {
                     if (!diagnostics.notes().isEmpty()) Files.writeString(directory.resolve(task.id() + "-normalization.log"),

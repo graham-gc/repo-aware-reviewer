@@ -114,6 +114,7 @@ final class ReviewQuality {
             throws IOException, InterruptedException {
         var results = new LinkedHashMap<String, ReviewOutput.Decision>();
         var priorPrompts = new LinkedHashMap<String, String>();
+        var continuations = new LinkedHashMap<String, VerificationContinuation>();
         List<ReviewFinding> pending = findings;
         int round = 1;
         while (!pending.isEmpty()) {
@@ -129,17 +130,21 @@ final class ReviewQuality {
                 var full = VerificationEvidence.select(evidence, available, supplemental, candidate, pinned, true);
                 var view = options.verificationEvidence() == CliOptions.VerificationEvidenceMode.FULL ? full
                         : VerificationEvidence.select(evidence, available, supplemental, candidate, pinned, false);
-                String text = prompt.build(candidate, view);
+                String basePrompt = prompt.build(candidate, view);
+                boolean unchanged = basePrompt.equals(priorPrompts.put(candidate.id(), basePrompt)) && results.containsKey(candidate.id());
+                var continuation = continuations.get(candidate.id());
+                String text = basePrompt + (continuation == null || unchanged ? "" : continuation.markdown(view));
                 retainedEvidence.computeIfAbsent(candidate.id(), unused -> new LinkedHashSet<>())
                         .addAll(view.bundle().catalog().sources().stream().map(EvidenceSource::id).toList());
                 int selectedBytes = EvidenceText.bytes(text);
-                int fullBytes = view.fallback() ? selectedBytes : EvidenceText.bytes(prompt.build(candidate, full));
+                int fullBytes = view.fallback() ? selectedBytes : EvidenceText.bytes(prompt.build(candidate, full)
+                        + (continuation == null || unchanged ? "" : continuation.markdown(full)));
                 agent.timings().prepared(taskDirectory.resolve(candidate.id()), fullBytes, selectedBytes,
                         view.bundle().catalog().sources().size(), available.sources().size());
                 AtomicFiles.write(taskDirectory.resolve(candidate.id() + "-evidence.md"), view.manifest(fullBytes, selectedBytes));
                 views.put(candidate.id(), view);
                 // Same instructions and same actual evidence cannot justify another automatic reasoning pass.
-                if (text.equals(priorPrompts.put(candidate.id(), text)) && results.containsKey(candidate.id())) {
+                if (unchanged) {
                     agent.timings().unchanged();
                     AtomicFiles.write(taskDirectory.resolve(candidate.id() + "-unchanged.txt"), "No new task evidence; retained the previous validated or unfinished result.\n");
                     continue;
@@ -152,6 +157,7 @@ final class ReviewQuality {
                     stage, stages, description + " (round " + round + ")", options.resumeDirectory() != null);
             StringBuilder evidenceRequests = new StringBuilder();
             var requesters = new LinkedHashSet<String>();
+            var candidateRequests = new LinkedHashMap<String, String>();
             for (ReviewFinding candidate : pending) {
                 var reply = replies.get(candidate.id());
                 if (reply == null) continue;
@@ -160,11 +166,17 @@ final class ReviewQuality {
                         : invalidCandidate(candidate, path, reply, OutputLanguage.parse(options.language())));
                 if (reply.valid()) {
                     String requests = ReviewOutput.requestText(reply.response(), "verification");
+                    var parsedRequests = EvidenceRequest.parse(requests);
+                    candidateRequests.put(candidate.id(), parsedRequests.stream().map(EvidenceRequest::text)
+                            .collect(java.util.stream.Collectors.joining("\n")));
                     evidenceRequests.append(requests).append('\n');
-                    if (!EvidenceRequest.parse(requests).isEmpty()) requesters.add(candidate.id());
+                    if (!parsedRequests.isEmpty()) requesters.add(candidate.id());
                 }
             }
             boolean material = session.load(evidenceRequests.toString(), folder + " round " + round);
+            for (String id : replies.keySet()) continuations.put(id, new VerificationContinuation(results.get(id),
+                    candidateRequests.getOrDefault(id, ""), session.lastCoverage(),
+                    views.get(id).bundle().catalog().sources().stream().map(EvidenceSource::id).collect(java.util.stream.Collectors.toSet())));
             Set<String> oldIds = available.sources().stream().map(EvidenceSource::id).collect(java.util.stream.Collectors.toSet());
             Set<String> added = session.catalog().sources().stream().map(EvidenceSource::id).filter(id -> !oldIds.contains(id))
                     .collect(java.util.stream.Collectors.toSet());
