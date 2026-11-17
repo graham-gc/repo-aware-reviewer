@@ -130,6 +130,8 @@ Default output roots are relative to the **terminal's current working directory*
 - `timings.md`: current execution calls, input bytes, stage wall time and cache reuse.
 - `candidate-knowledge.md`: a draft for human review, not approved rules.
 
+The report's Findings section separates confirmed defects, risks requiring human review, and unfinished checks. A completed review can still contain review-required items; their full evidence and decisions remain in `coverage.md`.
+
 | Exit code | Meaning |
 | --- | --- |
 | `0` | Output completed, prepared only, or skipped for an empty diff; not code approval. |

@@ -1,0 +1,180 @@
+package reviewagent;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Clock;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+
+/** The playground regression: local facts survive policy disagreement without inventing a contract. */
+final class ReviewPublicationTests {
+    private static final String BASE = "def average(values):\n    if not values:\n        return 0\n    return sum(values) / len(values)\n";
+    private static final String TARGET = "def average(values):\n    return sum(values) / len(values)\n";
+    private static final String EXPRESSION = "return sum(values) / len(values)";
+    private static final String REMOVED = "-    if not values:\n-        return 0";
+    private static final String GAP = "The before/after behavior is established.\n\nWhether the interface intentionally changes is not specified.";
+
+    static void run() throws Exception {
+        renderingAndProof();
+        workflow();
+    }
+
+    private static ReviewFinding candidate(String id) {
+        return new ReviewFinding(id, "Empty-input behavior changed", ReviewFinding.Severity.MEDIUM, "calculator.py", 2, 2,
+                "average([])", "The baseline returns 0; the target raises ZeroDivisionError.", "Compare the pinned implementations.",
+                "The diff removes the empty-input guard.");
+    }
+
+    private static String citation(String source, String quote) {
+        return "<citation><source>" + source + "</source><quote><![CDATA[" + quote + "]]></quote></citation>";
+    }
+
+    private static String positive(String id, String target, String baseline, String removed) {
+        return "<verification><status>CONFIRMED</status><reason>The local failure is established.\nNo downstream outage is claimed.</reason>"
+                + "<relation>INTRODUCED</relation><baseline>The original function returned 0 for empty input.</baseline>"
+                + "<contract>The existing input guard prevented this local exception.</contract><support>REACHABLE_FAILURE</support>"
+                + "<premises><premise><statement>The target divides by len(values), which is zero for an empty list.</statement>"
+                + "<basis>IMPLEMENTATION</basis><citations>" + citation(target, EXPRESSION) + "</citations></premise>"
+                + "<premise><statement>The baseline guard returned before the division.</statement><basis>IMPLEMENTATION</basis>"
+                + "<citations>" + citation(baseline, removed) + "</citations></premise></premises><citations>"
+                + citation(target, EXPRESSION) + citation(baseline, removed) + "</citations>"
+                + ReviewOutput.findingXml(candidate(id)) + "</verification>";
+    }
+
+    private static String uncertain(String target, String baseline, String removed) {
+        return "<verification><status>INSUFFICIENT_EVIDENCE</status><reason>" + GAP + "</reason>"
+                + "<baseline>Empty input changed from returning 0 to raising an exception.</baseline>"
+                + "<citations>" + citation(target, EXPRESSION) + citation(baseline, removed) + "</citations></verification>";
+    }
+
+    private static void renderingAndProof() throws Exception {
+        var scope = new ReviewScope(ReviewScope.Mode.BRANCH, "base", "target", "base", "target", "base..target");
+        var base = EvidenceSources.file("base", "calculator.py", 1, "calculator.py at base", BASE, scope, LanguageRegistry.defaults());
+        var target = EvidenceSources.file("target", "calculator.py", 1, "calculator.py at target", TARGET, scope, LanguageRegistry.defaults());
+        var catalog = new EvidenceCatalog(List.of(base, target), true);
+        var evidence = new EvidenceBundle(scope, List.of("calculator.py"), "", "", 20_000, null, catalog);
+        var index = new EvidenceIndex(catalog);
+        String originalGuard = "    if not values:\n        return 0";
+        var r1 = ReviewGrounding.verification(uncertain(target.id(), base.id(), originalGuard), candidate("R1-1"), evidence, index);
+        var r2 = ReviewGrounding.verification(positive("R2-1", target.id(), base.id(), originalGuard), candidate("R2-1"), evidence, index);
+        var r3 = ReviewGrounding.verification(positive("R3-1", target.id(), base.id(), originalGuard), candidate("R3-1"), evidence, index);
+        require(r2.verdict().status() == ReviewOutput.Status.CONFIRMED, "a locally proved failure needs no external requirement document");
+        var opposite = ReviewGrounding.verification(uncertain(target.id(), base.id(), originalGuard), candidate("R3-1"), evidence, index);
+        var groups = List.of(List.of("R1-1", "R2-1", "R3-1"));
+        var adjudicated = ReviewQuality.resolveConflicts(List.of(r2, opposite), groups, OutputLanguage.EN);
+        var dispute = adjudicated.getFirst();
+        require(dispute.verdict().status() == ReviewOutput.Status.DISPUTED && dispute.verdict().confirmed().equals(r2.verdict().confirmed())
+                && dispute.citations().equals(r2.citations()) && dispute.support().equals(r2.support()) && dispute.relation() == r2.relation(),
+                "policy disagreement preserves candidate, provenance, implementation proof and change relationship");
+        var concerns = ReviewConcerns.collect(List.of(r1, r2, r3), adjudicated, groups);
+        require(concerns.size() == 1 && concerns.getFirst().members().size() == 3, "one grouped risk replaces three repeated candidate essays");
+        for (var language : OutputLanguage.values()) {
+            String response = String.join("\n\n", ReviewReport.headings(language)) + "\n<finding-groups/>";
+            String report = ReviewReport.finalReport(response, List.of(), language, "No external requirements supplied.", concerns);
+            require(report.contains("ZeroDivisionError") && report.contains("average([])") && report.contains("calculator.py:2")
+                    && report.contains("calculator.py:2–3 @ base"), "main findings preserve trigger, observed change and pinned source positions");
+            require(!report.contains("\\n") && !report.contains("[MEDIUM]") && !report.contains("[中]")
+                    && !report.contains("No verified findings.") && !report.contains("未发现经复核确认的问题。"),
+                    "a review-required risk is neither a confirmed defect nor an empty clean summary; prose is not audit-escaped");
+            int risk = report.indexOf(language.text("Review required", "需人工确认"));
+            require(risk > report.indexOf(ReviewReport.headings(language).get(2))
+                    && risk < report.indexOf(ReviewReport.headings(language).get(3)), "risk is in Findings, before requirements and appendices");
+        }
+        require(ReviewQuality.completion(List.of(r1, r2, r3), adjudicated, OutputLanguage.EN).complete(),
+                "a valid semantic disagreement is separate from an execution failure");
+        var invalid = new ReviewOutput.Decision(new ReviewOutput.Verification(candidate("R4-1"), ReviewOutput.Status.INSUFFICIENT_EVIDENCE,
+                "Malformed output", null, true), ReviewOutput.Relation.UNRESOLVED, "", "", List.of());
+        var invalidGroup = List.of(List.of("R2-1", "R4-1"));
+        var peers = ReviewQuality.resolveConflicts(List.of(r2, invalid), invalidGroup, OutputLanguage.EN);
+        require(peers.getFirst().verdict().status() == ReviewOutput.Status.CONFIRMED
+                && !ReviewQuality.completion(peers, List.of(), OutputLanguage.EN).complete(), "invalid output cannot veto a proved peer or produce a complete run");
+        require(ReviewConcerns.collect(peers, List.of(), invalidGroup).getFirst().kind() == ReviewConcerns.Kind.NOT_COMPLETED,
+                "malformed output is visibly unfinished, not a policy dispute");
+        try {
+            ReviewOutput.verification("<verification><status>DISPUTED</status><reason>Bypass proof</reason></verification>", candidate("R1-1"), List.of("calculator.py"));
+            throw new AssertionError("Models must not set the programmatic disputed status");
+        } catch (java.io.IOException expected) { }
+        require(ReportText.inline("First paragraph.\n\nSecond paragraph.\tEnd.").equals("First paragraph. Second paragraph. End.")
+                && ReportText.inline("literal \\n pattern").contains("\\n"), "prose whitespace is folded while literal source escapes are preserved");
+        String longReason = ReviewConcerns.markdown(List.of(new ReviewConcerns.Item(ReviewConcerns.Kind.EVIDENCE_GAP,
+                List.of(new ReviewOutput.Decision(new ReviewOutput.Verification(candidate("R1-1"), ReviewOutput.Status.INSUFFICIENT_EVIDENCE,
+                        "Further evidence is needed. ".repeat(200), null), ReviewOutput.Relation.UNRESOLVED, "", "", List.of())), List.of())), OutputLanguage.EN);
+        require(longReason.length() < 2_000 && longReason.contains("…") && longReason.contains("coverage.md"), "the risk summary is bounded and links to complete reasoning");
+    }
+
+    private static void workflow() throws Exception {
+        Path fixture = Files.createTempDirectory("review-publication-playground-");
+        try {
+            Path repo = Files.createDirectory(fixture.resolve("repo"));
+            git(repo, "init", "-q");
+            Files.writeString(repo.resolve("calculator.py"), BASE);
+            git(repo, "add", "--all"); git(repo, "commit", "-qm", "base");
+            Files.writeString(repo.resolve("calculator.py"), TARGET);
+            git(repo, "add", "--all"); git(repo, "commit", "-qm", "target");
+            Path stub = fixture.resolve("agent.sh");
+            var options = CliOptions.parse(new String[]{"review", "--repo", repo.toString(), "--output-dir", fixture.resolve("runs").toString(),
+                    "--agent-command", "/bin/sh", "--agent-arg", stub.toString()});
+            var git = new GitClient(repo, new ProcessExecutor());
+            var evidence = new EvidenceCollector(git).collect(git.resolve(options), null, null, CliOptions.KnowledgeMode.FULL, options.maxEvidenceBytes());
+            var diff = evidence.catalog().sources().stream().filter(source -> source.role(EvidenceSource.Role.DIFF)).findFirst().orElseThrow();
+            var source = evidence.catalog().sources().stream().filter(s -> s.path().equals("calculator.py") && !s.role(EvidenceSource.Role.DIFF)).findFirst().orElseThrow();
+            Files.writeString(fixture.resolve("positive.xml"), positive("CANDIDATE_ID", source.id(), diff.id(), REMOVED));
+            Files.writeString(fixture.resolve("uncertain.xml"), uncertain(source.id(), diff.id(), REMOVED));
+            Files.writeString(fixture.resolve("discovery.xml"), "<findings>" + ReviewOutput.findingXml(candidate("unused")) + "</findings>");
+            Files.writeString(fixture.resolve("report.txt"), String.join("\n\n", ReviewReport.headings(OutputLanguage.EN)) + "\n<finding-groups/>");
+            Files.writeString(stub, """
+                    set -eu
+                    root=$(dirname "$0")
+                    prompt=$(cat)
+                    printf 'call\\n' >> "$root/calls"
+                    case "$prompt" in
+                      'You are the discovery stage'*) cat "$root/discovery.xml" ;;
+                      'You are the independent candidate verification'*|'You are the independent publication adjudication'*)
+                        candidate=$(printf '%s\\n' "$prompt" | sed -n '/^CANDIDATE TO VERIFY$/{n;p;}')
+                        case "$candidate" in
+                          *'id="R1-1"'*) cat "$root/uncertain.xml" ;;
+                          *'id="R2-1"'*) sed 's/CANDIDATE_ID/R2-1/g' "$root/positive.xml" ;;
+                          *'id="R3-1"'*)
+                            case "$prompt" in
+                              'You are the independent publication adjudication'*) cat "$root/uncertain.xml" ;;
+                              *) sed 's/CANDIDATE_ID/R3-1/g' "$root/positive.xml" ;;
+                            esac ;;
+                          *) exit 91 ;;
+                        esac ;;
+                      'You are the candidate reconciliation'*) printf '<candidate-groups><group><id>R1-1</id><id>R2-1</id><id>R3-1</id></group></candidate-groups>' ;;
+                      'You are the report consolidation'*) cat "$root/report.txt" ;;
+                      *) exit 92 ;;
+                    esac
+                    """);
+            Path run = new ReviewPipeline(new ProcessExecutor(), Clock.systemUTC()).run(options);
+            String report = Files.readString(run.resolve("report.md"));
+            require(report.contains("Confirmed defects: 0; review-required items: 1; unfinished checks: 0")
+                    && report.contains("[Review required — conflicting decisions]") && report.contains("ZeroDivisionError"),
+                    "the full pipeline surfaces the playground compatibility risk in its main findings");
+            require(Files.readString(run.resolve("coverage.md")).contains("R2-1 — DISPUTED")
+                    && Files.readString(run.resolve("review-status.md")).contains("Status: COMPLETE"),
+                    "audit retains the disagreement and complete describes execution, not approval");
+            long calls = Files.readAllLines(fixture.resolve("calls")).size();
+            var resume = CliOptions.parse(new String[]{"review", "--repo", repo.toString(), "--resume", run.toString(),
+                    "--agent-command", "/bin/sh", "--agent-arg", stub.toString()});
+            new ReviewPipeline(new ProcessExecutor(), Clock.systemUTC()).run(resume);
+            require(Files.readAllLines(fixture.resolve("calls")).size() == calls && Files.readString(run.resolve("report.md")).equals(report),
+                    "resume recomputes publication policy from validated saved outputs without another model call");
+        } finally {
+            try (var paths = Files.walk(fixture)) {
+                for (Path path : paths.sorted(Comparator.reverseOrder()).toList()) Files.delete(path);
+            }
+        }
+    }
+
+    private static void git(Path repo, String... arguments) throws Exception {
+        var command = new ArrayList<>(List.of("git", "-c", "user.name=Review Test", "-c", "user.email=test@example.invalid"));
+        command.addAll(List.of(arguments));
+        var result = new ProcessExecutor().run(command, repo, null, Duration.ofSeconds(10));
+        require(result.exitCode() == 0, "Synthetic repository setup failed: " + result.stderr());
+    }
+
+    private static void require(boolean condition, String message) { if (!condition) throw new AssertionError(message); }
+}

@@ -60,7 +60,17 @@ Every audited `NOT_SATISFIED` item is considered for a `REQ-A...` candidate usin
 
 Only a confirmed candidate retains a conclusive unmet status in the final acceptance section. Rejected or inconclusive decisions remain insufficient evidence, with their reviewer reason. Invalid or failed candidate checks are displayed as programmatic `NOT_COMPLETED` assessments, distinct from business evidence gaps. Model assessment replies cannot claim this execution status themselves. They are never automatically promoted to satisfied. Items without a changed-code anchor stay visible for manual review and make completion `INCOMPLETE`. The original audit is saved in `requirement-assessment-audited.md`; `assessment-findings.md` records item/candidate mappings and outcomes.
 
-An invalid response is not an opposite semantic verdict and cannot veto an independently confirmed peer merely by sharing its group. It still marks the run incomplete. Genuine opposite validated verdicts retain the existing publication-conflict safeguard.
+An invalid response is not an opposite semantic verdict and cannot veto an independently confirmed peer merely by sharing its group. It still marks the run incomplete.
+
+## Review-required risks and publication disputes
+
+Validated publication decisions that disagree on the same grouped issue produce a programmatic `DISPUTED` outcome for its positive members. Their corrected findings, citations, implementation premises and base-to-target attribution are retained. They are not counted as confirmed defects. A model cannot output `DISPUTED` to bypass the verification protocol.
+
+The main Findings section separates confirmed defects, review-required risks and unfinished checks. Grouped disputes and evidence gaps are rendered once per available reconciliation group, with candidate IDs, source references, a bounded explanation and a link to the full decisions in `coverage.md`. Invalid model replies remain unfinished checks. A report with review-required items does not use an empty “No verified findings” summary; `COMPLETE` still describes execution, not approval or resolution of every human decision.
+
+Verification distinguishes source-established behavior, the contract that makes it defective, and any downstream impact. A local exception can be proved from base/target implementation without an external business document. The absence of callers limits claims about application outages, not the local behavior itself. Baseline behavior alone does not establish an immutable business contract; an intentional compatibility change may remain a review-required policy question.
+
+Human-facing prose folds actual whitespace instead of reusing audit-record escaping. Literal backslash sequences in code or source quotations are preserved. Full evidence and reviewer explanations remain unabridged in the audit artifacts. `ReviewPublicationTests` covers the empty-input playground case, contradictory decisions, source-only proof, invalid peers, both report languages and cached-response replay through the full pipeline. These checks use simulated model outputs and do not establish a real model's precision or recall.
 
 ## Stable requirement identities during correction
 

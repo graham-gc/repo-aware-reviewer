@@ -214,7 +214,9 @@ final class ReviewPipeline {
             verificationCoverage += ReviewQuality.coverage("Unmet requirement candidate verification", requirementDecisions);
             verificationCoverage += "\nCandidates including unmet requirements: " + preliminary.size() + ". Confirmed before publication: "
                     + preliminary.stream().filter(d -> d.verdict().status() == ReviewOutput.Status.CONFIRMED).count() + ".\n";
-            List<ReviewOutput.Decision> adjudicated = quality.adjudicate(preliminary, assessed.details());
+            ReviewQuality.Adjudication publication = quality.adjudicate(preliminary, assessed.details());
+            List<ReviewOutput.Decision> adjudicated = publication.decisions();
+            List<ReviewConcerns.Item> concerns = ReviewConcerns.collect(preliminary, adjudicated, publication.groups());
             assessed = quality.reconcileAssessment(assessed, assessmentPlan, preliminary, adjudicated);
             String assessment = assessed.summary();
             assessmentSnapshot = assessment;
@@ -236,13 +238,15 @@ final class ReviewPipeline {
                     + "\nPROGRAMMATIC CANDIDATE COUNTS\nDiscovery: " + findings.size() + "; unmet requirements: "
                     + requirementDecisions.size() + "; total: " + preliminary.size()
                     + "\nPROGRAMMATIC REVIEW COMPLETENESS\n" + completion.markdown();
+            reportPrompt += "\nPROGRAMMATIC REVIEW-REQUIRED ITEMS\n" + concerns.size()
+                    + " items will be inserted by the CLI in Findings, separately from confirmed defects. "
+                    + "Do not repeat candidate-by-candidate decisions elsewhere or describe these items as confirmed defects.\n";
             write(runDirectory.resolve("verify-prompt.md"), reportPrompt);
             var reportReplies = ReviewTasks.run(List.of(new ReviewTasks.Task("report", reportPrompt,
-                    reply -> ReviewReport.finalReport(reply, confirmed, language, assessment))), agent, runDirectory,
+                    reply -> ReviewReport.finalReport(reply, confirmed, language, assessment, concerns))), agent, runDirectory,
                     options.reviewParallelism(), progress, 8, totalSteps, "Finalizing report", resume);
             String response = reportReplies.get("report");
-            String report = completion.notice() + ReviewReport.finalReport(response, confirmed, language, assessment)
-                    + ReviewQuality.unresolved(preliminary, adjudicated, language);
+            String report = completion.notice() + ReviewReport.finalReport(response, confirmed, language, assessment, concerns);
             write(runDirectory.resolve("report.md"), report);
             write(runDirectory.resolve("review-status.md"), completion.markdown());
             progress.finish(totalSteps, completion.complete() ? "Wrote report.md" : "Wrote incomplete report.md ("

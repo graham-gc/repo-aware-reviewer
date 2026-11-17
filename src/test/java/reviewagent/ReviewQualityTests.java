@@ -149,8 +149,9 @@ final class ReviewQualityTests {
         var negativeVerdict = new ReviewOutput.Decision(new ReviewOutput.Verification(negative, ReviewOutput.Status.REJECTED,
                 "The policy contradicts this claim", null), ReviewOutput.Relation.PRE_EXISTING, "", "", List.of());
         var reconciled = ReviewQuality.resolveConflicts(List.of(positiveVerdict, negativeVerdict), groups, OutputLanguage.EN);
-        require(reconciled.getFirst().verdict().status() == ReviewOutput.Status.INSUFFICIENT_EVIDENCE,
-                "opposite publication verdicts cannot leak a positive finding through a different candidate ID");
+        require(reconciled.getFirst().verdict().status() == ReviewOutput.Status.DISPUTED
+                && reconciled.getFirst().verdict().confirmed().equals(positiveVerdict.verdict().confirmed()),
+                "opposite publication verdicts preserve the supported candidate as a disputed risk, not a confirmed defect");
         String body = String.join("\n\n", ReviewReport.headings(OutputLanguage.EN))
                 .replace("# Requirement assessment", "# Requirement assessment\n\nFabricated satisfied conclusion.")
                 + "\n<finding-groups/>";
@@ -297,8 +298,9 @@ final class ReviewQualityTests {
                 "--output-dir", fixture.resolve("output").toString(), "--agent-command", "/bin/sh", "--agent-arg", "-c", "--agent-arg", stub});
         Path run = new ReviewPipeline(new ProcessExecutor(), Clock.systemUTC()).run(options);
         String report = Files.readString(run.resolve("report.md"));
-        require(report.contains("Deep failure") && report.contains("Existing acceptance gap") && !report.contains("Disputed policy"),
-                "adjudication suppresses the contradicted confirmation and preserves explicit requirement violations");
+        require(report.contains("Deep failure") && report.contains("Existing acceptance gap") && !report.contains("[HIGH] Disputed policy")
+                && report.contains("[Review required — evidence gap] Disputed policy"),
+                "adjudication separates the contradicted risk from confirmed defects and preserves explicit requirement violations");
         require(Files.exists(run.resolve("verification/round-3/R1-2-response.md")), "verification follows two missing calls across successive rounds");
         require(report.contains("INSUFFICIENT_EVIDENCE") && !report.contains("Fabricated"), "independent requirement audit owns the final acceptance section");
         String coverage = Files.readString(run.resolve("coverage.md"));
