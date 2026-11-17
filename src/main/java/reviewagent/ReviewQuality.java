@@ -13,6 +13,7 @@ import java.util.function.Function;
 
 /** Evidence-driven verification, cross-verdict adjudication and independent acceptance audit. */
 final class ReviewQuality {
+    record Adjudication(List<ReviewOutput.Decision> decisions, List<List<String>> groups) { }
     record AssessmentResult(String details, String summary, List<ReviewOutput.AssessmentItem> items) {
         AssessmentResult(String details, String summary) { this(details, summary, List.of()); }
     }
@@ -46,8 +47,10 @@ final class ReviewQuality {
                 candidate -> Set.of(), "verification", 5, "Verifying candidate issues");
     }
 
-    List<ReviewOutput.Decision> adjudicate(List<ReviewOutput.Decision> preliminary, String assessment) throws IOException, InterruptedException {
-        if (preliminary.stream().noneMatch(d -> d.verdict().status() == ReviewOutput.Status.CONFIRMED)) return List.of();
+    Adjudication adjudicate(List<ReviewOutput.Decision> preliminary, String assessment) throws IOException, InterruptedException {
+        if (preliminary.stream().noneMatch(d -> d.verdict().status() == ReviewOutput.Status.CONFIRMED)) {
+            return new Adjudication(List.of(), List.of());
+        }
         List<ReviewFinding> candidates = preliminary.stream().map(d -> d.verdict().candidate()).toList();
         var groupsReply = tasks(List.of(new ReviewTasks.Task("groups", prompts.groupCandidates(preliminary, session.index()),
                 reply -> ReviewOutput.candidateGroups(reply, candidates))), "adjudication", 7, "Reconciling candidate verdicts");
@@ -65,7 +68,7 @@ final class ReviewQuality {
                 + "Recheck any contradiction between the proposed finding and this assessment against the source.\n" + assessment,
                 candidate -> groupEvidence(related.get(candidate.id())),
                 "adjudication", 7, "Adjudicating findings before publication");
-        return resolveConflicts(adjudicated, groups, OutputLanguage.parse(options.language()));
+        return new Adjudication(resolveConflicts(adjudicated, groups, OutputLanguage.parse(options.language())), groups);
     }
 
     static List<ReviewOutput.Decision> resolveConflicts(List<ReviewOutput.Decision> decisions, List<List<String>> groups,
@@ -78,11 +81,12 @@ final class ReviewQuality {
         }
         return decisions.stream().map(decision -> {
             var verdict = decision.verdict();
-            if (!disputed.contains(verdict.candidate().id()) || verdict.status() != ReviewOutput.Status.CONFIRMED) return decision;
-            String reason = language.text("Publication adjudicators disagree on the same issue; withheld pending clarification. ",
-                    "同一问题的发布前裁决仍有相反结论，保留待确认。 ") + verdict.reason();
+            if (verdict.validationFailed() || !disputed.contains(verdict.candidate().id())
+                    || verdict.status() != ReviewOutput.Status.CONFIRMED) return decision;
+            String reason = language.text("Publication decisions disagree; retained as a review-required risk, not a confirmed defect. Supporting review: ",
+                    "发布裁决存在分歧，保留为需人工确认的风险，不计为确认缺陷。支持意见：") + verdict.reason();
             return new ReviewOutput.Decision(new ReviewOutput.Verification(verdict.candidate(),
-                    ReviewOutput.Status.INSUFFICIENT_EVIDENCE, reason, null), ReviewOutput.Relation.UNRESOLVED,
+                    ReviewOutput.Status.DISPUTED, reason, verdict.confirmed()), decision.relation(),
                     decision.baseline(), decision.contract(), decision.citations(), decision.support());
         }).toList();
     }
@@ -304,23 +308,6 @@ final class ReviewQuality {
                 relation + ": " + finding.diffRelation());
     }
 
-    static String unresolved(List<ReviewOutput.Decision> preliminary, List<ReviewOutput.Decision> adjudicated,
-                             OutputLanguage language) {
-        var pending = latest(preliminary, adjudicated).stream()
-                .filter(d -> d.verdict().status() == ReviewOutput.Status.INSUFFICIENT_EVIDENCE).toList();
-        if (pending.isEmpty()) return "";
-        StringBuilder out = new StringBuilder();
-        for (boolean unfinished : List.of(true, false)) {
-            var group = pending.stream().filter(d -> d.verdict().validationFailed() == unfinished).toList();
-            if (group.isEmpty()) continue;
-            out.append("\n### ").append(unfinished ? language.text("Unfinished checks", "未完成检查")
-                    : language.text("Unconfirmed candidates", "未确认候选")).append("\n\n");
-            for (var decision : group) out.append("- ").append(decision.verdict().candidate().id()).append(": ")
-                    .append(EvidenceText.oneLine(decision.verdict().reason())).append('\n');
-        }
-        return out.toString();
-    }
-
     static Completion completion(List<ReviewOutput.Decision> preliminary, List<ReviewOutput.Decision> adjudicated,
                                  OutputLanguage language) {
         return completion(preliminary, adjudicated, AssessmentFindings.Plan.empty(), language);
@@ -348,6 +335,10 @@ final class ReviewQuality {
                 .append("- Status: ").append(complete ? "COMPLETE" : "INCOMPLETE").append("\n\n")
                 .append(language.text("Completion describes validated review output, not code approval or runtime verification.",
                         "完成状态仅指本轮复核输出有效，不代表代码验收通过或已进行运行验证。")).append("\n\n");
+        long reviewRequired = latest(preliminary, adjudicated).stream().filter(d -> !d.verdict().validationFailed()
+                && (d.verdict().status() == ReviewOutput.Status.DISPUTED
+                    || d.verdict().status() == ReviewOutput.Status.INSUFFICIENT_EVIDENCE)).count();
+        status.append(language.text("Candidates requiring human review: ", "需人工确认的候选数：")).append(reviewRequired).append("\n\n");
         for (var decision : invalid) status.append("- ").append(decision.verdict().candidate().id()).append(": ")
                 .append(decision.verdict().reason()).append('\n');
         for (var item : plan.unmapped()) status.append("- ").append(item.id()).append(": ")

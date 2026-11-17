@@ -69,8 +69,8 @@ final class AssessmentFindings {
             var decision = byId.get(origin.candidate().id());
             out.append("- ").append(origin.item().id()).append(" → ").append(origin.candidate().id()).append(": ")
                     .append(decision == null ? language.text("PENDING", "待复核") : label(decision, language))
-                    .append(" — ").append(EvidenceText.oneLine(origin.item().behavior())).append('\n');
-            if (decision != null) out.append("  - ").append(EvidenceText.oneLine(decision.verdict().reason())).append('\n');
+                    .append(" — ").append(ReportText.inline(origin.item().behavior())).append('\n');
+            if (decision != null) out.append("  - ").append(ReportText.inline(decision.verdict().reason())).append('\n');
         }
         for (var item : plan.unmapped()) out.append("- ").append(item.id()).append(": ")
                 .append(language.text("UNMAPPED — no quoted changed-file implementation location; retained as insufficient evidence.",
@@ -88,7 +88,7 @@ final class AssessmentFindings {
     private static String label(ReviewOutput.Decision decision, OutputLanguage language) {
         if (decision.verdict().validationFailed()) return language.text("NOT_COMPLETED", "复核未完成");
         return language.text(decision.verdict().status().name(), switch (decision.verdict().status()) {
-            case CONFIRMED -> "已确认"; case REJECTED -> "已驳回"; case INSUFFICIENT_EVIDENCE -> "证据不足";
+            case CONFIRMED -> "已确认"; case REJECTED -> "已驳回"; case INSUFFICIENT_EVIDENCE -> "证据不足"; case DISPUTED -> "存在分歧，需人工确认";
         });
     }
 }

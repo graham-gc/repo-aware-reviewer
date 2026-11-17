@@ -1,5 +1,13 @@
 # Review quality backlog
 
+## Playground follow-up — 2026-11-17
+
+A one-file playground change removed an empty-input guard from `average(values)`. Reviewers correctly identified that `average([])` changed from returning `0` to raising `ZeroDivisionError`, but disputed whether preserving the old behavior was a required contract. Publication collapsed the conflict into insufficient evidence and the report led with an empty-findings statement. Repeated candidate essays and audit-escaped newlines obscured the actionable compatibility question.
+
+Publication now preserves this disagreement as a distinct programmatic `DISPUTED` outcome, retaining its source-grounded candidate and proof. The main Findings section displays grouped review-required risks separately from confirmed defects and execution failures. It preserves all independently supported disputed claims, without repeating the original unverified impact allegations. Full decisions remain in coverage; prose summaries are bounded and actual newlines are not rendered as literal escapes. Prompts separate local behavior, compatibility intent and downstream impact, and limit unrelated UI/integration boilerplate.
+
+The minimized regression replays the original three-candidate/two-positive disagreement through verification, publication, rendering and resume using a fake model. It verifies a prominent review-required item without promoting missing business policy to a confirmed defect. Fresh real-model runs remain necessary to assess semantic quality and runtime; these tests do not establish a speedup or overall detection rate.
+
 Recorded: 2026-11-12. These are observations about this review agent, not approved business rules for a reviewed repository.
 
 Reference case: local run `20261112-134821-c21dbab92fd4`, comparing `80507ae77a035aca11550670f23de607f354d676` with `c21dbab92fd42799fb6cb6ed7400ef3bd5b1eb41`. Generated artifacts are local, ignored files under `review-output/`; they are not included in this document. No target build or tests were run for this assessment.

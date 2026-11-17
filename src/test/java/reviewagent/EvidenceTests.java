@@ -199,8 +199,10 @@ final class EvidenceTests {
         String report = Files.readString(run.resolve("report.md"));
         String coverage = Files.readString(run.resolve("coverage.md"));
         require(report.contains("[HIGH] Confirmed defect") && report.contains("[LOW] Independent defect"), "confirmed independent defects retained");
-        require(!report.contains("Duplicate defect") && !report.contains("Rejected defect") && !report.contains("Unproven defect")
+        require(!report.contains("Duplicate defect") && !report.contains("Rejected defect") && !report.contains("[HIGH] Unproven defect")
                 && !report.contains("Fabricated"), "unverified issues and duplicate reports are excluded from final findings");
+        require(report.contains("[Review required — evidence gap] Unproven defect"),
+                "a source gap remains visible without becoming a confirmed defect");
         require(coverage.contains("R1-2 — REJECTED") && coverage.contains("R2-2 — INSUFFICIENT_EVIDENCE")
                 && coverage.contains("Candidates: 5. Confirmed before deduplication: 3."), "individual verification outcomes are recorded");
         require(Files.exists(run.resolve("discovery/R3-response.md")) && Files.exists(run.resolve("verification/R3-1-response.md")),

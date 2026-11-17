@@ -16,7 +16,7 @@ final class ReviewOutput {
     private static final Set<String> ASSESSMENT_FIELDS = ReviewSchema.ASSESSMENT_ITEM;
 
     enum Status {
-        CONFIRMED, REJECTED, INSUFFICIENT_EVIDENCE
+        CONFIRMED, REJECTED, INSUFFICIENT_EVIDENCE, DISPUTED
     }
 
     record Verification(ReviewFinding candidate, Status status, String reason, ReviewFinding confirmed, boolean validationFailed) {
@@ -65,6 +65,7 @@ final class ReviewOutput {
         Status status;
         try {
             status = Status.valueOf(text(fields, "status"));
+            if (status == Status.DISPUTED) throw new IllegalArgumentException("Programmatic publication status only");
         } catch (IllegalArgumentException invalid) {
             throw new IOException("Unknown verification status", invalid);
         }

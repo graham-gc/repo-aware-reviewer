@@ -146,6 +146,16 @@ final class PromptFactory {
                 UNRESOLVED: change relationship or required business policy is unknown. Use INSUFFICIENT_EVIDENCE.
                 Existing code must not be dismissed automatically when a new requirement explicitly covers it.
                 A product-policy preference without a stated contract is a clarification, not a confirmed defect.
+                Separate three questions: what behavior the source proves, whether preserving it is required,
+                and what downstream impact is reachable. Missing downstream callers limit downstream claims;
+                they do not erase a locally proved return value, exception, or base-to-target behavior change.
+                A code-local failure can be established from implementation and diff without a requirements
+                document. Trace callers only when a necessary precondition or claimed impact depends on them.
+                Baseline behavior is evidence of a compatibility change, not automatically a binding business
+                contract. If only the intent of a compatibility change is unknown, preserve its exact trigger,
+                before/after behavior and quotations in the decision, and identify that single open question.
+                Request more evidence for a specific unresolved factual premise; do not repeatedly seek policy
+                documents merely to re-prove a local behavior already established by base and target source.
                 Determine the verdict from the evidence before formatting it. Return exactly one XML document.
                 For CONFIRMED, use the complete structure below, replacing the example descriptions with verified
                 values. The finding element is a direct child of verification and contains the individual fields.
@@ -267,6 +277,10 @@ final class PromptFactory {
                 representative candidate and state that the grouping was unreliable. Do not merge distinct defects.
                 Recheck source sufficiency, applicable policy and base-to-target attribution. Missing policy stays
                 INSUFFICIENT_EVIDENCE. A quoted call to an unread implementation does not prove its behavior.
+                State whether a disagreement concerns the source-level behavior, its required contract, or its
+                downstream impact. An unknown product intention does not refute an observed behavior change.
+                Source-supported compatibility risks remain visible as review-required items when policy is
+                unresolved; do not describe the evidence as absent merely because its defect status is disputed.
                 You may request missing evidence before deciding. Zero published findings is a valid outcome.
                 Your verdict supersedes preliminary verification for the representative issue.
 
@@ -391,6 +405,11 @@ final class PromptFactory {
                 requirement assessment, knowledge-base feedback and verification limits. Discovery notes are
                 unverified context. A concern in those notes must not be presented as a confirmed finding.
                 State unresolved evidence and candidate verification gaps explicitly.
+                The CLI inserts review-required risks and unfinished checks into Findings. Do not repeat raw
+                candidate verdicts, opposing explanations or candidate IDs in other sections. Keep the narrative
+                proportional to the diff; a small utility change does not need unrelated frontend or integration
+                disclaimers. If no requirements or knowledge base was supplied, state that once in its section
+                without inventing a business acceptance assessment or a list of hypothetical missing policies.
                 Check each supplied requirement and observable behavior against the supplied business rules.
                 Cite exact rule section IDs and code evidence. State which behavior changes lacked matching
                 rules or sufficient code. Scoped coverage cannot establish whole-knowledge-base compliance.

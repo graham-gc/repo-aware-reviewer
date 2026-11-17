@@ -29,6 +29,7 @@ public final class AllTests {
         EvidenceTests.run();
         ReviewQualityTests.run();
         ReviewQualityRegressionTests.run();
+        ReviewPublicationTests.run();
         EvidenceReferenceTests.run();
         AssessmentFindingsTests.run();
         AssessmentCorrectionTests.run();
