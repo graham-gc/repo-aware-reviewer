@@ -125,6 +125,10 @@ final class ReviewPipeline {
         OutputLanguage outputLanguage = OutputLanguage.parse(options.language());
         var executionIssues = new ArrayList<String>();
         List<ReviewFinding> published = List.of();
+        List<ReviewOutput.Decision> verifiedSnapshot = List.of();
+        List<ReviewOutput.Decision> adjudicatedSnapshot = List.of();
+        List<List<String>> groupsSnapshot = List.of();
+        AssessmentFindings.Plan planSnapshot = AssessmentFindings.Plan.empty();
         String assessmentSnapshot = requirement == null ? ReviewReport.assessmentMarkdown(List.of(), outputLanguage)
                 : outputLanguage.text("Not completed: no reconciled requirement assessment is available from this execution.",
                     "未完成：本次执行尚未产出经过复核和结论对齐的需求验收结果。");
@@ -200,27 +204,32 @@ final class ReviewPipeline {
             progress.step(5, totalSteps, findings.isEmpty() ? "No candidate findings to verify"
                     : "Verifying candidate issues (0 of " + findings.size() + " complete)");
             List<ReviewOutput.Decision> preliminary = quality.verify(findings);
+            verifiedSnapshot = preliminary;
             String verificationCoverage = ReviewQuality.coverage("Individual candidate verification", preliminary);
             verificationCoverage += "\nCandidates: " + findings.size() + ". Confirmed before deduplication: "
                     + preliminary.stream().filter(d -> d.verdict().status() == ReviewOutput.Status.CONFIRMED).count() + ".\n";
+            write(runDirectory.resolve("coverage.md"), evidence.coverage() + supplemental.coverage() + verificationCoverage);
 
             progress.step(6, totalSteps, "Assessing and independently auditing requirements");
             ReviewQuality.AssessmentResult assessed = quality.assess(requirement, verificationCoverage);
 
             progress.step(7, totalSteps, "Verifying unmet requirements and reconciling verdicts before publication");
             AssessmentFindings.Plan assessmentPlan = quality.planAssessment(assessed);
+            planSnapshot = assessmentPlan;
             List<ReviewOutput.Decision> requirementDecisions = quality.verifyAssessment(assessmentPlan);
             preliminary = java.util.stream.Stream.concat(preliminary.stream(), requirementDecisions.stream()).toList();
+            verifiedSnapshot = preliminary;
             verificationCoverage += ReviewQuality.coverage("Unmet requirement candidate verification", requirementDecisions);
             verificationCoverage += "\nCandidates including unmet requirements: " + preliminary.size() + ". Confirmed before publication: "
                     + preliminary.stream().filter(d -> d.verdict().status() == ReviewOutput.Status.CONFIRMED).count() + ".\n";
+            write(runDirectory.resolve("coverage.md"), evidence.coverage() + supplemental.coverage() + verificationCoverage);
             ReviewQuality.Adjudication publication = quality.adjudicate(preliminary, assessed.details());
             List<ReviewOutput.Decision> adjudicated = publication.decisions();
+            adjudicatedSnapshot = adjudicated;
+            groupsSnapshot = publication.groups();
             List<ReviewConcerns.Item> concerns = ReviewConcerns.collect(preliminary, adjudicated, publication.groups());
-            assessed = quality.reconcileAssessment(assessed, assessmentPlan, preliminary, adjudicated);
-            String assessment = assessed.summary();
-            assessmentSnapshot = assessment;
             verificationCoverage += ReviewQuality.coverage("Publication adjudication", adjudicated);
+            write(runDirectory.resolve("coverage.md"), evidence.coverage() + supplemental.coverage() + verificationCoverage);
             OutputLanguage language = OutputLanguage.parse(options.language());
             List<ReviewFinding> confirmed = adjudicated.stream()
                     .filter(d -> d.verdict().status() == ReviewOutput.Status.CONFIRMED)
@@ -228,8 +237,9 @@ final class ReviewPipeline {
             published = confirmed;
             write(runDirectory.resolve("verified-findings.md"), confirmed.stream().map(finding -> finding.markdown(language))
                     .collect(java.util.stream.Collectors.joining()));
-
-            write(runDirectory.resolve("coverage.md"), evidence.coverage() + supplemental.coverage() + verificationCoverage);
+            assessed = quality.reconcileAssessment(assessed, assessmentPlan, preliminary, adjudicated);
+            String assessment = assessed.summary();
+            assessmentSnapshot = assessment;
             ReviewQuality.Completion completion = ReviewQuality.completion(preliminary, adjudicated, assessmentPlan, executionIssues, language);
 
             progress.step(8, totalSteps, "Deduplicating findings and preparing the report");
@@ -253,10 +263,11 @@ final class ReviewPipeline {
                     + completion.pendingChecks() + " checks remain unresolved)");
             return runDirectory;
         } catch (ReviewStageException incomplete) {
-            executionIssues.add(incomplete.getMessage());
-            var completion = ReviewQuality.completion(List.of(), List.of(), AssessmentFindings.Plan.empty(), executionIssues, outputLanguage);
+            executionIssues.add(incomplete.reportMessage(runDirectory));
+            var completion = ReviewQuality.completion(verifiedSnapshot, adjudicatedSnapshot, planSnapshot, executionIssues, outputLanguage);
+            var concerns = ReviewConcerns.collect(verifiedSnapshot, adjudicatedSnapshot, groupsSnapshot);
             write(runDirectory.resolve("report.md"), completion.notice()
-                    + ReviewReport.incompleteReport(scope, outputLanguage, published, assessmentSnapshot, executionIssues));
+                    + ReviewReport.incompleteReport(scope, outputLanguage, published, concerns, assessmentSnapshot, executionIssues));
             write(runDirectory.resolve("review-status.md"), completion.markdown());
             progress.finish(totalSteps, "Wrote incomplete report.md (required stage did not complete; resume is available)");
             return runDirectory;
@@ -268,7 +279,8 @@ final class ReviewPipeline {
                 write(runDirectory.resolve("review-status.md"), "Status: " + status + "\n\n" + EvidenceText.oneLine(fatal.getMessage()) + "\n");
                 write(runDirectory.resolve("report.md"), outputLanguage.text("> **Review did not complete.** See review-status.md.\n\n",
                         "> **审查未完成。** 详见 review-status.md。\n\n")
-                        + ReviewReport.incompleteReport(scope, outputLanguage, published, assessmentSnapshot, List.of(status)));
+                        + ReviewReport.incompleteReport(scope, outputLanguage, published,
+                            ReviewConcerns.collect(verifiedSnapshot, adjudicatedSnapshot, groupsSnapshot), assessmentSnapshot, List.of(status)));
             } catch (IOException logging) { fatal.addSuppressed(logging); }
             finally { if (interrupted) Thread.currentThread().interrupt(); }
             throw fatal;

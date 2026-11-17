@@ -142,20 +142,24 @@ final class ReviewReport {
         String findingsHeading = headings.get(2);
         int start = report.indexOf("\n" + findingsHeading + "\n") + 1 + findingsHeading.length();
         int end = report.indexOf("\n" + headings.get(3) + "\n", start) + 1;
-        StringBuilder findings = new StringBuilder("\n\n");
+        return report.substring(0, start) + "\n\n" + findingsMarkdown(representatives, concerns, language) + report.substring(end) + "\n";
+    }
+
+    private static String findingsMarkdown(List<ReviewFinding> confirmed, List<ReviewConcerns.Item> concerns, OutputLanguage language) {
+        StringBuilder findings = new StringBuilder();
         if (!concerns.isEmpty()) {
             long unfinished = concerns.stream().filter(item -> item.kind() == ReviewConcerns.Kind.NOT_COMPLETED).count();
-            findings.append(language.text("Confirmed defects: ", "已确认缺陷：")).append(representatives.size())
+            findings.append(language.text("Confirmed defects: ", "已确认缺陷：")).append(confirmed.size())
                     .append(language.text("; review-required items: ", "；需人工确认事项：")).append(concerns.size() - unfinished)
                     .append(language.text("; unfinished checks: ", "；未完成检查：")).append(unfinished).append(".\n\n");
-        } else if (representatives.isEmpty()) {
+        } else if (confirmed.isEmpty()) {
             findings.append(language.text("No verified findings.", "未发现经复核确认的问题。")).append("\n\n");
         }
-        for (ReviewFinding finding : representatives.stream().sorted(Comparator.comparing(ReviewFinding::severity)).toList()) {
+        for (ReviewFinding finding : confirmed.stream().sorted(Comparator.comparing(ReviewFinding::severity)).toList()) {
             findings.append(finding.markdown(language));
         }
         findings.append(ReviewConcerns.markdown(concerns, language));
-        return report.substring(0, start) + findings + report.substring(end) + "\n";
+        return findings.toString();
     }
 
     static List<String> headings(OutputLanguage language) {
@@ -166,13 +170,13 @@ final class ReviewReport {
     }
 
     static String incompleteReport(ReviewScope scope, OutputLanguage language, List<ReviewFinding> published,
-                                   String assessment, List<String> failures) {
-        String findings = published.isEmpty()
+                                   List<ReviewConcerns.Item> concerns, String assessment, List<String> failures) {
+        String findings = published.isEmpty() && concerns.isEmpty()
                 ? language.text("No publishable conclusions are available from the completed stages. This does not mean the change has no defects.",
                     "已完成阶段尚无可发布的结论，这不代表变更没有问题。")
-                : language.text("The following candidates passed publication adjudication; final report grouping may be unfinished.\n\n",
-                    "以下候选已通过发布裁决；最终报告去重可能尚未完成。\n\n")
-                    + published.stream().map(finding -> finding.markdown(language)).collect(java.util.stream.Collectors.joining());
+                : language.text("The following results are retained from completed stages; final report grouping may be unfinished.\n\n",
+                    "以下结果保留自已完成阶段；最终报告去重可能尚未完成。\n\n")
+                    + findingsMarkdown(published, concerns, language);
         List<String> content = List.of(
                 language.text("Base", "基线") + ": `" + scope.baseCommit() + "`\n\n"
                         + language.text("Target", "目标") + ": `" + scope.targetCommit() + "`",

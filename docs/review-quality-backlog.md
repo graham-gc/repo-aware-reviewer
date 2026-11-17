@@ -25,6 +25,14 @@ Other observations from local run `repo-aware-gitlab-20261117-190928` remain qua
 
 The old export lacks the raw failing response/error, so the exact cause of its unfinished candidate cannot be recovered retrospectively. Offline tests establish the new export paths, protocol boundaries and safe metadata, not a real-model precision or latency improvement. No playground-specific production rule, heuristic verdict promotion or new model retry was added for these observations.
 
+### Final consolidation failure — 2026-11-17
+
+Local run `repo-aware-gitlab-20261117-205629` completed verification and publication adjudication. Its final confirmed-finding set was empty; one candidate was disputed and two remained insufficient. The report model supplied an invalid finding group even after correction. Rejecting that group was correct. However, the required-stage fallback then recomputed completion from empty decision lists, omitted the completed review-required risks and reported zero candidates requiring human review. The shared-stage error also retained a temporary container path instead of linking to the exported root-level task checkpoint.
+
+The pipeline now retains the latest completed verification, publication grouping and requirement-plan snapshots for fallback rendering and completion counts. Confirmed findings, evidence gaps, publication disputes and failed checks use the same deterministic presentation in normal and fallback reports. Only publication-approved positives can appear as confirmed defects; a failure earlier in grouping cannot promote initial positive decisions. Coverage is saved at completed stage boundaries. Required-stage exceptions carry typed failed-task references, rendered as run-relative checkpoint links without raw error quotations or temporary absolute paths.
+
+Offline regression cases exercise final grouping rejection with zero confirmed findings, retained grouped disputes and counts, a successful selective resume, earlier grouping/assessment failures, mixed confirmed/uncertain/disputed/rejected/failed outcomes in both languages, and root/nested multi-task diagnostic links. The invalid group still produces `INCOMPLETE` and CLI exit 3. These changes preserve validated work and diagnostics; they neither approve a malformed response nor settle an unspecified business contract.
+
 Recorded: 2026-11-12. These are observations about this review agent, not approved business rules for a reviewed repository.
 
 Reference case: local run `20261112-134821-c21dbab92fd4`, comparing `80507ae77a035aca11550670f23de607f354d676` with `c21dbab92fd42799fb6cb6ed7400ef3bd5b1eb41`. Generated artifacts are local, ignored files under `review-output/`; they are not included in this document. No target build or tests were run for this assessment.

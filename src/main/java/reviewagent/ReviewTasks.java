@@ -107,10 +107,10 @@ final class ReviewTasks {
                 var ordered = new LinkedHashMap<String, Outcome>();
                 tasks.forEach(task -> ordered.put(task.id(), replies.get(task.id())));
                 if (!isolateInvalidOutput && ordered.values().stream().anyMatch(outcome -> !outcome.valid())) {
-                    throw new ReviewStageException(description + " did not complete: " + ordered.entrySet().stream()
-                            .filter(entry -> !entry.getValue().valid()).map(entry -> entry.getKey() + " [" + entry.getValue().failureKind()
-                                    + "]: " + entry.getValue().error()).collect(java.util.stream.Collectors.joining("; "))
-                            + ". See task artifacts in " + directory);
+                    throw new ReviewStageException(description, ordered.entrySet().stream()
+                            .filter(entry -> !entry.getValue().valid())
+                            .map(entry -> new ReviewStageException.FailedTask(entry.getKey(), entry.getValue().failureKind(),
+                                    directory.resolve(entry.getKey() + "-state.properties"))).toList());
                 }
                 return ordered;
             } catch (ExecutionException failure) {

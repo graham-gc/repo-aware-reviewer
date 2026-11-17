@@ -160,7 +160,9 @@ final class ReviewPublicationTests {
                             esac ;;
                           *) exit 91 ;;
                         esac ;;
-                      'You are the candidate reconciliation'*) printf '<candidate-groups><group><id>R1-1</id><id>R2-1</id><id>R3-1</id></group></candidate-groups>' ;;
+                      'You are the candidate reconciliation'*)
+                        if [ -f "$root/fail-groups" ]; then printf '<candidate-groups><group><id>unknown</id></group></candidate-groups>'
+                        else printf '<candidate-groups><group><id>R1-1</id><id>R2-1</id><id>R3-1</id></group></candidate-groups>'; fi ;;
                       'You are the report consolidation'*) cat "$root/report.txt" ;;
                       *) exit 92 ;;
                     esac
@@ -179,6 +181,50 @@ final class ReviewPublicationTests {
             new ReviewPipeline(new ProcessExecutor(), Clock.systemUTC()).run(resume);
             require(Files.readAllLines(fixture.resolve("calls")).size() == calls && Files.readString(run.resolve("report.md")).equals(report),
                     "resume recomputes publication policy from validated saved outputs without another model call");
+
+            // A report model must not put pending IDs into the empty set of confirmed findings.
+            String invalidReport = Files.readString(fixture.resolve("report.txt")).replace("<finding-groups/>",
+                    "<finding-groups><group><id>R2-1</id></group></finding-groups>");
+            Files.writeString(fixture.resolve("report.txt"), invalidReport);
+            Path partial = new ReviewPipeline(new ProcessExecutor(), Clock.systemUTC()).run(options);
+            String fallback = Files.readString(partial.resolve("report.md"));
+            String partialStatus = Files.readString(partial.resolve("review-status.md"));
+            require(Main.reviewExitCode(partial) == 3 && fallback.contains("[Review required — conflicting decisions]")
+                    && fallback.contains("Confirmed defects: 0; review-required items: 1; unfinished checks: 0")
+                    && fallback.contains("ZeroDivisionError") && fallback.contains("R1-1, R2-1, R3-1"),
+                    "invalid final grouping cannot erase completed grouped risks or promote them to confirmed defects");
+            require(partialStatus.contains("Candidates requiring human review: 3")
+                    && partialStatus.contains("Status: INCOMPLETE") && Files.readString(partial.resolve("verified-findings.md")).isEmpty(),
+                    "fallback completion uses the latest real candidate decisions instead of an empty result set");
+            String diagnostic = "[report-state.properties](report-state.properties)";
+            require(fallback.contains(diagnostic) && partialStatus.contains(diagnostic)
+                    && Files.isRegularFile(partial.resolve("report-state.properties"))
+                    && Files.readString(partial.resolve("report-state.properties")).contains("failureKind=INVALID_OUTPUT")
+                    && !fallback.contains(partial.toString()) && !partialStatus.contains(partial.toString()),
+                    "shared report failures reference the exported checkpoint without embedding temporary paths");
+            require(Files.readString(partial.resolve("report-error.txt")).contains("unknown or repeated finding ID"),
+                    "the malformed grouping is still rejected and its full local error retained");
+            Files.writeString(fixture.resolve("report.txt"), String.join("\n\n", ReviewReport.headings(OutputLanguage.EN)) + "\n<finding-groups/>");
+            long beforeRecovery = Files.readAllLines(fixture.resolve("calls")).size();
+            var recover = CliOptions.parse(new String[]{"review", "--repo", repo.toString(), "--resume", partial.toString(),
+                    "--agent-command", "/bin/sh", "--agent-arg", stub.toString()});
+            new ReviewPipeline(new ProcessExecutor(), Clock.systemUTC()).run(recover);
+            require(Main.reviewExitCode(partial) == 0 && Files.readString(partial.resolve("review-status.md")).contains("Candidates requiring human review: 3")
+                    && Files.readAllLines(fixture.resolve("calls")).size() == beforeRecovery + 1
+                    && !Files.exists(partial.resolve("report-error.txt")),
+                    "recovery retries only the invalid report and retains the already completed review decisions");
+
+            Files.createFile(fixture.resolve("fail-groups"));
+            Path blocked = new ReviewPipeline(new ProcessExecutor(), Clock.systemUTC()).run(options);
+            String blockedReport = Files.readString(blocked.resolve("report.md"));
+            require(Main.reviewExitCode(blocked) == 3 && blockedReport.contains("[Review required — evidence gap]")
+                    && blockedReport.contains("Confirmed defects: 0; review-required items: 1; unfinished checks: 0")
+                    && Files.readString(blocked.resolve("review-status.md")).contains("Candidates requiring human review: 1"),
+                    "a grouping failure retains completed evidence-gap decisions without publishing preliminary positives");
+            require(Files.readString(blocked.resolve("coverage.md")).contains("R2-1 — CONFIRMED")
+                    && !Files.exists(blocked.resolve("report-prompt.md"))
+                    && blockedReport.contains("[adjudication/groups-state.properties](adjudication/groups-state.properties)"),
+                    "completed verification remains auditable even when required publication grouping blocks dependent stages");
         } finally {
             try (var paths = Files.walk(fixture)) {
                 for (Path path : paths.sorted(Comparator.reverseOrder()).toList()) Files.delete(path);
