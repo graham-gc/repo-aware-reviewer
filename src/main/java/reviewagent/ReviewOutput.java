@@ -19,9 +19,14 @@ final class ReviewOutput {
         CONFIRMED, REJECTED, INSUFFICIENT_EVIDENCE, DISPUTED
     }
 
-    record Verification(ReviewFinding candidate, Status status, String reason, ReviewFinding confirmed, boolean validationFailed) {
+    record Verification(ReviewFinding candidate, Status status, String reason, ReviewFinding confirmed,
+                        boolean validationFailed, String nextCheck) {
         Verification(ReviewFinding candidate, Status status, String reason, ReviewFinding confirmed) {
-            this(candidate, status, reason, confirmed, false);
+            this(candidate, status, reason, confirmed, false, "");
+        }
+
+        Verification(ReviewFinding candidate, Status status, String reason, ReviewFinding confirmed, boolean validationFailed) {
+            this(candidate, status, reason, confirmed, validationFailed, "");
         }
     }
 
@@ -79,7 +84,9 @@ final class ReviewOutput {
         } else if (fields.containsKey("finding")) {
             throw new IOException("Unconfirmed verification contains a finding");
         }
-        return new Verification(candidate, status, reason, confirmed);
+        String nextCheck = status == Status.INSUFFICIENT_EVIDENCE && fields.containsKey("nextCheck")
+                ? fields.get("nextCheck").getTextContent().strip() : "";
+        return new Verification(candidate, status, reason, confirmed, false, nextCheck);
     }
 
     static Decision decision(String response, ReviewFinding candidate, List<String> changedFiles) throws IOException {

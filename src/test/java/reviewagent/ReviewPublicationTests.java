@@ -15,6 +15,7 @@ final class ReviewPublicationTests {
     private static final String EXPRESSION = "return sum(values) / len(values)";
     private static final String REMOVED = "-    if not values:\n-        return 0";
     private static final String GAP = "The before/after behavior is established.\n\nWhether the interface intentionally changes is not specified.";
+    private static final String NEXT_CHECK = "Ask the API owner whether average([]) must still return zero. If required, the exception is a regression.";
 
     static void run() throws Exception {
         renderingAndProof();
@@ -45,6 +46,7 @@ final class ReviewPublicationTests {
 
     private static String uncertain(String target, String baseline, String removed) {
         return "<verification><status>INSUFFICIENT_EVIDENCE</status><reason>" + GAP + "</reason>"
+                + "<nextCheck>" + NEXT_CHECK + "</nextCheck>"
                 + "<baseline>Empty input changed from returning 0 to raising an exception.</baseline>"
                 + "<citations>" + citation(target, EXPRESSION) + citation(baseline, removed) + "</citations></verification>";
     }
@@ -78,8 +80,9 @@ final class ReviewPublicationTests {
                 GAP, null), ReviewOutput.Relation.UNRESOLVED, "Baseline handled empty input", "Intent is not specified.", r2.citations());
         var retained = ReviewConcerns.collect(List.of(r2), List.of(policyGap), List.of(List.of("R2-1")));
         require(retained.getFirst().representative().equals(r2.verdict().confirmed())
-                && !ReviewConcerns.markdown(retained, OutputLanguage.EN).contains("Every production batch crashes"),
-                "a later policy gap does not reintroduce the raw discovery allegation after grounded impact correction");
+                && !ReviewConcerns.markdown(retained, OutputLanguage.EN).contains("Every production batch crashes")
+                && !ReviewConcerns.markdown(retained, OutputLanguage.EN).contains("Suggested check"),
+                "the old verdict without a suggested check retains the grounded behavioral wording");
         var refuted = new ReviewOutput.Decision(new ReviewOutput.Verification(candidate("R2-1"), ReviewOutput.Status.REJECTED,
                 "A later source disproves this candidate.", null), ReviewOutput.Relation.PRE_EXISTING, "", "", r2.citations());
         var remaining = ReviewConcerns.collect(List.of(r2, r1), List.of(refuted), List.of(List.of("R2-1", "R1-1")));
@@ -95,6 +98,9 @@ final class ReviewPublicationTests {
                     "a review-required risk is neither a confirmed defect nor an empty clean summary; prose is not audit-escaped");
             String label = language.text("Candidate behavior to check", "待核对的候选行为");
             require(report.indexOf(label) == report.lastIndexOf(label), "one semantic group has one behavior summary");
+            String check = language.text("Suggested check", "建议核对步骤") + ": " + NEXT_CHECK;
+            require(report.contains(check) && report.indexOf(check) == report.lastIndexOf(check),
+                    "one validated proposed check is rendered per group with a localized label");
             int risk = report.indexOf(language.text("Review required", "需人工确认"));
             require(risk > report.indexOf(ReviewReport.headings(language).get(2))
                     && risk < report.indexOf(ReviewReport.headings(language).get(3)), "risk is in Findings, before requirements and appendices");
@@ -109,6 +115,9 @@ final class ReviewPublicationTests {
                 && !ReviewQuality.completion(peers, List.of(), OutputLanguage.EN).complete(), "invalid output cannot veto a proved peer or produce a complete run");
         require(ReviewConcerns.collect(peers, List.of(), invalidGroup).getFirst().kind() == ReviewConcerns.Kind.NOT_COMPLETED,
                 "malformed output is visibly unfinished, not a policy dispute");
+        var rejectedWithHint = ReviewOutput.verification("<verification><status>REJECTED</status><reason>Disproved.</reason>"
+                + "<nextCheck>Ignored suggestion.</nextCheck></verification>", candidate("R1-1"), List.of("calculator.py"));
+        require(rejectedWithHint.nextCheck().isEmpty(), "a suggested check only applies to an evidence gap");
         try {
             ReviewOutput.verification("<verification><status>DISPUTED</status><reason>Bypass proof</reason></verification>", candidate("R1-1"), List.of("calculator.py"));
             throw new AssertionError("Models must not set the programmatic disputed status");
@@ -131,8 +140,10 @@ final class ReviewPublicationTests {
             Files.writeString(repo.resolve("calculator.py"), TARGET);
             git(repo, "add", "--all"); git(repo, "commit", "-qm", "target");
             Path stub = fixture.resolve("agent.sh");
-            var options = CliOptions.parse(new String[]{"review", "--repo", repo.toString(), "--output-dir", fixture.resolve("runs").toString(),
-                    "--agent-command", "/bin/sh", "--agent-arg", stub.toString()});
+            var command = List.of("review", "--repo", repo.toString(), "--agent-command", "/bin/sh", "--agent-arg", stub.toString(),
+                    "--agent-arg", "--model=judge", "--discovery-model", "alpha", "--discovery-model", "beta",
+                    "--discovery-model", "gamma");
+            var options = options(command, "--output-dir", fixture.resolve("runs").toString());
             var git = new GitClient(repo, new ProcessExecutor());
             var evidence = new EvidenceCollector(git).collect(git.resolve(options), null, null, CliOptions.KnowledgeMode.FULL, options.maxEvidenceBytes());
             var diff = evidence.catalog().sources().stream().filter(source -> source.role(EvidenceSource.Role.DIFF)).findFirst().orElseThrow();
@@ -145,9 +156,24 @@ final class ReviewPublicationTests {
                     set -eu
                     root=$(dirname "$0")
                     prompt=$(cat)
+                    case "$prompt" in
+                      'You are the discovery stage'*)
+                        [ "$#" -eq 2 ] && [ "$1" = '--model' ] || exit 93
+                        case "$prompt" in
+                          *'Correctness and regressions.'*) [ "$2" = alpha ] || exit 94 ;;
+                          *'Requirements and business contracts.'*) [ "$2" = beta ] || exit 95 ;;
+                          *'Boundary conditions and security.'*) [ "$2" = gamma ] || exit 96 ;;
+                        esac ;;
+                      *) [ "$#" -eq 1 ] && [ "$1" = '--model=judge' ] || exit 97 ;;
+                    esac
                     printf 'call\\n' >> "$root/calls"
                     case "$prompt" in
-                      'You are the discovery stage'*) cat "$root/discovery.xml" ;;
+                      'You are the discovery stage'*)
+                        case "$2:$prompt" in
+                          alpha:*'OUTPUT FORMAT CORRECTION'*) cat "$root/discovery.xml" ;;
+                          alpha:*) printf 'initial malformed discovery' ;;
+                          *) cat "$root/discovery.xml" ;;
+                        esac ;;
                       'You are the independent candidate verification'*|'You are the independent publication adjudication'*)
                         candidate=$(printf '%s\\n' "$prompt" | sed -n '/^CANDIDATE TO VERIFY$/{n;p;}')
                         case "$candidate" in
@@ -170,17 +196,30 @@ final class ReviewPublicationTests {
             Path run = new ReviewPipeline(new ProcessExecutor(), Clock.systemUTC()).run(options);
             String report = Files.readString(run.resolve("report.md"));
             require(report.contains("Confirmed defects: 0; review-required items: 1; unfinished checks: 0")
-                    && report.contains("[Review required — conflicting decisions]") && report.contains("ZeroDivisionError"),
+                    && report.contains("[Review required — conflicting decisions]") && report.contains("ZeroDivisionError")
+                    && report.contains("Suggested check: " + NEXT_CHECK),
                     "the full pipeline surfaces the playground compatibility risk in its main findings");
+            require(Files.isRegularFile(run.resolve("discovery/R1-repair-response.md"))
+                    && Files.readString(run.resolve("scope.md")).contains("Discovery models (R1, R2, R3): alpha, beta, gamma"),
+                    "discovery model assignment is recorded and stays in effect during format correction");
             require(Files.readString(run.resolve("coverage.md")).contains("R2-1 — DISPUTED")
                     && Files.readString(run.resolve("review-status.md")).contains("Status: COMPLETE"),
                     "audit retains the disagreement and complete describes execution, not approval");
             long calls = Files.readAllLines(fixture.resolve("calls")).size();
-            var resume = CliOptions.parse(new String[]{"review", "--repo", repo.toString(), "--resume", run.toString(),
-                    "--agent-command", "/bin/sh", "--agent-arg", stub.toString()});
+            var resume = options(command, "--resume", run.toString());
             new ReviewPipeline(new ProcessExecutor(), Clock.systemUTC()).run(resume);
             require(Files.readAllLines(fixture.resolve("calls")).size() == calls && Files.readString(run.resolve("report.md")).equals(report),
                     "resume recomputes publication policy from validated saved outputs without another model call");
+            var differentRoute = new ArrayList<>(command);
+            differentRoute.set(differentRoute.indexOf("alpha"), "another-model");
+            try {
+                new ReviewPipeline(new ProcessExecutor(), Clock.systemUTC()).run(options(differentRoute, "--resume", run.toString()));
+                throw new AssertionError("Changing a discovery model must require a fresh review");
+            } catch (java.io.IOException expected) {
+                require(expected.getMessage().contains("discovery model assignments")
+                        && Files.readAllLines(fixture.resolve("calls")).size() == calls,
+                        "resume rejects a changed discovery route before launching or reusing tasks");
+            }
 
             // A report model must not put pending IDs into the empty set of confirmed findings.
             String invalidReport = Files.readString(fixture.resolve("report.txt")).replace("<finding-groups/>",
@@ -206,8 +245,7 @@ final class ReviewPublicationTests {
                     "the malformed grouping is still rejected and its full local error retained");
             Files.writeString(fixture.resolve("report.txt"), String.join("\n\n", ReviewReport.headings(OutputLanguage.EN)) + "\n<finding-groups/>");
             long beforeRecovery = Files.readAllLines(fixture.resolve("calls")).size();
-            var recover = CliOptions.parse(new String[]{"review", "--repo", repo.toString(), "--resume", partial.toString(),
-                    "--agent-command", "/bin/sh", "--agent-arg", stub.toString()});
+            var recover = options(command, "--resume", partial.toString());
             new ReviewPipeline(new ProcessExecutor(), Clock.systemUTC()).run(recover);
             require(Main.reviewExitCode(partial) == 0 && Files.readString(partial.resolve("review-status.md")).contains("Candidates requiring human review: 3")
                     && Files.readAllLines(fixture.resolve("calls")).size() == beforeRecovery + 1
@@ -230,6 +268,12 @@ final class ReviewPublicationTests {
                 for (Path path : paths.sorted(Comparator.reverseOrder()).toList()) Files.delete(path);
             }
         }
+    }
+
+    private static CliOptions options(List<String> command, String... extra) {
+        var arguments = new ArrayList<>(command);
+        arguments.addAll(List.of(extra));
+        return CliOptions.parse(arguments.toArray(String[]::new));
     }
 
     private static void git(Path repo, String... arguments) throws Exception {

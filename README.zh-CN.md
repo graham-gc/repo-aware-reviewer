@@ -35,6 +35,37 @@ java -jar build/code-review-agent.jar review \
 
 运行结束后，终端输出本次目录。打开其中的 `report.md`，并检查 `review-status.md`。第一次运行即可做代码审查；需要业务审查但还没有主知识库时，先使用下面的场景 1。
 
+## 工作流程
+
+要找一次代码改动里的问题，走普通审查。要判断新版审查器的报告是否更准确，走盲评，用同一次改动对照新旧两版。
+
+```mermaid
+flowchart TD
+    S{"这次要了解什么？"}
+    S -->|审查代码| R["指定仓库和 Git 范围<br/>可附需求或业务知识库"]
+    S -->|验证审查器| E["选一次真实改动和要比较的审查器版本"]
+    E --> C["从目标仓库准备案例<br/>锁定输入并起草评分标准"]
+    C --> B["核对评分标准，再运行新旧两版<br/>两版收到同一份审查输入"]
+
+    subgraph REVIEW["单次审查流程"]
+        P1["锁定两个 Git 提交"] --> P2["收集 diff、相关源码和业务依据"]
+        P2 --> P3["R1、R2、R3 独立初审，提出候选问题"]
+        P3 --> P4["按请求补充证据"]
+        P4 --> P5["逐条复核候选问题"]
+        P5 --> P6["有需求时逐条验收"]
+        P6 --> P7["发布前裁决，处理重复和分歧"]
+        P7 --> P8["输出报告、证据覆盖和完成状态"]
+    end
+
+    R --> P1
+    B --> P1
+    P8 -->|普通审查| O["交付一份报告<br/>有检查未完成时可续跑"]
+    P8 -->|盲评收齐两份报告| A["随机标成报告 A 和 B"]
+    C -.->|评分标准与可选的参考答案| J["同一位评审核对匿名报告并评分"]
+    A --> J
+    J --> D["揭晓版本，比较评分和耗时"]
+```
+
 ## 常见使用场景
 
 ### 1. 新项目：生成候选业务知识库
@@ -132,6 +163,8 @@ java -jar build/code-review-agent.jar review \
 
 报告的“问题发现”会分别列出已确认缺陷、需人工确认的风险和未完成检查。审查执行完成后仍可能存在待确认事项，完整证据及裁决保留在 `coverage.md`。
 
+证据不足时，报告可附上「建议核对步骤」，说明仍缺哪个前提、维护者可以怎么查，以及哪种结果能解开疑问。步骤由维护者执行，审查程序只做静态分析。
+
 | 退出码 | 含义 |
 | --- | --- |
 | `0` | 输出已完成、仅准备完成，或空 diff 已跳过；不代表代码验收通过。 |
@@ -142,6 +175,31 @@ java -jar build/code-review-agent.jar review \
 模型调用默认超时为 900 秒，可用 `--agent-timeout-seconds` 调整。空响应和明确的临时错误在可验证进程清理后，默认最多额外重试一次；用 `--agent-retries 0` 关闭。检查未完成与业务证据不足会分别标明；审查完成不代表需求全部满足或测试实际运行通过。
 
 候选复核默认按相关完整证据块提供上下文。需要做输入量和质量对照时，可加 `--verification-evidence full` 恢复全量证据；这不会减少独立审查或放宽问题确认标准。
+
+多模型初审可用于对照实验。在 `review` 命令上按 R1、R2、R3 的顺序传三次 `--discovery-model`，例如 `--discovery-model sonnet --discovery-model opus --discovery-model haiku`。仅这三个初审任务及其重试和纠错使用指定模型，续跑需保留同一顺序和模型。
+
+## 盲评审查器
+
+一个盲评案例就是任意本地 Git 仓库里的一次已提交改动，以及评审者用来核对报告的评分标准。下面以「新版能否发现遗漏的数据库迁移」为例。盲评脚本需要 Python 3.11 或以上版本。
+
+```bash
+python3 scripts/review-eval.py prepare \
+  --repo /path/to/project --base main --head HEAD \
+  --focus "检查审查报告是否能发现遗漏的数据库迁移" \
+  --language zh-CN --output outputs/eval-case-01
+```
+
+在 `outputs/eval-case-01/cases.json` 里核对评分草稿。准备时可以用 `--requirement` 或 `--knowledge` 保存文档快照，供两版审查器共用。已有核实过的缺陷时，可用 `--reference /path/to/verified-findings.md` 提供给评审者。没有参考答案时，漏报记为 `N/A`，仍可比较两份报告各有多少条评分标准未达到。
+
+```bash
+python3 scripts/review-eval.py run \
+  --cases outputs/eval-case-01/cases.json \
+  --baseline-jar /path/to/older.jar \
+  --candidate-jar build/code-review-agent.jar \
+  --language zh-CN --output outputs/eval-run-01
+```
+
+将 `outputs/eval-run-01/blind/` 里的两份报告和评分标准交给同一位评审者，并让其能核对固定的代码改动。填完 `blind/grades.csv` 后，运行 `python3 scripts/review-eval.py summarize --output outputs/eval-run-01` 揭晓版本并汇总。 [评分和对照选项](docs/review-performance.md#blind-review-evaluation)
 
 ## 进一步阅读
 

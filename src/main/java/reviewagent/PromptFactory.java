@@ -189,6 +189,12 @@ final class PromptFactory {
                 </verification>
                 ```
                 For REJECTED or INSUFFICIENT_EVIDENCE, omit the finding element and explain the reason.
+                For INSUFFICIENT_EVIDENCE, optionally add a direct child <nextCheck> when a maintainer can resolve
+                the decisive gap with a specific check. State the missing premise, the smallest action at a
+                known entry point (or the exact policy question), and which observation would resolve it.
+                Write a short instruction in the report language. Describe the action in prose, without shell
+                commands. Do not invent entry points, test results or access. This check is proposed, not performed,
+                and is not evidence for the verdict. Omit the field when no concrete check is known.
                 Citations use the short SRC-number references from the inventory or exact block titles, with excerpts of at least 12 characters
                 (whitespace differences are allowed). Include every decisive link, not just a signature or call site.
                 Prefer SRC-number references (for example SRC-17); full EV hashes are legacy identifiers, not text to retype.

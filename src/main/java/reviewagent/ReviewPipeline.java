@@ -93,9 +93,10 @@ final class ReviewPipeline {
         List<ReviewTasks.Task> discoveries = new ArrayList<>();
         for (int i = 0; i < PromptFactory.REVIEW_FOCUSES.size(); i++) {
             String reviewer = "R" + (i + 1);
+            String model = options.discoveryModels().isEmpty() ? null : options.discoveryModels().get(i);
             discoveries.add(new ReviewTasks.Task(reviewer,
                     prompts.independentDiscovery(evidence, PromptFactory.REVIEW_FOCUSES.get(i)),
-                    reply -> ReviewOutput.discovery(reply, reviewer, evidence.changedFiles())));
+                    reply -> ReviewOutput.discovery(reply, reviewer, evidence.changedFiles()), model));
         }
         if (options.prepareOnly()) {
             progress.step(2, totalSteps, "Preparing verification prompt");
@@ -310,7 +311,7 @@ final class ReviewPipeline {
         }
         if (!previous.equals(expected)) {
             throw new IOException("Cannot resume because " + path.getFileName()
-                    + " differs from the saved run. Use the original revisions, documents and evidence settings.");
+                    + " differs from the saved run. Use the original revisions, documents, evidence settings and discovery model assignments.");
         }
     }
 
@@ -358,6 +359,8 @@ final class ReviewPipeline {
                 options.reviewParallelism(), options.verificationEvidence().name().toLowerCase(Locale.ROOT), options.language())
                 + (options.baseRemote() == null ? "" : "- Baseline remote: `" + options.baseRemote() + "`\n"
                     + "- Baseline remote branch: `" + RemoteBaseline.branchRef(options.base()) + "`\n")
+                + (options.discoveryModels().isEmpty() ? "" : "- Discovery models (R1, R2, R3): "
+                    + String.join(", ", options.discoveryModels()) + "\n")
                 + "- Language modules: " + LanguageRegistry.defaults().modules().stream().map(LanguageModule::id)
                         .collect(java.util.stream.Collectors.joining(", ")) + "\n"
                 + "- Language capabilities: " + LanguageRegistry.defaults().capabilitySummary() + "\n"

@@ -10,9 +10,10 @@ import java.util.Set;
 final class ReviewSchema {
     static final Set<String> TEXT = Set.of("id", "title", "severity", "path", "line", "endLine", "trigger", "impact", "evidence",
             "diffRelation", "status", "reason", "relation", "baseline", "contract", "requirement", "requirementText", "behavior",
-            "reasoning", "boundaries", "gap", "source", "quote", "support", "statement", "basis", "policyBasis", "policyReason", "lines", "requirementLines");
+            "reasoning", "boundaries", "gap", "source", "quote", "support", "statement", "basis", "policyBasis", "policyReason", "lines", "requirementLines",
+            "nextCheck");
     static final Set<String> FINDING = Set.of("id", "title", "severity", "path", "line", "endLine", "trigger", "impact", "evidence", "diffRelation");
-    static final Set<String> VERIFICATION = Set.of("status", "reason", "finding", "relation", "baseline", "contract", "citations", "support", "premises");
+    static final Set<String> VERIFICATION = Set.of("status", "reason", "finding", "relation", "baseline", "contract", "citations", "support", "premises", "nextCheck");
     static final Set<String> ASSESSMENT_ITEM = Set.of("id", "requirement", "requirementText", "behavior", "status", "reasoning", "boundaries", "gap",
             "citations", "policyBasis", "policyReason", "requirementLines");
     private static final Set<String> LISTS = Set.of("findings", "premises", "citations", "assessment", "candidate-groups", "finding-groups", "group");

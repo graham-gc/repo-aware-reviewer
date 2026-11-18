@@ -85,6 +85,13 @@ final class ReviewConcerns {
             String gap = item.kind() == Kind.NOT_COMPLETED || contrary.contract().isBlank()
                     ? contrary.verdict().reason() : contrary.contract();
             bullet(out, language.text("Decision / gap summary", "结论或缺口摘要"), ReportText.summary(gap, 300));
+            if (item.kind() != Kind.NOT_COMPLETED) {
+                item.members().stream().map(ReviewOutput.Decision::verdict)
+                        .filter(v -> v.status() == ReviewOutput.Status.INSUFFICIENT_EVIDENCE && !v.validationFailed())
+                        .map(ReviewOutput.Verification::nextCheck).filter(check -> !check.isBlank()).findFirst()
+                        .ifPresent(check -> bullet(out, language.text("Suggested check", "建议核对步骤"),
+                                ReportText.summary(check, 400)));
+            }
             String references = item.citations().stream()
                     .map(c -> ReviewReport.citationReference(c, language)).distinct().limit(6)
                     .map(reference -> "`" + reference + "`").collect(java.util.stream.Collectors.joining("; "));

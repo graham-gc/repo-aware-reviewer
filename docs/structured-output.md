@@ -78,6 +78,8 @@ The main Findings section separates confirmed defects, review-required risks and
 
 Verification distinguishes source-established behavior, the contract that makes it defective, and any downstream impact. A local exception can be proved from base/target implementation without an external business document. The absence of callers limits claims about application outages, not the local behavior itself. Baseline behavior alone does not establish an immutable business contract; an intentional compatibility change may remain a review-required policy question.
 
+An `INSUFFICIENT_EVIDENCE` verification may include an optional `<nextCheck>` with a maintainer action and the observation or policy answer that would resolve the gap. The renderer uses at most one suggestion per review-required item, including grouped disputes. The field is advisory, and the evidence and publication checks determine the verdict. Older responses remain valid with the field omitted.
+
 Human-facing prose folds actual whitespace instead of reusing audit-record escaping. Literal backslash sequences in code or source quotations are preserved. Full evidence and reviewer explanations remain unabridged in the audit artifacts. `ReviewPublicationTests` covers the empty-input playground case, contradictory decisions, source-only proof, invalid peers, both report languages and cached-response replay through the full pipeline. These checks use simulated model outputs and do not establish a real model's precision or recall.
 
 ## Stable requirement identities during correction

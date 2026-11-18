@@ -21,7 +21,8 @@ final class ReviewTasks {
         default String correctionInstructions(IOException failure) { return ""; }
     }
 
-    record Task(String id, String prompt, Validator validator) {
+    record Task(String id, String prompt, Validator validator, String model) {
+        Task(String id, String prompt, Validator validator) { this(id, prompt, validator, null); }
     }
 
     record Outcome(String response, String error, String failureKind) {
@@ -67,7 +68,7 @@ final class ReviewTasks {
                             return new Reply(task.id(), new Outcome(null, "Blocked by a global failure", "GLOBAL_FAILURE"));
                         }
                         state(directory, task, "RUNNING", "");
-                        try (var budget = agent.task()) {
+                        try (var budget = agent.task(task.model())) {
                             String response = invoke(task, agent, directory, resume);
                             Files.deleteIfExists(directory.resolve(task.id() + "-error.txt"));
                             state(directory, task, "SUCCEEDED", "");

@@ -13,6 +13,7 @@ import java.util.List;
 public final class AllTests {
     public static void main(String[] args) throws Exception {
         testCliDefaults();
+        testDiscoveryModels();
         testRequestLimits();
         testReviewLanguage();
         testMutuallyExclusiveScopes();
@@ -155,6 +156,19 @@ public final class AllTests {
                 "review", "--repo", ".", "--resume", "saved-run"}).resumeDirectory());
         throwsArgument(() -> CliOptions.parse(new String[]{
                 "review", "--repo", ".", "--knowledge-mode", "scoped"
+        }));
+    }
+
+    private static void testDiscoveryModels() {
+        equal(List.of(), CliOptions.parse(new String[]{"review", "--repo", "."}).discoveryModels());
+        equal(List.of("sonnet", "provider/model[1m]", "sonnet"), CliOptions.parse(new String[]{
+                "review", "--repo", ".", "--discovery-model", "sonnet",
+                "--discovery-model", "provider/model[1m]", "--discovery-model", "sonnet"
+        }).discoveryModels());
+        throwsArgument(() -> CliOptions.parse(new String[]{"review", "--repo", ".", "--discovery-model", "sonnet"}));
+        throwsArgument(() -> CliOptions.parse(new String[]{
+                "review", "--repo", ".", "--discovery-model", "sonnet", "--discovery-model", "--model",
+                "--discovery-model", "haiku"
         }));
     }
 
