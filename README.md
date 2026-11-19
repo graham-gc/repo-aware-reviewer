@@ -6,20 +6,27 @@ Review committed Git changes through your local Claude Code setup, with optional
 
 ## First use
 
-### 1. Prepare and build
+### 1. Prepare the CLI
 
-Install JDK 21 or later, Git and Bash, and have a working, configured `claude` command. The project to review must be available locally, including the target commit and its parent.
+Install Java 21 or later, Git and Bash, and have a working, configured `claude` command. The project to review must be available locally, including the target commit and its parent.
+
+For a published version, download `code-review-agent.jar` from [Releases](https://github.com/graham-gc/repo-aware-reviewer/releases) and substitute its path in the examples below. To build from source, use JDK 21 or later.
 
 ```bash
 git clone https://github.com/graham-gc/repo-aware-reviewer.git
 cd repo-aware-reviewer
 bash scripts/build.sh
+```
+
+Check your Claude Code setup before your first review.
+
+```bash
 printf '%s\n' 'Reply with OK.' | claude -p
 ```
 
 Once the check returns `OK`, the CLI can reuse your local Claude Code authentication and model routing; no separate API key setup is required. If you already have this tool's checkout, enter its directory and build it.
 
-Run the examples below from this tool's project directory. `/path/to/project` refers to the project being reviewed. Replace example paths and `abc1234`. When running elsewhere, use an absolute JAR path.
+The examples below assume you built the JAR from source and are running from this tool's project directory. `/path/to/project` refers to the project being reviewed. Replace example paths and `abc1234`. When running elsewhere, use an absolute JAR path.
 
 ### 2. Run your first code review
 
@@ -216,6 +223,12 @@ python3 scripts/review-eval.py run \
 ```
 
 Give the same grader the two reports and criteria in `outputs/eval-run-01/blind/`, plus access to the pinned change for verification. After the grader fills in `blind/grades.csv`, reveal and summarize the results with `python3 scripts/review-eval.py summarize --output outputs/eval-run-01`. [Scoring and experiment options](docs/review-performance.md#blind-review-evaluation)
+
+## Contributing
+
+Open a pull request against `main`. CI runs the Java, GitLab integration and blind evaluation tests. Use public fixtures or sanitized samples when sharing review cases and logs. Keep internal knowledge bases and project-specific review reports outside this public repository.
+
+Maintainers can push a version tag such as `v0.1.0` on a commit in `main` history. After CI passes, GitHub Actions prepares a release draft with the JAR and its SHA-256 checksum for maintainer review and publication.
 
 ## Further reading
 

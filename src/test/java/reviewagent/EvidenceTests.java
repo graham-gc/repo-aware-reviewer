@@ -217,7 +217,7 @@ final class EvidenceTests {
         Files.copy(run.resolve("verification/R3-1-response.md"), savedReply);
         Files.delete(run.resolve("verification/R3-1-response.md"));
         CliOptions incomplete = CliOptions.parse(new String[]{"review", "--repo", repo.toString(), "--resume", run.toString(),
-                "--agent-command", "/bin/sh", "--agent-arg", "-c", "--agent-arg", "cat \"$1\"",
+                "--agent-command", "/bin/sh", "--agent-arg", "-c", "--agent-arg", "cat >/dev/null && cat \"$1\"",
                 "--agent-arg", "resume-stub", "--agent-arg", savedReply.toString()});
         new ReviewPipeline(new ProcessExecutor(), Clock.systemUTC()).run(incomplete);
         require(Files.readString(run.resolve("report.md")).equals(report), "resume invokes only the missing verification task");

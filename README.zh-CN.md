@@ -6,20 +6,27 @@
 
 ## 首次使用
 
-### 1. 准备并构建
+### 1. 准备 CLI
 
-需要 JDK 21 或以上版本、Git、Bash，以及已经配置好、能正常运行的 `claude` 命令。目标项目须在本地，包含要审查的提交及其父提交。
+需要 Java 21 或以上版本、Git、Bash，以及已经配置好、能正常运行的 `claude` 命令。目标项目须在本地，包含要审查的提交及其父提交。
+
+要使用正式版本，从 [Releases](https://github.com/graham-gc/repo-aware-reviewer/releases) 下载 `code-review-agent.jar`，并将下方示例中的 JAR 路径替换为下载位置。从源码构建需要 JDK 21 或以上版本。
 
 ```bash
 git clone https://github.com/graham-gc/repo-aware-reviewer.git
 cd repo-aware-reviewer
 bash scripts/build.sh
+```
+
+首次审查前，检查 Claude Code 是否可用。
+
+```bash
 printf '%s\n' '只回复 OK' | claude -p
 ```
 
 返回 `OK` 后即可使用。本工具复用本机 Claude Code 的认证和模型路由，无需另行配置 API Key。已有本工具代码时，直接进入其目录构建即可。
 
-下方命令均在本工具项目目录执行。`/path/to/project` 是被审查项目；请替换示例路径和 `abc1234`。从其他目录调用时，将 JAR 路径改为绝对路径。
+下方示例以从源码构建并在本工具项目目录执行为例。`/path/to/project` 是被审查项目。请替换示例路径和 `abc1234`。从其他目录调用时，将 JAR 路径改为绝对路径。
 
 ### 2. 完成第一次代码审查
 
@@ -216,6 +223,12 @@ python3 scripts/review-eval.py run \
 ```
 
 将 `outputs/eval-run-01/blind/` 里的两份报告和评分标准交给同一位评审者，并让其能核对固定的代码改动。填完 `blind/grades.csv` 后，运行 `python3 scripts/review-eval.py summarize --output outputs/eval-run-01` 揭晓版本并汇总。 [评分和对照选项](docs/review-performance.md#blind-review-evaluation)
+
+## 参与贡献
+
+向 `main` 提交 PR。CI 会运行 Java、GitLab 集成和盲评测试。分享审查案例和日志时，使用公开测试数据或脱敏样例。内部知识库和真实项目的审查报告保存在公开仓库之外。
+
+维护者可以在 `main` 历史中的提交上推送版本标签，例如 `v0.1.0`。CI 通过后，GitHub Actions 会生成附带 JAR 和 SHA-256 校验文件的发布草稿，由维护者核对后发布。
 
 ## 进一步阅读
 
