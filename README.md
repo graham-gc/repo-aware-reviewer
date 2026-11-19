@@ -49,16 +49,20 @@ flowchart TD
 
     subgraph REVIEW["Single review"]
         P1["Resolve the two Git revisions"] --> P2["Collect the diff, source and business evidence"]
-        P2 --> Q{"Local change with complete evidence?"}
-        Q -->|Yes| L["One structured review with source validation"]
+        P2 --> Q{"Which review route applies?"}
+        Q -->|Local change with complete evidence| L["One structured review with source validation"]
         Q -->|Multiple files or risk signals| F["Review selected risk areas and the remaining diff excerpts"]
-        Q -->|Explicit deep review or supplied rules| P3["R1, R2 and R3 independently propose findings"]
-        F -->|Specific new evidence available| T
-        F -->|Ready or no further evidence| P8
-        L -->|Specific new evidence needed| T["Verify the affected candidate"]
+        Q -->|Deep review requested or required| P3["R1, R2 and R3 independently propose findings"]
+        F --> FC["If a confirmed candidate has a broken citation,<br/>try one correction with the supplied source"]
+        FC --> FN{"Did a candidate receive new evidence?"}
+        FN -->|Yes| FV["Recheck only that candidate"]
+        FN -->|No| FP["Check impact and severity against the evidence<br/>Summarize the final decisions"]
+        FV --> FP
+        FP --> P8
+        L -->|Specific new evidence available| T["Verify the affected candidate"]
         L -->|Broader risk or conflicting conclusions| P3
         T -->|Broader risk| P3
-        L -->|Ready| P8
+        L -->|Ready or no new evidence| P8
         T -->|Ready| P8
         P3 --> P4["Provide additional evidence on request"]
         P4 --> P5["Verify each proposed finding"]
