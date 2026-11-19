@@ -18,13 +18,28 @@ import java.util.regex.Pattern;
 
 /** XML envelope and scalar decoding only; no review policy or report rendering. */
 final class ReviewXml {
-    private static final Pattern XML_BLOCK = Pattern.compile(
-            "(?ms)^ {0,3}(`{3,}|~{3,})[ \\t]*(?i:xml)?[ \\t]*\\R(.*?)^ {0,3}\\1[ \\t]*(?:\\R|$)");
+    private static final Pattern FENCE_LINE = Pattern.compile(
+            "(?m)^ {0,3}(`{3,}|~{3,})([^\\r\\n]*)(?:\\r\\n|\\n|\\r|$)");
     record XmlBlock(Element root, String remainder, List<String> normalizations) {
         XmlBlock(Element root, String remainder) { this(root, remainder, List.of()); }
     }
 
     record Span(int start, int end) {
+    }
+
+    private static final class MissingResponseBlock extends IOException {
+        private final String rootName;
+
+        MissingResponseBlock(String rootName) {
+            super("Missing " + rootName + " XML response block");
+            this.rootName = rootName;
+        }
+    }
+
+    static boolean missingResponseBlock(IOException failure, String rootName) {
+        // xml() can wrap the original failure when delimiter recovery has no unique result.
+        Throwable original = failure instanceof MissingResponseBlock ? failure : failure.getCause();
+        return original instanceof MissingResponseBlock missing && missing.rootName.equals(rootName);
     }
 
     static Map<String, Element> fields(Element root, Set<String> allowed) throws IOException {
@@ -92,17 +107,7 @@ final class ReviewXml {
     private static XmlBlock strict(String response, String rootName) throws IOException {
         Span span = rootSpan(response, rootName);
         String content = response.substring(span.start(), span.end());
-        int start = span.start();
-        int end = span.end();
-        var blocks = XML_BLOCK.matcher(response);
-        while (blocks.find()) {
-            if (blocks.start(2) <= start && blocks.end(2) >= end
-                    && trivia(response.substring(blocks.start(2), start)) && trivia(response.substring(end, blocks.end(2)))) {
-                start = blocks.start();
-                end = blocks.end();
-                break;
-            }
-        }
+        Span envelope = envelope(response, span);
         try {
             var factory = DocumentBuilderFactory.newInstance();
             factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
@@ -125,13 +130,56 @@ final class ReviewXml {
             }
             ReviewSchema.validate(root);
             XmlStructureRepair.checkTextBoundaries(content);
-            return new XmlBlock(root, response.substring(0, start) + response.substring(end));
+            return new XmlBlock(root, response.substring(0, envelope.start()) + response.substring(envelope.end()));
         } catch (SAXParseException invalid) {
             throw new IOException("Invalid " + rootName + " response structure at line " + invalid.getLineNumber()
                     + ", column " + invalid.getColumnNumber() + ": " + invalid.getMessage(), invalid);
         } catch (ParserConfigurationException | SAXException invalid) {
             throw new IOException("Invalid " + rootName + " response structure", invalid);
         }
+    }
+
+    /** Track every fence language so an earlier code block's closer cannot become a new opener. */
+    private static Span envelope(String response, Span root) throws IOException {
+        var lines = FENCE_LINE.matcher(response);
+        String opening = null;
+        String info = "";
+        int start = -1, contentStart = -1;
+        while (lines.find()) {
+            // Source quotations and CDATA inside the already located XML root remain opaque.
+            if (lines.start() >= root.start() && lines.start() < root.end()) continue;
+            String fence = lines.group(1);
+            String tail = lines.group(2);
+            if (opening == null) {
+                if (lines.start() > root.start()) break;
+                if (fence.charAt(0) == '`' && tail.indexOf('`') >= 0) continue;
+                opening = fence;
+                info = tail.strip();
+                start = lines.start();
+                contentStart = lines.end();
+            } else if (fence.charAt(0) == opening.charAt(0) && fence.length() >= opening.length()
+                    && tail.matches("[ \\t]*")) {
+                if (contentStart <= root.start() && root.end() <= lines.start()) {
+                    if (!info.isEmpty() && !info.equalsIgnoreCase("xml")) {
+                        throw new IOException("Review XML response is inside a non-protocol code block");
+                    }
+                    if (trivia(response.substring(contentStart, root.start())) && trivia(response.substring(root.end(), lines.start()))) {
+                        return new Span(start, lines.end());
+                    }
+                }
+                opening = null;
+            }
+        }
+        // Markdown permits an EOF-terminated fence; the XML root itself must still be complete.
+        if (opening != null && contentStart <= root.start()) {
+            if (!info.isEmpty() && !info.equalsIgnoreCase("xml")) {
+                throw new IOException("Review XML response is inside a non-protocol code block");
+            }
+            if (trivia(response.substring(contentStart, root.start())) && trivia(response.substring(root.end()))) {
+                return new Span(start, response.length());
+            }
+        }
+        return root;
     }
 
     private static boolean trivia(String value) {
@@ -192,7 +240,7 @@ final class ReviewXml {
             }
         }
         if (result == null || depth != 0) {
-            throw new IOException("Missing " + rootName + " XML response block");
+            throw new MissingResponseBlock(rootName);
         }
         return result;
     }

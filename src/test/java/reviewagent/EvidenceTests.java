@@ -192,15 +192,17 @@ final class EvidenceTests {
                 """.replace("FIRST_XML", first).replace("REJECTED_XML", rejected).replace("DUPLICATE_XML", duplicate)
                 .replace("INSUFFICIENT_XML", insufficient).replace("SEPARATE_XML", separate)
                 .replace("GROUNDING_XML", grounding("Z-small.java", "class ZSmall { int change = 7; }"));
-        CliOptions options = CliOptions.parse(new String[]{"review", "--repo", repo.toString(), "--review-parallelism", "2",
+        CliOptions options = CliOptions.parse(new String[]{"review", "--repo", repo.toString(), "--review-parallelism", "2", "--review-mode", "deep",
                 "--output-dir", fixture.resolve("multi-review").toString(), "--agent-command", "/bin/sh", "--agent-arg", "-c",
                 "--agent-arg", stub, "--agent-arg", "multi-review-stub", "--agent-arg", signals.toString()});
         Path run = new ReviewPipeline(new ProcessExecutor(), Clock.systemUTC()).run(options);
         String report = Files.readString(run.resolve("report.md"));
         String coverage = Files.readString(run.resolve("coverage.md"));
         require(report.contains("[HIGH] Confirmed defect") && report.contains("[LOW] Independent defect"), "confirmed independent defects retained");
-        require(!report.contains("Duplicate defect") && !report.contains("Rejected defect") && !report.contains("Unproven defect")
+        require(!report.contains("Duplicate defect") && !report.contains("Rejected defect") && !report.contains("[HIGH] Unproven defect")
                 && !report.contains("Fabricated"), "unverified issues and duplicate reports are excluded from final findings");
+        require(report.contains("[Review required — evidence gap] Unproven defect"),
+                "a source gap remains visible without becoming a confirmed defect");
         require(coverage.contains("R1-2 — REJECTED") && coverage.contains("R2-2 — INSUFFICIENT_EVIDENCE")
                 && coverage.contains("Candidates: 5. Confirmed before deduplication: 3."), "individual verification outcomes are recorded");
         require(Files.exists(run.resolve("discovery/R3-response.md")) && Files.exists(run.resolve("verification/R3-1-response.md")),

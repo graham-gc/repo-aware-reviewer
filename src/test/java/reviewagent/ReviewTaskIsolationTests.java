@@ -20,6 +20,8 @@ final class ReviewTaskIsolationTests {
         batchIsolation();
         incompleteReportAndResume();
         completionUsesLatestVerdict();
+        fallbackRetainsMixedResults();
+        sharedFailureReferences();
     }
 
     private static void batchIsolation() throws Exception {
@@ -36,10 +38,20 @@ final class ReviewTaskIsolationTests {
                     "an invalid candidate stays untrusted while a concurrent peer completes");
             require(Files.readString(dir.resolve("bad-error.txt")).contains("bounded output correction")
                     && Files.readString(dir.resolve("bad-repair-response.md")).equals(MALFORMED + "\n"), "invalid output and error artifacts are preserved");
+            String diagnostic = Files.readString(dir.resolve("bad-state.properties"));
+            require(diagnostic.contains("status=FAILED") && diagnostic.contains("failureKind=INVALID_OUTPUT")
+                    && diagnostic.contains("failureCategory=") && !diagnostic.contains("minimax") && !diagnostic.contains("EV-invalid"),
+                    "shareable diagnostics preserve failure categories without model text or source quotations");
             var retry = shell(dir, "prompt=$(cat); case \"$prompt\" in *GOOD_TASK*) exit 87;; *) cat <<'FIXED'\n" + REJECTED + "\nFIXED\n;; esac");
             var resumed = ReviewTasks.runIsolated(tasks, retry, dir, 2, progress, 1, 2, "Resume candidates", true);
             require(resumed.values().stream().allMatch(ReviewTasks.Outcome::valid) && !Files.exists(dir.resolve("bad-error.txt")),
                     "resume reuses the valid peer, retries the invalid response and clears its error only after validation");
+            require(Files.readString(dir.resolve("bad-state.properties")).contains("failureCategory=\n")
+                    && Files.readString(dir.resolve("bad-state.properties")).contains("status=SUCCEEDED"),
+                    "a validated resume clears the previous diagnostic category");
+            require(Files.readString(dir.resolve("bad-validation.log")).contains("event=VALIDATION_REJECTED")
+                    && !Files.readString(dir.resolve("bad-validation.log")).contains("minimax"),
+                    "successful recovery preserves safe validation history after clearing the task's current failure state");
             fails(() -> ReviewTasks.run(List.of(tasks.getFirst()), agent, dir.resolve("strict"), 1, progress, 1, 2, "Strict phase", false));
             var unavailable = ReviewTasks.runIsolated(tasks, shell(dir, "exit 9"), dir.resolve("transport"), 1,
                     progress, 1, 2, "Transport failure", false);
@@ -92,7 +104,7 @@ final class ReviewTaskIsolationTests {
                 """.replace("DISCOVERIES", discoveries).replace("INVALID_REPLY", MALFORMED)
                 .replace("REJECTED_REPLY", REJECTED).replace("FINAL_REPORT", finalReport);
         var args = new ArrayList<>(List.of("review", "--repo", repo.toString(), "--language", "zh-CN", "--output-dir", dir.resolve("runs").toString(),
-                "--agent-command", "/bin/sh", "--agent-arg", "-c", "--agent-arg", script));
+                "--review-mode", "deep", "--agent-command", "/bin/sh", "--agent-arg", "-c", "--agent-arg", script));
         Path run = new ReviewPipeline(new ProcessExecutor(), Clock.systemUTC()).run(CliOptions.parse(args.toArray(String[]::new)));
         String report = Files.readString(run.resolve("report.md"));
         require(report.startsWith("> **审查未完成：**") && report.contains("R1-1") && report.contains("未完成复核")
@@ -101,6 +113,9 @@ final class ReviewTaskIsolationTests {
                 && Files.readString(run.resolve("verified-findings.md")).isEmpty(), "failed candidates cannot become published findings");
         require(Files.isRegularFile(run.resolve("verification/R1-1-error.txt"))
                 && Files.readString(run.resolve("verification/R1-2-response.md")).contains("REJECTED"), "the valid peer and failure record both survive");
+        require(report.contains("[verification/R1-1-state.properties](verification/R1-1-state.properties)")
+                && Files.isRegularFile(run.resolve("verification/R1-1-state.properties")),
+                "unfinished candidates link to existing shareable status diagnostics instead of private raw errors");
 
         String resumeScript = "prompt=$(cat); case \"$prompt\" in 'You are the independent candidate verification'*'"
                 + "<finding id=\"R1-1\">'*) cat <<'FIXED'\n" + REJECTED + "\nFIXED\n;; "
@@ -122,6 +137,67 @@ final class ReviewTaskIsolationTests {
         require(ReviewQuality.completion(List.of(resolved), List.of(invalid), OutputLanguage.EN).notice().contains("Review incomplete"),
                 "publication validation failure cannot inherit a complete preliminary status");
         require(ReviewQuality.completion(List.of(invalid), List.of(resolved), OutputLanguage.EN).complete(), "a later valid verdict supersedes an old failure");
+    }
+
+    private static void fallbackRetainsMixedResults() {
+        var confirmed = finding("R1-1", "Published finding");
+        var gap = finding("R2-1", "Contract gap");
+        var unfinished = finding("R3-1", "Failed check");
+        var rejected = finding("R4-1", "Rejected allegation");
+        var disputed = finding("R5-1", "Conflicting decisions");
+        var results = List.of(
+                new ReviewOutput.Decision(new ReviewOutput.Verification(confirmed, ReviewOutput.Status.CONFIRMED, "Proved", confirmed),
+                        ReviewOutput.Relation.INTRODUCED, "", "", List.of()),
+                new ReviewOutput.Decision(new ReviewOutput.Verification(gap, ReviewOutput.Status.INSUFFICIENT_EVIDENCE, "Missing contract", null),
+                        ReviewOutput.Relation.UNRESOLVED, "", "", List.of()),
+                new ReviewOutput.Decision(new ReviewOutput.Verification(unfinished, ReviewOutput.Status.INSUFFICIENT_EVIDENCE, "No valid reply", null, true),
+                        ReviewOutput.Relation.UNRESOLVED, "", "", List.of()),
+                new ReviewOutput.Decision(new ReviewOutput.Verification(rejected, ReviewOutput.Status.REJECTED, "Disproved", null),
+                        ReviewOutput.Relation.PRE_EXISTING, "", "", List.of()),
+                new ReviewOutput.Decision(new ReviewOutput.Verification(disputed, ReviewOutput.Status.DISPUTED, "Contract disputed", disputed),
+                        ReviewOutput.Relation.INTRODUCED, "", "", List.of()));
+        var scope = new ReviewScope(ReviewScope.Mode.BRANCH, "base", "head", "base", "head", "base..head");
+        for (var language : OutputLanguage.values()) {
+            var concerns = ReviewConcerns.collect(results, List.of(), List.of());
+            var completion = ReviewQuality.completion(results, List.of(), AssessmentFindings.Plan.empty(), List.of("Report failed"), language);
+            String report = ReviewReport.incompleteReport(scope, language, List.of(confirmed), concerns, "RETAINED_ASSESSMENT", List.of("Report failed"));
+            require(report.contains(language.text("Confirmed defects: 1; review-required items: 2; unfinished checks: 1",
+                    "已确认缺陷：1；需人工确认事项：2；未完成检查：1")) && report.contains("Published finding")
+                    && report.contains("R2-1") && report.contains("R3-1") && report.contains("R5-1")
+                    && report.contains("RETAINED_ASSESSMENT") && !report.contains("Rejected allegation"),
+                    "fallback retains confirmed, uncertain, disputed and failed results without resurrecting rejected findings in either language");
+            require(!completion.complete() && completion.invalidCandidates() == 1 && completion.failedTasks() == 1
+                    && completion.markdown().contains(language.text("Candidates requiring human review: 2", "需人工确认的候选数：2")),
+                    "unfinished execution and human-review counts remain separate in fallback status");
+        }
+    }
+
+    private static void sharedFailureReferences() throws Exception {
+        Path root = Files.createTempDirectory("shared-stage-diagnostics-");
+        try (var progress = new CommandProgress("test", new java.io.PrintStream(java.io.OutputStream.nullOutputStream()))) {
+            for (String stage : List.of("", "assessment", "assessment/round-2", "adjudication")) {
+                Path directory = root.resolve(stage);
+                var tasks = List.of(new ReviewTasks.Task("first", "one", reply -> { throw new SourceQuotationException("PRIVATE_QUOTATION"); }),
+                        new ReviewTasks.Task("second", "two", reply -> { throw new IOException("PRIVATE_MODEL_TEXT"); }));
+                try {
+                    ReviewTasks.run(tasks, shell(root, "cat >/dev/null; printf INVALID"), directory, 2, progress, 1, 2, "Shared stage", false);
+                    throw new AssertionError("Expected a shared-stage failure");
+                } catch (ReviewStageException failure) {
+                    String message = failure.reportMessage(root);
+                    for (String id : List.of("first", "second")) {
+                        String relative = root.relativize(directory.resolve(id + "-state.properties")).toString();
+                        require(message.contains("[" + relative + "](" + relative + ")")
+                                && Files.isRegularFile(root.resolve(relative)), "each failed shared task links to an existing run-relative checkpoint");
+                    }
+                    require(!message.contains(root.toString()) && !message.contains("PRIVATE_"),
+                            "shared error summaries contain no temporary directory or raw validator quotation");
+                }
+            }
+        } finally {
+            try (var paths = Files.walk(root)) {
+                for (Path path : paths.sorted(java.util.Comparator.reverseOrder()).toList()) Files.delete(path);
+            }
+        }
     }
 
     private static ReviewFinding finding(String id, String title) {

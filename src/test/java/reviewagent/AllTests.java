@@ -13,6 +13,7 @@ import java.util.List;
 public final class AllTests {
     public static void main(String[] args) throws Exception {
         testCliDefaults();
+        testDiscoveryModels();
         testRequestLimits();
         testReviewLanguage();
         testMutuallyExclusiveScopes();
@@ -26,9 +27,13 @@ public final class AllTests {
         RemoteBaselineTests.run();
         ReviewOutputTests.run();
         ReviewXmlTests.run();
+        FailureDiagnosticsTests.run();
+        GithubReviewScriptTests.run();
         EvidenceTests.run();
         ReviewQualityTests.run();
         ReviewQualityRegressionTests.run();
+        ReviewPublicationTests.run();
+        AdaptiveReviewTests.run();
         EvidenceReferenceTests.run();
         AssessmentFindingsTests.run();
         AssessmentCorrectionTests.run();
@@ -36,6 +41,8 @@ public final class AllTests {
         ReviewTaskIsolationTests.run();
         AgentStabilityTests.run();
         VerificationEvidenceTests.run();
+        EvidenceDeliveryTests.run();
+        RepositoryNavigationTests.run();
         GoLanguageTests.run();
         LanguageModuleTests.run();
         System.out.println("All tests passed");
@@ -150,6 +157,19 @@ public final class AllTests {
                 "review", "--repo", ".", "--resume", "saved-run"}).resumeDirectory());
         throwsArgument(() -> CliOptions.parse(new String[]{
                 "review", "--repo", ".", "--knowledge-mode", "scoped"
+        }));
+    }
+
+    private static void testDiscoveryModels() {
+        equal(List.of(), CliOptions.parse(new String[]{"review", "--repo", "."}).discoveryModels());
+        equal(List.of("sonnet", "provider/model[1m]", "sonnet"), CliOptions.parse(new String[]{
+                "review", "--repo", ".", "--discovery-model", "sonnet",
+                "--discovery-model", "provider/model[1m]", "--discovery-model", "sonnet"
+        }).discoveryModels());
+        throwsArgument(() -> CliOptions.parse(new String[]{"review", "--repo", ".", "--discovery-model", "sonnet"}));
+        throwsArgument(() -> CliOptions.parse(new String[]{
+                "review", "--repo", ".", "--discovery-model", "sonnet", "--discovery-model", "--model",
+                "--discovery-model", "haiku"
         }));
     }
 

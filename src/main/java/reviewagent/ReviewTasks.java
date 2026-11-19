@@ -19,9 +19,11 @@ final class ReviewTasks {
         void validate(String response) throws IOException;
         default String corrected(String response, IOException failure) throws IOException { return response; }
         default String correctionInstructions(IOException failure) { return ""; }
+        default boolean allowOutputCorrection() { return true; }
     }
 
-    record Task(String id, String prompt, Validator validator) {
+    record Task(String id, String prompt, Validator validator, String model) {
+        Task(String id, String prompt, Validator validator) { this(id, prompt, validator, null); }
     }
 
     record Outcome(String response, String error, String failureKind) {
@@ -67,7 +69,7 @@ final class ReviewTasks {
                             return new Reply(task.id(), new Outcome(null, "Blocked by a global failure", "GLOBAL_FAILURE"));
                         }
                         state(directory, task, "RUNNING", "");
-                        try (var budget = agent.task()) {
+                        try (var budget = agent.task(task.model())) {
                             String response = invoke(task, agent, directory, resume);
                             Files.deleteIfExists(directory.resolve(task.id() + "-error.txt"));
                             state(directory, task, "SUCCEEDED", "");
@@ -81,7 +83,7 @@ final class ReviewTasks {
                             AtomicFiles.write(directory.resolve(task.id() + "-error.txt"), failure.getMessage());
                             String kind = failure instanceof AgentCallException call ? call.kind().name()
                                     : failure instanceof InvalidReviewResponseException ? "INVALID_OUTPUT" : "IO_FAILURE";
-                            state(directory, task, "FAILED", kind);
+                            state(directory, task, "FAILED", kind, failure);
                             if (isolated) {
                                 return new Reply(task.id(), new Outcome(null, failure.getMessage(), kind));
                             }
@@ -107,10 +109,10 @@ final class ReviewTasks {
                 var ordered = new LinkedHashMap<String, Outcome>();
                 tasks.forEach(task -> ordered.put(task.id(), replies.get(task.id())));
                 if (!isolateInvalidOutput && ordered.values().stream().anyMatch(outcome -> !outcome.valid())) {
-                    throw new ReviewStageException(description + " did not complete: " + ordered.entrySet().stream()
-                            .filter(entry -> !entry.getValue().valid()).map(entry -> entry.getKey() + " [" + entry.getValue().failureKind()
-                                    + "]: " + entry.getValue().error()).collect(java.util.stream.Collectors.joining("; "))
-                            + ". See task artifacts in " + directory);
+                    throw new ReviewStageException(description, ordered.entrySet().stream()
+                            .filter(entry -> !entry.getValue().valid())
+                            .map(entry -> new ReviewStageException.FailedTask(entry.getKey(), entry.getValue().failureKind(),
+                                    directory.resolve(entry.getKey() + "-state.properties"))).toList());
                 }
                 return ordered;
             } catch (ExecutionException failure) {
@@ -124,9 +126,14 @@ final class ReviewTasks {
     }
 
     private static void state(Path directory, Task task, String status, String failure) throws IOException {
+        state(directory, task, status, failure, null);
+    }
+
+    private static void state(Path directory, Task task, String status, String failure, IOException cause) throws IOException {
         AtomicFiles.write(directory.resolve(task.id() + "-state.properties"), "status=" + status
                 + "\npromptSha256=" + InputDocument.sha256(task.prompt().getBytes(StandardCharsets.UTF_8))
-                + "\nfailureKind=" + failure + "\nupdatedAt=" + java.time.Instant.now() + "\n");
+                + "\nfailureKind=" + failure + "\nupdatedAt=" + java.time.Instant.now() + "\n"
+                + FailureDiagnostics.properties(cause, failure));
     }
 
     private static String invoke(Task task, AgentRunner agent, Path directory, boolean resume)
@@ -188,8 +195,10 @@ final class ReviewTasks {
                 boolean quotation = invalid instanceof SourceQuotationException;
                 boolean decision = invalid instanceof ReviewDecisionException;
                 String kind = quotation ? "quote-repair" : decision ? "decision-repair" : "repair";
-                if (!attempted.add(kind)) {
-                    throw new InvalidReviewResponseException("Task " + task.id() + " returned invalid structured output after bounded output correction: "
+                boolean correct = task.validator().allowOutputCorrection();
+                if (!correct || !attempted.add(kind)) {
+                    throw new InvalidReviewResponseException("Task " + task.id() + " returned invalid structured output"
+                            + (correct ? " after bounded output correction" : "") + ": "
                             + invalid.getMessage(), invalid);
                 }
                 AtomicFiles.write(directory.resolve(task.id() + (quotation ? "-quote-invalid-response.md" : decision ? "-decision-invalid-response.md" : "-invalid-response.md")),
@@ -215,9 +224,11 @@ final class ReviewTasks {
                         : "OUTPUT FORMAT CORRECTION\n"
                             + "The previous response failed structural validation. Correct only its serialization and comply with the response schema above. "
                             + "Preserve the evidence-based decisions and reasoning. Do not invent facts or promote an unconfirmed finding. ";
-                String repairPrompt = task.prompt() + "\n\n" + correction + task.validator().correctionInstructions(invalid)
-                        + "Return the complete corrected response.\nValidation error: " + invalid.getMessage()
-                        + "\n\nPREVIOUS RESPONSE\n" + response;
+                String repairPrompt = ReviewXml.missingResponseBlock(invalid, "findings")
+                        ? retryDiscoveryPrompt(task.prompt())
+                        : task.prompt() + "\n\n" + correction + task.validator().correctionInstructions(invalid)
+                            + "Return the complete corrected response.\nValidation error: " + invalid.getMessage()
+                            + "\n\nPREVIOUS RESPONSE\n" + response;
                 AtomicFiles.write(directory.resolve(task.id() + "-" + kind + "-prompt.md"), repairPrompt);
                 String raw = agent.invoke(repairPrompt, directory.resolve(task.id() + "-" + kind));
                 AtomicFiles.write(directory.resolve(task.id() + "-" + kind + "-response.md"), raw);
@@ -229,11 +240,26 @@ final class ReviewTasks {
         }
     }
 
+    private static String retryDiscoveryPrompt(String originalPrompt) {
+        return """
+                DISCOVERY RESPONSE RECOVERY
+                Run the original review again using the evidence below. Start the reply with exactly one complete
+                fenced XML block with the root <findings>. Close every element. If the review yields no candidates,
+                return <findings/> in that block. Put any necessary evidence requests or review notes after the block,
+                using the original request syntax. Include any evidence-supported candidates you find.
+
+                ORIGINAL REVIEW
+                """ + originalPrompt;
+    }
+
     private static void validate(Task task, String response, Path directory) throws IOException {
         try (var diagnostics = ResponseDiagnostics.capture()) {
             try {
                 AgentRunner.validateResponse(response);
                 task.validator().validate(response);
+            } catch (IOException invalid) {
+                if (!(invalid instanceof ArtifactIOException)) ValidationEvents.rejected(directory.resolve(task.id() + "-validation.log"), invalid);
+                throw invalid;
             } finally {
                 try {
                     if (!diagnostics.notes().isEmpty()) Files.writeString(directory.resolve(task.id() + "-normalization.log"),

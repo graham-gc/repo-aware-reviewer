@@ -4,6 +4,21 @@ import java.util.List;
 import java.util.stream.Collectors;
 
 final class PromptFactory {
+    static final String SCOPED_OUTCOME_RULES = """
+            For each CONFIRMED scoped finding, add a premise with <basis>OUTCOME</basis>. Copy the exact finding impact
+            into its statement and cite the target code or configuration that proves the last observable effect.
+            Add it alongside the trigger premise, using the same <premise><statement>…</statement><basis>OUTCOME</basis>
+            <citations>…</citations></premise> structure with actual statement text and source citations.
+            A request sent, job scheduled, job executed and result published are distinct effects.
+            Before claiming a later effect, cite the downstream behavior and address any later guard, configuration
+            or external contract that could prevent it. If only a narrower actionable effect is proved, limit the
+            title and impact to that effect and stop. If no actionable effect is proved, use INSUFFICIENT_EVIDENCE
+            and request the specific missing source only if it can resolve that question.
+            Rate severity from the proved effect. Use LOW for an actionable failure whose impact is bounded overhead.
+            Use HIGH or CRITICAL only when a separate <basis>SEVERITY</basis> premise cites target implementation
+            or configuration proving the material loss, exposure, or affected scope that warrants the rating.
+            """;
+
     static final List<String> REVIEW_FOCUSES = List.of(
             "Correctness and regressions. Trace control flow, state changes, and compatibility with the base revision.",
             "Requirements and business contracts. Check observable behavior, consumers, and supplied business rules.",
@@ -146,6 +161,16 @@ final class PromptFactory {
                 UNRESOLVED: change relationship or required business policy is unknown. Use INSUFFICIENT_EVIDENCE.
                 Existing code must not be dismissed automatically when a new requirement explicitly covers it.
                 A product-policy preference without a stated contract is a clarification, not a confirmed defect.
+                Separate three questions: what behavior the source proves, whether preserving it is required,
+                and what downstream impact is reachable. Missing downstream callers limit downstream claims;
+                they do not erase a locally proved return value, exception, or base-to-target behavior change.
+                A code-local failure can be established from implementation and diff without a requirements
+                document. Trace callers only when a necessary precondition or claimed impact depends on them.
+                Baseline behavior is evidence of a compatibility change, not automatically a binding business
+                contract. If only the intent of a compatibility change is unknown, preserve its exact trigger,
+                before/after behavior and quotations in the decision, and identify that single open question.
+                Request more evidence for a specific unresolved factual premise; do not repeatedly seek policy
+                documents merely to re-prove a local behavior already established by base and target source.
                 Determine the verdict from the evidence before formatting it. Return exactly one XML document.
                 For CONFIRMED, use the complete structure below, replacing the example descriptions with verified
                 values. The finding element is a direct child of verification and contains the individual fields.
@@ -179,6 +204,12 @@ final class PromptFactory {
                 </verification>
                 ```
                 For REJECTED or INSUFFICIENT_EVIDENCE, omit the finding element and explain the reason.
+                For INSUFFICIENT_EVIDENCE, optionally add a direct child <nextCheck> when a maintainer can resolve
+                the decisive gap with a specific check. State the missing premise, the smallest action at a
+                known entry point (or the exact policy question), and which observation would resolve it.
+                Write a short instruction in the report language. Describe the action in prose, without shell
+                commands. Do not invent entry points, test results or access. This check is proposed, not performed,
+                and is not evidence for the verdict. Omit the field when no concrete check is known.
                 Citations use the short SRC-number references from the inventory or exact block titles, with excerpts of at least 12 characters
                 (whitespace differences are allowed). Include every decisive link, not just a signature or call site.
                 Prefer SRC-number references (for example SRC-17); full EV hashes are legacy identifiers, not text to retype.
@@ -240,10 +271,11 @@ final class PromptFactory {
     String groupCandidates(List<ReviewOutput.Decision> decisions, EvidenceIndex index) {
         StringBuilder prompt = new StringBuilder("""
                 You are the candidate reconciliation stage of a read-only code review.
-                Group candidates describing the SAME defect, reachable trigger and observable impact. Include
-                rejected and insufficient-evidence candidates: an opposite verdict must not disappear. Wording
-                and line numbers can differ for the same defect. Independent defects at the same location stay
-                separate. Do not decide correctness here. Return only the complete partition as XML:
+                Group candidates describing the SAME underlying issue. Compare the concrete trigger, observable
+                behavior and applicable contract or open policy question. Include rejected and insufficient-evidence
+                candidates so opposite verdicts remain visible. Wording and line numbers can differ for the same
+                issue. Keep distinct issues separate even at the same location. Do not decide correctness here.
+                Return only the complete partition as XML:
                 <candidate-groups><group><id>R1-1</id><id>R2-1</id></group><group><id>R3-1</id></group></candidate-groups>
                 Every supplied candidate ID must occur exactly once. Singleton groups are valid.
 
@@ -267,6 +299,10 @@ final class PromptFactory {
                 representative candidate and state that the grouping was unreliable. Do not merge distinct defects.
                 Recheck source sufficiency, applicable policy and base-to-target attribution. Missing policy stays
                 INSUFFICIENT_EVIDENCE. A quoted call to an unread implementation does not prove its behavior.
+                State whether a disagreement concerns the source-level behavior, its required contract, or its
+                downstream impact. An unknown product intention does not refute an observed behavior change.
+                Source-supported compatibility risks remain visible as review-required items when policy is
+                unresolved; do not describe the evidence as absent merely because its defect status is disputed.
                 You may request missing evidence before deciding. Zero published findings is a valid outcome.
                 Your verdict supersedes preliminary verification for the representative issue.
 
@@ -279,7 +315,7 @@ final class PromptFactory {
         return decisionSummary(decision, null);
     }
 
-    private static String decisionSummary(ReviewOutput.Decision decision, EvidenceIndex index) {
+    static String decisionSummary(ReviewOutput.Decision decision, EvidenceIndex index) {
         var verdict = decision.verdict();
         return "\n" + ReviewOutput.findingXml(verdict.confirmed() == null ? verdict.candidate() : verdict.confirmed())
                 + "\nVerdict: " + verdict.status() + ". Reason: " + verdict.reason()
@@ -391,6 +427,11 @@ final class PromptFactory {
                 requirement assessment, knowledge-base feedback and verification limits. Discovery notes are
                 unverified context. A concern in those notes must not be presented as a confirmed finding.
                 State unresolved evidence and candidate verification gaps explicitly.
+                The CLI inserts review-required risks and unfinished checks into Findings. Do not repeat raw
+                candidate verdicts, opposing explanations or candidate IDs in other sections. Keep the narrative
+                proportional to the diff; a small utility change does not need unrelated frontend or integration
+                disclaimers. If no requirements or knowledge base was supplied, state that once in its section
+                without inventing a business acceptance assessment or a list of hypothetical missing policies.
                 Check each supplied requirement and observable behavior against the supplied business rules.
                 Cite exact rule section IDs and code evidence. State which behavior changes lacked matching
                 rules or sufficient code. Scoped coverage cannot establish whole-knowledge-base compliance.

@@ -10,3 +10,7 @@
 # Keep README variants at the root and put other project documentation in subdirectories.
 /*.[mM][dD]
 !/[rR][eE][aA][dD][mM][eE]*.[mM][dD]
+
+# Python integration bytecode
+__pycache__/
+*.py[cod]

@@ -1,0 +1,82 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: repo-aware-webhook-state
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: repo-aware-webhook
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: repo-aware-webhook
+  template:
+    metadata:
+      labels:
+        app: repo-aware-webhook
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+      containers:
+        - name: webhook
+          image: registry.example.com/repo-aware-webhook:REPLACE_WITH_PINNED_VERSION
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - secretRef:
+                name: repo-aware-gitlab
+          env:
+            - name: GITLAB_STATE_DB
+              value: /data/gitlab-events.sqlite3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: "1"
+              memory: 256Mi
+          volumeMounts:
+            - name: state
+              mountPath: /data
+      volumes:
+        - name: state
+          persistentVolumeClaim:
+            claimName: repo-aware-webhook-state
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: repo-aware-webhook
+spec:
+  selector:
+    app: repo-aware-webhook
+  ports:
+    - port: 8080
+      targetPort: 8080

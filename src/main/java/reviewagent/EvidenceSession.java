@@ -1,8 +1,9 @@
 package reviewagent;
 
 import java.util.LinkedHashSet;
-import java.util.Locale;
 import java.util.Set;
+import java.util.Map;
+import java.util.LinkedHashMap;
 
 /** Shared request counts and byte budget across discovery, verification and adjudication. */
 final class EvidenceSession {
@@ -11,11 +12,13 @@ final class EvidenceSession {
     private final int fileLimit;
     private final int knowledgeLimit;
     private final Set<String> seen = new LinkedHashSet<>();
+    private final Map<String, Set<String>> fulfilled = new LinkedHashMap<>();
     private final StringBuilder markdown = new StringBuilder();
     private final StringBuilder coverage = new StringBuilder();
     private int files;
     private int queries;
     private EvidenceCatalog catalog = EvidenceCatalog.empty();
+    private String lastCoverage = "";
 
     EvidenceSession(EvidenceBundle evidence, SupplementalEvidence collector, int fileLimit, int knowledgeLimit) {
         this.evidence = evidence;
@@ -24,17 +27,31 @@ final class EvidenceSession {
         this.knowledgeLimit = knowledgeLimit;
     }
 
+    boolean requestOnly(String response) { return collector.requestOnly(evidence, response); }
+
     boolean load(String replies, String phase) throws InterruptedException {
+        int coverageStart = coverage.length();
+        try { return loadRound(replies, phase); }
+        finally { lastCoverage = coverage.substring(coverageStart); }
+    }
+
+    private boolean loadRound(String replies, String phase) throws InterruptedException {
         StringBuilder fresh = new StringBuilder();
         int newFiles = 0;
         int newQueries = 0;
         int repeated = 0;
+        StringBuilder reused = new StringBuilder();
         for (EvidenceRequest request : EvidenceRequest.parse(replies)) {
-            int fields = request.text().startsWith("REQUEST_KNOWLEDGE|") ? 3 : request.text().startsWith("REQUEST_LANGUAGE|") ? 7 : 5;
-            String[] parts = request.text().split("\\|", fields);
-            boolean knowledge = parts[0].equals("REQUEST_KNOWLEDGE");
-            String key = knowledge && parts.length >= 3 ? parts[0] + "|" + parts[1].strip().toLowerCase(Locale.ROOT)
-                    : parts.length >= 5 ? String.join("|", java.util.Arrays.copyOf(parts, parts.length - 1)) : request.text();
+            boolean knowledge = request.text().startsWith("REQUEST_KNOWLEDGE|");
+            String key = request.key();
+            Set<String> available = collector.reusable(bundle(catalog(), 0), request.text());
+            if (available.isEmpty()) available = fulfilled.getOrDefault(key, Set.of());
+            if (!available.isEmpty()) {
+                fulfilled.put(key, available);
+                if (!seen.add(key)) repeated++;
+                reused.append("- ").append(key).append(": REUSED (already collected; no repository read).\n");
+                continue;
+            }
             if (!seen.add(key)) {
                 repeated++;
                 continue;
@@ -43,6 +60,7 @@ final class EvidenceSession {
             if (knowledge) newQueries++; else newFiles++;
         }
         coverage.append("\n### ").append(phase).append("\n\nRepeated requests not retried: ").append(repeated).append(".\n");
+        coverage.append(reused);
         if (fresh.isEmpty() && !markdown.isEmpty()) return false;
         int remaining = evidence.supplementBudget() - EvidenceText.bytes(markdown.toString());
         if (remaining < 1024) {
@@ -60,8 +78,7 @@ final class EvidenceSession {
                     .collect(java.util.stream.Collectors.joining("\n"));
             coverage.append("Knowledge query limit exhausted; skipped: ").append(newQueries).append(".\n");
         }
-        EvidenceBundle round = new EvidenceBundle(evidence.scope(), evidence.changedFiles(), evidence.markdown(),
-                evidence.coverage(), remaining, evidence.scopedKnowledge(), evidence.catalog());
+        EvidenceBundle round = bundle(catalog(), remaining);
         SupplementalEvidence.Result result = collector.collect(round, requests,
                 fileLimit == 0 ? 0 : Math.max(1, fileLimit - files),
                 knowledgeLimit == 0 ? 0 : Math.max(1, knowledgeLimit - queries));
@@ -69,12 +86,45 @@ final class EvidenceSession {
         queries += knowledgeLimit == 0 ? newQueries : Math.min(newQueries, Math.max(0, knowledgeLimit - queries));
         markdown.append(result.markdown());
         catalog = catalog.plus(result.catalog());
+        result.resolvedSources().forEach((key, ids) -> { if (!ids.isEmpty()) fulfilled.put(key, ids); });
         coverage.append(result.coverage());
         return result.hasMaterial();
     }
 
+    /** Re-deliver known material to this recipient, not to every candidate sharing the session. */
+    Set<String> delivery(String requests, EvidenceCatalog supplied) {
+        var result = new LinkedHashSet<String>();
+        var visible = supplied.sources().stream().map(EvidenceSource::id).collect(java.util.stream.Collectors.toSet());
+        for (EvidenceRequest request : EvidenceRequest.parse(requests)) {
+            if (!collector.reusable(bundle(supplied, 0), request.text()).isEmpty()) continue;
+            for (String id : fulfilled.getOrDefault(request.key(), Set.of())) if (!visible.contains(id)) result.add(id);
+        }
+        return java.util.Collections.unmodifiableSet(result);
+    }
+
+    void recordDelivery(String requester, Set<String> ids) {
+        if (ids.isEmpty()) return;
+        String sources = catalog().sources().stream().filter(source -> ids.contains(source.id())).map(EvidenceSource::id)
+                .collect(java.util.stream.Collectors.joining(", "));
+        coverage.append("- Fulfilled requests from ").append(requester).append(": queued for this candidate: ").append(sources).append(".\n");
+    }
+
+    void recordFollowup(String requester, String requests, Set<String> ids) {
+        coverage.append("- ").append(requester).append(": ")
+                .append(ids.isEmpty() ? "Stopped; no new evidence for this question." : "Follow-up on newly supplied evidence.").append("\n");
+        for (var request : EvidenceRequest.parse(requests))
+            coverage.append("  - Question and requested evidence: ").append(EvidenceText.oneLine(request.text())).append('\n');
+        recordDelivery(requester, ids);
+    }
+
+    private EvidenceBundle bundle(EvidenceCatalog sources, int budget) {
+        return new EvidenceBundle(evidence.scope(), evidence.changedFiles(), evidence.markdown(), evidence.coverage(), budget,
+                evidence.scopedKnowledge(), sources);
+    }
+
     String markdown() { return markdown.toString(); }
     String coverage() { return coverage.toString(); }
+    String lastCoverage() { return lastCoverage; }
     EvidenceIndex index() { return new EvidenceIndex(catalog()); }
     EvidenceCatalog catalog() { return evidence.catalog().plus(catalog); }
 }

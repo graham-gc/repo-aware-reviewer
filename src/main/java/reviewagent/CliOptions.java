@@ -7,9 +7,22 @@ import java.util.List;
 
 record CliOptions(Path repo, String commit, String branch, String base, String baseRemote, Duration fetchTimeout,
                   Path requirement, Path knowledge, KnowledgeMode knowledgeMode, Path outputDir, Path resumeDirectory,
-                  String agentCommand, List<String> agentArgs,
+                  String agentCommand, List<String> agentArgs, List<String> discoveryModels,
                   boolean prepareOnly, int maxEvidenceBytes, int maxSupplementalRequests, int maxKnowledgeQueries,
-                  int reviewParallelism, Duration agentTimeout, String language, java.util.Map<String, Path> languageCaches, AgentPolicy agentPolicy, VerificationEvidenceMode verificationEvidence) {
+                  int reviewParallelism, Duration agentTimeout, String language, java.util.Map<String, Path> languageCaches,
+                  AgentPolicy agentPolicy, VerificationEvidenceMode verificationEvidence, ReviewMode reviewMode) {
+    enum ReviewMode {
+        AUTO, DEEP;
+
+        static ReviewMode parse(String value) {
+            return switch (value) {
+                case "auto" -> AUTO;
+                case "deep" -> DEEP;
+                default -> throw new IllegalArgumentException("--review-mode must be auto or deep");
+            };
+        }
+    }
+
     enum VerificationEvidenceMode {
         SCOPED, FULL;
         static VerificationEvidenceMode parse(String value) {
@@ -51,11 +64,13 @@ record CliOptions(Path repo, String commit, String branch, String base, String b
         Path resumeDirectory = null;
         String agentCommand = null;
         List<String> agentArgs = new ArrayList<>();
+        List<String> discoveryModels = new ArrayList<>();
         boolean prepareOnly = false;
         int maxEvidenceBytes = 1_000_000;
         int maxSupplementalRequests = 0;
         int maxKnowledgeQueries = 0;
         int reviewParallelism = 3;
+        ReviewMode reviewMode = ReviewMode.AUTO;
         VerificationEvidenceMode verificationEvidence = VerificationEvidenceMode.SCOPED;
         Duration timeout = Duration.ofMinutes(15);
         Duration taskTimeout = null;
@@ -82,12 +97,19 @@ record CliOptions(Path repo, String commit, String branch, String base, String b
                 case "--resume" -> resumeDirectory = Path.of(value(args, ++i, "--resume"));
                 case "--agent-command" -> agentCommand = value(args, ++i, "--agent-command");
                 case "--agent-arg" -> agentArgs.add(value(args, ++i, "--agent-arg"));
+                case "--discovery-model" -> {
+                    String model = value(args, ++i, "--discovery-model");
+                    if (!model.matches("[A-Za-z0-9][A-Za-z0-9._:/@\\[\\]-]*"))
+                        throw new IllegalArgumentException("--discovery-model requires a model name or alias");
+                    discoveryModels.add(model);
+                }
                 case "--prepare-only" -> prepareOnly = true;
                 case "--max-evidence-bytes" -> maxEvidenceBytes = Integer.parseInt(value(args, ++i, "--max-evidence-bytes"));
                 case "--max-supplemental-requests" -> maxSupplementalRequests = Integer.parseInt(value(args, ++i, "--max-supplemental-requests"));
                 case "--max-knowledge-queries" -> maxKnowledgeQueries = Integer.parseInt(value(args, ++i, "--max-knowledge-queries"));
                 case "--verification-evidence" -> verificationEvidence = VerificationEvidenceMode.parse(value(args, ++i, "--verification-evidence"));
                 case "--review-parallelism" -> reviewParallelism = Integer.parseInt(value(args, ++i, "--review-parallelism"));
+                case "--review-mode" -> reviewMode = ReviewMode.parse(value(args, ++i, "--review-mode"));
                 case "--agent-timeout-seconds" -> timeout = Duration.ofSeconds(Long.parseLong(value(args, ++i, "--agent-timeout-seconds")));
                 case "--agent-retries" -> agentRetries = Integer.parseInt(value(args, ++i, "--agent-retries"));
                 case "--agent-max-calls-per-task" -> agentMaxCalls = Integer.parseInt(value(args, ++i, "--agent-max-calls-per-task"));
@@ -130,6 +152,9 @@ record CliOptions(Path repo, String commit, String branch, String base, String b
         if (fetchTimeout.isZero() || fetchTimeout.isNegative()) {
             throw new IllegalArgumentException("--fetch-timeout-seconds must be positive");
         }
+        if (!discoveryModels.isEmpty() && discoveryModels.size() != PromptFactory.REVIEW_FOCUSES.size())
+            throw new IllegalArgumentException("Specify --discovery-model once for each of the "
+                    + PromptFactory.REVIEW_FOCUSES.size() + " initial reviewers, in order");
         if (!prepareOnly && agentCommand == null) {
             agentCommand = "claude";
             agentArgs.addAll(AgentRunner.defaultArguments());
@@ -148,10 +173,11 @@ record CliOptions(Path repo, String commit, String branch, String base, String b
         }
         return new CliOptions(repo.toAbsolutePath().normalize(), commit, branch, base, baseRemote, fetchTimeout,
                 absolute(requirement), absolute(knowledge), knowledgeMode, outputDir.toAbsolutePath().normalize(), absolute(resumeDirectory),
-                agentCommand, List.copyOf(agentArgs), prepareOnly, maxEvidenceBytes,
+                agentCommand, List.copyOf(agentArgs), List.copyOf(discoveryModels), prepareOnly, maxEvidenceBytes,
                 maxSupplementalRequests, maxKnowledgeQueries, reviewParallelism, timeout, language,
                 java.util.Collections.unmodifiableMap(languageCaches),
-                new AgentPolicy(agentRetries, agentMaxCalls, taskTimeout == null ? timeout.multipliedBy(2) : taskTimeout, Duration.ofSeconds(1)), verificationEvidence);
+                new AgentPolicy(agentRetries, agentMaxCalls, taskTimeout == null ? timeout.multipliedBy(2) : taskTimeout, Duration.ofSeconds(1)),
+                verificationEvidence, reviewMode);
     }
 
     private static Path absolute(Path path) {

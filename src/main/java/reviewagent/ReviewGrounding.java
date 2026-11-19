@@ -4,11 +4,63 @@ import static reviewagent.ReviewOutput.*;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
+import org.w3c.dom.Element;
 
 /** Semantic publication rules, independent of XML decoding and Markdown rendering. */
 final class ReviewGrounding {
+    static String recoverPendingCitations(String response, ReviewFinding candidate, EvidenceBundle evidence, EvidenceIndex index) {
+        try {
+            if (ReviewOutput.verification(response, candidate, evidence.changedFiles()).status() != Status.INSUFFICIENT_EVIDENCE)
+                return response;
+            Element root = ReviewXml.xml(response, "verification").root();
+            var fields = ReviewXml.fields(root, ReviewSchema.VERIFICATION);
+            int removed = discardUnbound(fields.get("citations"), index);
+            Element premises = fields.get("premises");
+            if (premises != null) {
+                for (Element premise : ReviewXml.children(premises, "premise")) {
+                    var premiseFields = ReviewXml.fields(premise, Set.of("statement", "basis", "citations"));
+                    int unsupported = discardUnbound(premiseFields.get("citations"), index);
+                    if (unsupported > 0) {
+                        premises.removeChild(premise);
+                        removed += unsupported;
+                    }
+                }
+            }
+            if (removed == 0) return response;
+            String recovered = ReviewXml.replaceRoot(response, "verification", root);
+            if (verification(recovered, candidate, evidence, index).citations().isEmpty()) return response;
+            ResponseDiagnostics.record("Discarded unverified citations and any dependent premises from an unresolved verdict after source correction.");
+            return recovered;
+        } catch (IOException invalid) {
+            return response;
+        }
+    }
+
+    private static int discardUnbound(Element citations, EvidenceIndex index) throws IOException {
+        if (citations == null) return 0;
+        int removed = 0;
+        for (Element citation : ReviewXml.children(citations, "citation")) {
+            var fields = ReviewXml.fields(citation, Set.of("source", "quote", "lines"));
+            var parsed = ReviewOutput.citation(fields, ReviewXml.text(fields, "source"));
+            try {
+                index.validate(List.of(parsed));
+            } catch (SourceQuotationException invalid) {
+                citations.removeChild(citation);
+                removed++;
+            }
+        }
+        return removed;
+    }
+
     static Decision verification(String response, ReviewFinding candidate, EvidenceBundle evidence, EvidenceIndex index) throws IOException {
         Decision parsed = ReviewOutput.decision(response, candidate, evidence.changedFiles());
+        boolean requests = parsed.verdict().status() == Status.CONFIRMED
+                && !EvidenceRequest.parse(ReviewOutput.requestText(response, "verification")).isEmpty();
+        return verification(parsed, index, requests);
+    }
+
+    static Decision verification(Decision parsed, EvidenceIndex index, boolean requests) throws IOException {
         Verification verdict = parsed.verdict();
         Relation relation = parsed.relation();
         index.validate(java.util.stream.Stream.concat(parsed.citations().stream(),
@@ -23,7 +75,7 @@ final class ReviewGrounding {
         citations = java.util.stream.Stream.concat(citations.stream(), premises.stream().flatMap(p -> p.citations().stream()))
                 .distinct().toList();
         if (verdict.status() == Status.CONFIRMED) {
-            if (!EvidenceRequest.parse(ReviewOutput.requestText(response, "verification")).isEmpty()) {
+            if (requests) {
                 throw new ReviewDecisionException("A finding with unresolved evidence requests must be INSUFFICIENT_EVIDENCE");
             }
             if (relation == Relation.UNRESOLVED || relation == Relation.PRE_EXISTING || baseline.isEmpty() || contract.isEmpty()) {
@@ -41,7 +93,33 @@ final class ReviewGrounding {
             index.validateLocation(verdict.confirmed(), citations);
             validateSupport(support, index);
         }
-        return new Decision(verdict, relation, baseline, contract, citations, support);
+        return new Decision(verdict, relation, baseline, contract, citations, support, parsed.sharedCandidates());
+    }
+
+    static Decision scopedPublication(Decision grounded, OutputLanguage language) {
+        var verdict = grounded.verdict();
+        if (verdict.status() != Status.CONFIRMED) return grounded;
+        var finding = verdict.confirmed();
+        var premises = grounded.support().premises();
+        boolean outcomeProved = premises.stream().anyMatch(premise -> premise.basis() == ReviewSupport.Basis.OUTCOME
+                && EvidenceIndex.normalize(premise.statement()).equals(EvidenceIndex.normalize(finding.impact())));
+        if (!outcomeProved) {
+            String gap = language.text("The stated impact has no explicit supporting outcome citation. Check how far the effect proceeds.",
+                    "所述影响缺少明确的结果证据，需核对该影响实际发生到哪一步。");
+            var pending = new Verification(verdict.candidate(), Status.INSUFFICIENT_EVIDENCE, gap, null);
+            return new Decision(pending, grounded.relation(), grounded.baseline(), "", grounded.citations(),
+                    grounded.support(), grounded.sharedCandidates());
+        }
+        if (finding.severity().compareTo(ReviewFinding.Severity.MEDIUM) >= 0
+                || premises.stream().anyMatch(premise -> premise.basis() == ReviewSupport.Basis.SEVERITY)) return grounded;
+        var limited = new ReviewFinding(finding.id(), finding.title(), ReviewFinding.Severity.MEDIUM,
+                finding.path(), finding.line(), finding.endLine(), finding.trigger(), finding.impact(), finding.evidence(),
+                finding.diffRelation());
+        String note = language.text("Severity limited to MEDIUM because material impact or scope was not separately supported.",
+                "缺少支持更高等级的实际影响或范围证据，严重性限定为中。");
+        var revised = new Verification(verdict.candidate(), Status.CONFIRMED, verdict.reason() + " " + note, limited);
+        return new Decision(revised, grounded.relation(), grounded.baseline(), grounded.contract(), grounded.citations(),
+                grounded.support(), grounded.sharedCandidates());
     }
 
     private static void validateSupport(ReviewSupport support, EvidenceIndex index) throws IOException {
@@ -51,10 +129,13 @@ final class ReviewGrounding {
                     + "Unresolved producer behavior or a hardening suggestion is not a confirmed reachable failure.");
         }
         for (var premise : support.premises()) {
-            if (premise.basis() == ReviewSupport.Basis.ASSUMPTION
-                    || premise.basis() == ReviewSupport.Basis.IMPLEMENTATION
-                        && !index.hasTarget(premise.citations()) && !index.hasBaseline(premise.citations())
-                    || premise.basis() == ReviewSupport.Basis.CONTRACT && !index.hasContract(premise.citations())) {
+            boolean proved = switch (premise.basis()) {
+                case IMPLEMENTATION -> index.hasTarget(premise.citations()) || index.hasBaseline(premise.citations());
+                case CONTRACT -> index.hasContract(premise.citations());
+                case OUTCOME, SEVERITY -> index.hasPinnedTarget(premise.citations());
+                case ASSUMPTION -> false;
+            };
+            if (!proved) {
                 throw new ReviewDecisionException("Unproved finding premise: " + premise.statement()
                         + ". Supply decisive implementation/contract quotations, or mark the finding INSUFFICIENT_EVIDENCE.");
             }

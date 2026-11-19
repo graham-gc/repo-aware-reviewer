@@ -23,14 +23,14 @@ final class ReviewReport {
                 case INSUFFICIENT_EVIDENCE -> "证据不足";
                 case NOT_COMPLETED -> "未完成";
             });
-            out.append("### ").append(item.id()).append(" — ").append(EvidenceText.oneLine(item.behavior())).append("\n\n")
+            out.append("### ").append(item.id()).append(" — ").append(ReportText.inline(item.behavior())).append("\n\n")
                     .append("- ").append(language.text("Assessment", "结论")).append(": ").append(status).append('\n')
-                    .append("- ").append(language.text("Requirement", "需求")).append(": ").append(EvidenceText.oneLine(item.requirementText())).append('\n')
-                    .append("- ").append(language.text("Reasoning", "依据")).append(": ").append(EvidenceText.oneLine(item.reasoning())).append('\n')
+                    .append("- ").append(language.text("Requirement", "需求")).append(": ").append(ReportText.inline(item.requirementText())).append('\n')
+                    .append("- ").append(language.text("Reasoning", "依据")).append(": ").append(ReportText.inline(item.reasoning())).append('\n')
                     .append("- ").append(language.text("Boundary checks", "边界核查")).append(": ").append(emptyValue(item.boundaries(), language)).append('\n')
                     .append("- ").append(language.text("Policy basis", "规则依据")).append(": ")
                     .append(language.text(item.policyBasis().name(), item.policyBasis() == ReviewOutput.PolicyBasis.EXPLICIT ? "原文明示" : "尚未规定"))
-                    .append(" — ").append(EvidenceText.oneLine(item.policyReason())).append('\n')
+                    .append(" — ").append(ReportText.inline(item.policyReason())).append('\n')
                     .append("- ").append(language.text("Gap or limitation", "缺口或限制")).append(": ").append(emptyValue(item.gap(), language)).append('\n');
             for (EvidenceIndex.Citation citation : item.citations()) {
                 out.append("- ").append(language.text("Source", "证据来源")).append(": ")
@@ -57,7 +57,7 @@ final class ReviewReport {
         })).toList();
         for (AssessmentItem item : ordered) {
             out.append("- **").append(item.id()).append(" · ").append(status(item.status(), language)).append("** — ")
-                    .append(EvidenceText.oneLine(item.behavior()));
+                    .append(ReportText.inline(item.behavior()));
             if (item.status() != ReviewOutput.AssessmentStatus.SATISFIED) out.append(" — ").append(emptyValue(item.gap(), language));
             out.append('\n');
         }
@@ -74,16 +74,16 @@ final class ReviewReport {
     private static String emptyValue(String text, OutputLanguage language) {
         return switch (text.strip().toLowerCase(java.util.Locale.ROOT)) {
             case "none", "none.", "n/a", "not applicable", "无", "无。", "不适用" -> language.text("None", "无");
-            default -> EvidenceText.oneLine(text);
+            default -> ReportText.inline(text);
         };
     }
 
     static String citationReference(EvidenceIndex.Citation citation, OutputLanguage language) {
         if (!citation.locations().isEmpty()) return citation.locations().stream().map(location ->
-                EvidenceText.oneLine(location.path()) + ":" + location.firstLine()
+                ReportText.inline(location.path()) + ":" + location.firstLine()
                         + (location.lastLine() == location.firstLine() ? "" : "–" + location.lastLine())
                         + " @ " + location.revision()).distinct().collect(java.util.stream.Collectors.joining("; "));
-        return EvidenceText.oneLine(citationReference(citation.source(), language));
+        return ReportText.inline(citationReference(citation.source(), language));
     }
 
     private static String citationReference(String source, OutputLanguage language) {
@@ -94,7 +94,12 @@ final class ReviewReport {
 
     static String finalReport(String response, List<ReviewFinding> confirmed, OutputLanguage language,
                               String assessment) throws IOException {
-        String report = finalReport(response, confirmed, language);
+        return finalReport(response, confirmed, language, assessment, List.of());
+    }
+
+    static String finalReport(String response, List<ReviewFinding> confirmed, OutputLanguage language,
+                              String assessment, List<ReviewConcerns.Item> concerns) throws IOException {
+        String report = render(response, confirmed, language, concerns);
         var headings = headings(language);
         int start = report.indexOf("\n" + headings.get(3) + "\n") + 1 + headings.get(3).length();
         int end = report.indexOf("\n" + headings.get(4) + "\n", start) + 1;
@@ -102,6 +107,11 @@ final class ReviewReport {
     }
 
     static String finalReport(String response, List<ReviewFinding> confirmed, OutputLanguage language) throws IOException {
+        return render(response, confirmed, language, List.of());
+    }
+
+    private static String render(String response, List<ReviewFinding> confirmed, OutputLanguage language,
+                                 List<ReviewConcerns.Item> concerns) throws IOException {
         XmlBlock block = xml(response, "finding-groups");
         var byId = new LinkedHashMap<String, ReviewFinding>();
         confirmed.forEach(finding -> byId.put(finding.id(), finding));
@@ -132,14 +142,22 @@ final class ReviewReport {
         String findingsHeading = headings.get(2);
         int start = report.indexOf("\n" + findingsHeading + "\n") + 1 + findingsHeading.length();
         int end = report.indexOf("\n" + headings.get(3) + "\n", start) + 1;
-        StringBuilder findings = new StringBuilder("\n\n");
-        if (representatives.isEmpty()) {
+        return report.substring(0, start) + "\n\n" + findingsMarkdown(representatives, concerns, language, true) + report.substring(end) + "\n";
+    }
+
+    private static String findingsMarkdown(List<ReviewFinding> confirmed, List<ReviewConcerns.Item> concerns,
+                                           OutputLanguage language, boolean includeCounts) {
+        StringBuilder findings = new StringBuilder();
+        if (includeCounts && !concerns.isEmpty()) {
+            findings.append(verdictCounts(confirmed, concerns, language)).append("\n\n");
+        } else if (confirmed.isEmpty() && concerns.isEmpty()) {
             findings.append(language.text("No verified findings.", "未发现经复核确认的问题。")).append("\n\n");
         }
-        for (ReviewFinding finding : representatives.stream().sorted(Comparator.comparing(ReviewFinding::severity)).toList()) {
+        for (ReviewFinding finding : confirmed.stream().sorted(Comparator.comparing(ReviewFinding::severity)).toList()) {
             findings.append(finding.markdown(language));
         }
-        return report.substring(0, start) + findings + report.substring(end) + "\n";
+        findings.append(ReviewConcerns.markdown(concerns, language));
+        return findings.toString();
     }
 
     static List<String> headings(OutputLanguage language) {
@@ -149,14 +167,71 @@ final class ReviewReport {
                         "# Knowledge-base feedback", "# Verification limits");
     }
 
+    static String adaptiveReport(EvidenceBundle evidence, String summary, List<ReviewFinding> confirmed,
+                                 List<ReviewConcerns.Item> concerns, OutputLanguage language) {
+        return structuredReport(evidence, ReportText.inline(summary), confirmed, concerns, language, false);
+    }
+
+    static String focusedReport(EvidenceBundle evidence, List<ReviewFinding> confirmed,
+                                List<ReviewConcerns.Item> concerns, OutputLanguage language) {
+        String summary = verdictCounts(confirmed, concerns, language);
+        String highlights = confirmed.stream().sorted(Comparator.comparing(ReviewFinding::severity)).limit(3)
+                .map(finding -> "- " + ReportText.inline(finding.title())).collect(java.util.stream.Collectors.joining("\n"));
+        return structuredReport(evidence, summary + (highlights.isEmpty() ? "" : "\n\n" + highlights),
+                confirmed, concerns, language, true);
+    }
+
+    private static String verdictCounts(List<ReviewFinding> confirmed, List<ReviewConcerns.Item> concerns, OutputLanguage language) {
+        long unfinished = concerns.stream().filter(item -> item.kind() == ReviewConcerns.Kind.NOT_COMPLETED).count();
+        return language.text("Confirmed defects: %d; review-required items: %d; unfinished checks: %d.",
+                "已确认缺陷：%d；需人工确认事项：%d；未完成检查：%d。")
+                .formatted(confirmed.size(), concerns.size() - unfinished, unfinished);
+    }
+
+    private static String structuredReport(EvidenceBundle evidence, String summary, List<ReviewFinding> confirmed,
+                                           List<ReviewConcerns.Item> concerns, OutputLanguage language, boolean focused) {
+        var scope = evidence.scope();
+        String changed = focused ? language.text("Changed files", "变更文件") + " — " + evidence.changedFiles().size()
+                : language.text("Changed file", "变更文件") + " — " + code(EvidenceText.oneLine(evidence.changedFiles().getFirst()));
+        String limits = focused ? language.text(
+                "Static review used bounded diff excerpts and stronger evidence for identified risk areas. See [coverage.md](coverage.md) for each scope, "
+                        + "truncated inputs and follow-up decisions. No build or tests were run.",
+                "静态审查使用有界的 diff 摘录，并为识别出的风险范围提供更完整的证据。各范围、截断输入和追加决定详见 [coverage.md](coverage.md)。未执行构建或测试。")
+                : language.text("Static review with the complete local diff and source at both revisions. No build or tests were run. "
+                                + "See [coverage.md](coverage.md) for evidence and the selected review route.",
+                        "静态审查使用了完整的局部差异和基线、目标源码。未执行构建或测试。"
+                                + "审查路线及证据详见 [coverage.md](coverage.md)。");
+        List<String> content = List.of(
+                language.text("Base", "基线") + " — " + code(scope.baseCommit()) + "\n\n"
+                        + language.text("Target", "目标") + " — " + code(scope.targetCommit()) + "\n\n"
+                        + changed,
+                summary,
+                findingsMarkdown(confirmed, concerns, language, !focused),
+                assessmentMarkdown(List.of(), language),
+                language.text("No knowledge base was supplied.", "未提供知识库。"),
+                limits);
+        return sections(content, language);
+    }
+
+    private static String code(String value) {
+        return "`" + value.replace("`", "\\`") + "`";
+    }
+
+    private static String sections(List<String> content, OutputLanguage language) {
+        StringBuilder report = new StringBuilder();
+        List<String> titles = headings(language);
+        for (int i = 0; i < titles.size(); i++) report.append(titles.get(i)).append("\n\n").append(content.get(i).strip()).append("\n\n");
+        return report.toString();
+    }
+
     static String incompleteReport(ReviewScope scope, OutputLanguage language, List<ReviewFinding> published,
-                                   String assessment, List<String> failures) {
-        String findings = published.isEmpty()
+                                   List<ReviewConcerns.Item> concerns, String assessment, List<String> failures) {
+        String findings = published.isEmpty() && concerns.isEmpty()
                 ? language.text("No publishable conclusions are available from the completed stages. This does not mean the change has no defects.",
                     "已完成阶段尚无可发布的结论，这不代表变更没有问题。")
-                : language.text("The following candidates passed publication adjudication; final report grouping may be unfinished.\n\n",
-                    "以下候选已通过发布裁决；最终报告去重可能尚未完成。\n\n")
-                    + published.stream().map(finding -> finding.markdown(language)).collect(java.util.stream.Collectors.joining());
+                : language.text("The following results are retained from completed stages; final report grouping may be unfinished.\n\n",
+                    "以下结果保留自已完成阶段；最终报告去重可能尚未完成。\n\n")
+                    + findingsMarkdown(published, concerns, language, true);
         List<String> content = List.of(
                 language.text("Base", "基线") + ": `" + scope.baseCommit() + "`\n\n"
                         + language.text("Target", "目标") + ": `" + scope.targetCommit() + "`",
@@ -166,11 +241,8 @@ final class ReviewReport {
                 language.text("Not completed in this report.", "本报告未完成此项反馈。"),
                 language.text("Static review only; no target build or tests were run. Unfinished checks are execution failures, not evidence-based business verdicts.\n\n",
                     "仅做静态审查，未执行目标仓库构建或测试。未完成检查表示执行未完成，不是业务证据不足的判断。\n\n")
-                        + failures.stream().map(failure -> "- " + EvidenceText.oneLine(failure)).collect(java.util.stream.Collectors.joining("\n")));
-        StringBuilder report = new StringBuilder();
-        List<String> titles = headings(language);
-        for (int i = 0; i < titles.size(); i++) report.append(titles.get(i)).append("\n\n").append(content.get(i)).append("\n\n");
-        return report.toString();
+                        + failures.stream().map(failure -> "- " + ReportText.inline(failure)).collect(java.util.stream.Collectors.joining("\n")));
+        return sections(content, language);
     }
 
     static String emptyDiffReport(ReviewScope scope, OutputLanguage language, boolean hasRequirement) {
@@ -185,10 +257,7 @@ final class ReviewReport {
                                 + "Choose an earlier baseline to review a change, or use --commit <ref> to compare a commit with its first parent.",
                         "本次执行未调用模型，未执行构建、测试或静态检查。请指定更早的基线来审查变更，"
                                 + "或使用 --commit <ref> 比较某次提交与其第一父提交。"));
-        StringBuilder report = new StringBuilder();
-        List<String> titles = headings(language);
-        for (int i = 0; i < titles.size(); i++) report.append(titles.get(i)).append("\n\n").append(content.get(i)).append("\n\n");
-        return report.toString();
+        return sections(content, language);
     }
 
     static String emptyDiffAssessment(OutputLanguage language, boolean hasRequirement) {

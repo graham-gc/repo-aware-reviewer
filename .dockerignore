@@ -1,0 +1,16 @@
+# Send only the application inputs needed by integrations/gitlab/Dockerfile.
+**
+!src/
+!src/main/
+!src/main/**
+!scripts/
+!scripts/build.sh
+!scripts/compile.sh
+!scripts/progress.sh
+!integrations/
+!integrations/gitlab/
+!integrations/gitlab/Dockerfile
+!integrations/gitlab/repo_aware_gitlab/
+!integrations/gitlab/repo_aware_gitlab/**
+**/__pycache__
+**/*.pyc

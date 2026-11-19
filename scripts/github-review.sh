@@ -91,7 +91,7 @@ prepare() {
 }
 
 review() {
-    local jar directory
+    local jar directory result=0
     local -a arguments=(review --repo "$REVIEW_ROOT/repo" --branch "$REVIEW_HEAD" --base "$REVIEW_BASE"
         --output-dir "$REVIEW_ROOT/output" --knowledge-mode "$REVIEW_KNOWLEDGE_MODE"
         --language "${REVIEW_LANGUAGE:-en}"
@@ -107,8 +107,19 @@ review() {
         arguments+=(--requirement "$REVIEW_ROOT/requirement.md")
     fi
     jar=$(bash "$GITHUB_ACTION_PATH/scripts/build.sh")
-    directory=$(java -jar "$jar" "${arguments[@]}")
-    printf 'directory=%s\n' "$directory" >> "$GITHUB_OUTPUT"
+    directory=$(java -jar "$jar" "${arguments[@]}") || result=$?
+    if [[ -z "$directory" && "$result" -ne 0 ]]; then
+        local candidate
+        local -a available=()
+        for candidate in "$REVIEW_ROOT/output/"*; do
+            [[ -d "$candidate" && -f "$candidate/review-status.md" ]] && available+=("$candidate")
+        done
+        if [[ ${#available[@]} -eq 1 ]]; then directory=${available[0]}; fi
+    fi
+    if [[ -n "$directory" && -f "$directory/review-status.md" ]]; then
+        printf 'directory=%s\n' "$directory" >> "$GITHUB_OUTPUT"
+    fi
+    return "$result"
 }
 
 publish() {

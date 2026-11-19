@@ -14,8 +14,55 @@ final class ReviewXmlTests {
         damagedQuoteDoesNotBecomeEvidence();
         missingContainerClosers();
         opaqueTextAndEnvelope();
+        protocolFenceBoundaries();
+        missingOpeningBracket();
         rejectedStructures();
         normalizationArtifacts();
+    }
+
+    private static void missingOpeningBracket() throws Exception {
+        String body = "verification>\n<status>INSUFFICIENT_EVIDENCE</status>"
+                + "\n<reason>The contract is unresolved.</reason>\n</verification>";
+        String request = "\nREQUEST_FILE|target|README.md|all|Check the public contract\n";
+        var parsed = ReviewXml.xml(body + request, "verification");
+        require(parsed.normalizations().size() == 1 && parsed.remainder().equals(request)
+                && parsed.root().getElementsByTagName("status").item(0).getTextContent().equals("INSUFFICIENT_EVIDENCE"),
+                "restore the leading bracket while preserving the entire closed XML body and its following requests");
+        fails(() -> ReviewXml.xml(body.replace("</verification>", ""), "verification"));
+        fails(() -> ReviewXml.xml(body.replace("</verification>", "</findings>"), "verification"));
+    }
+
+    private static void protocolFenceBoundaries() throws Exception {
+        String xml = "<finding-groups/>";
+        for (String language : List.of("python", "java", "json", "sql", "xml", "")) {
+            String code = language.equals("xml") ? "<example/>" : "literal code; do not rewrite";
+            for (String newline : List.of("\n", "\r\n")) {
+                String before = "Intro" + newline + "```" + language + newline + code + newline + "```" + newline + newline;
+                String after = "Tail" + newline + "```json" + newline + "{}" + newline + "```" + newline;
+                for (String[] fence : List.of(new String[]{"```xml", "```"}, new String[]{"~~~~XML", "~~~~~~"},
+                        new String[]{"   ````", "  `````"})) {
+                    String response = before + fence[0] + newline + "<!-- envelope -->" + newline + xml + newline + fence[1] + newline + after;
+                    require(ReviewXml.xml(response, "finding-groups").remainder().equals(before + after),
+                            "only the actual protocol wrapper is removed after arbitrary-language fences, preserving all other bytes");
+                }
+            }
+        }
+        String prefix = "```python\nprint('keep')\n```\n";
+        require(ReviewXml.xml(prefix + "```xml\n" + xml, "finding-groups").remainder().equals(prefix),
+                "an EOF-terminated Markdown wrapper does not require inventing an XML closing tag");
+        String body = "<verification><status>REJECTED</status><reason><![CDATA[Source example:\n```python\nx = 1\n```\n]]></reason></verification>";
+        require(ReviewXml.xml("```xml\n" + body + "\n```\n", "verification").remainder().isEmpty(),
+                "fence-like content inside XML scalar data remains opaque");
+        fails(() -> ReviewXml.xml("```python\n" + xml + "\n```\n", "finding-groups"));
+        fails(() -> ReviewXml.xml("```xml\n<verification><status>REJECTED</status>", "verification"));
+        // Preserve a deliberately empty documentation block; this is not a blanket empty-fence cleanup.
+        String emptyExample = "```xml\n\n```\n";
+        require(ReviewXml.xml(emptyExample + "```xml\n" + xml + "\n```\n", "finding-groups").remainder().equals(emptyExample),
+                "unrelated empty XML blocks are preserved exactly");
+        String report = String.join("\n\n", ReviewReport.headings(OutputLanguage.EN)).replace("# Functional and business change",
+                "# Functional and business change\n\n" + prefix) + "\n```xml\n" + xml + "\n```\n";
+        String rendered = ReviewReport.finalReport(report, List.of(), OutputLanguage.EN);
+        require(rendered.contains(prefix) && !rendered.contains("```xml"), "the final report contains the example but no orphan protocol fence");
     }
 
     private static String damaged(String source) {

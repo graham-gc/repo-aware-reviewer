@@ -243,6 +243,10 @@ final class AgentStabilityTests {
                 && !report.contains("No requirements document was supplied"), "a failed required assessment cannot masquerade as absent requirements or a business verdict");
         require(!Files.exists(run.resolve("assessment/audit-prompt.md")) && !Files.exists(run.resolve("report-prompt.md")),
                 "stages depending on a failed draft do not run");
+        require(report.contains("[assessment/draft-state.properties](assessment/draft-state.properties)")
+                && Files.readString(run.resolve("review-status.md")).contains("[assessment/draft-state.properties](assessment/draft-state.properties)")
+                && Files.isRegularFile(run.resolve("assessment/draft-state.properties")) && !report.contains(run.toString()),
+                "an early required-stage failure references its exported checkpoint in both fallback report and status");
     }
 
     private static Path repository() throws Exception {
@@ -286,7 +290,8 @@ final class AgentStabilityTests {
     }
     private static ArrayList<String> arguments(Path dir, Path script) {
         return new ArrayList<>(List.of("review", "--repo", dir.resolve("repo").toString(), "--output-dir", dir.resolve("runs").toString(),
-                "--agent-command", "/bin/sh", "--agent-arg", script.toString(), "--agent-arg", dir.toString(), "--agent-retries", "0"));
+                "--review-mode", "deep", "--agent-command", "/bin/sh", "--agent-arg", script.toString(), "--agent-arg", dir.toString(),
+                "--agent-retries", "0"));
     }
     private static AgentRunner shell(Path dir, String script, int retries, int calls, Duration timeout) {
         return new AgentRunner(new ProcessExecutor(), "/bin/sh", List.of("-c", script), dir, timeout,

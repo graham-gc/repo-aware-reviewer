@@ -1,6 +1,6 @@
 # Verification performance
 
-Candidate verification, requirement-finding verification and publication adjudication default to `--verification-evidence scoped`. Use `--verification-evidence full` to compare the previous full-input behavior. This option is independent of `--knowledge-mode`, which controls the business knowledge document. Both modes retain independent per-candidate verification, exact quotation validation, source provenance, location coverage and publication checks. Batching and local-only final report generation are not enabled by this change.
+Candidate verification, requirement-finding verification and publication adjudication default to `--verification-evidence scoped`. Use `--verification-evidence full` to compare the previous full-input behavior. This option is independent of `--knowledge-mode`, which controls the business knowledge document. Both modes retain independent per-candidate verification, exact quotation validation, source provenance, location coverage and publication checks.
 
 ## Supplied material
 
@@ -21,6 +21,8 @@ Every candidate task writes `TASK-evidence.md` beside its prompt. It records ful
 
 A candidate's selected evidence is retained across its verification rounds and subsequent publication adjudication. Requested new material is pinned into the requester's next task even if it has no lexical match in the original allegation. This prevents a smaller publication prompt from accidentally losing a producer guard discovered during verification.
 
+After individual verification, a group of confirmed local regressions with the same code anchor and shared pinned baseline and target sources can receive one publication verdict. The adjudicator resolves provisional severity differences using the proved impact and preconditions. Sharing requires explicit coverage of every candidate ID in the independent publication response and revalidation of the common evidence. The remaining candidates run separately when the response leaves applicability uncertain. Coverage retains the individual verification records and lists which candidates shared a publication verdict.
+
 After shared evidence collection, a task whose complete prompt remains unchanged is not automatically called again. Its previous validated or unfinished result is retained and `TASK-unchanged.txt` records the decision. Explicit resume can retry unfinished tasks. New related material, indexes or trusted rules change the prompt and can trigger another verification. Changing the verification-evidence mode is allowed during resume, but changed prompts invalidate their task caches; prior discovery results can still be reused when unchanged.
 
 ## Timing report
@@ -33,6 +35,50 @@ Candidate prompt comparisons include prepared tasks that may be cached or skippe
 
 ## Comparing quality and latency
 
-Use the same fixed target/baseline, documents, model route, concurrency and budgets in separate output directories. Compare `--verification-evidence full` with `--verification-evidence scoped`; do not use cache reuse as a latency benchmark. Check missing/false findings and human-adjudicated outcomes alongside stage wall time, call count, corrections and input bytes. Model generation and gateway variability require repeated comparisons before claiming a speedup.
+Use the same fixed target/baseline, documents, model route, concurrency and budgets in separate output directories. When comparing `--verification-evidence full` with `--verification-evidence scoped`, select `--review-mode deep` for both runs. For adaptive routing comparisons, use a fresh run for each mode. Check missing and false findings and human-adjudicated outcomes alongside stage wall time, call count, corrections and input bytes. Model generation and gateway variability require repeated comparisons before claiming a speedup.
 
 Offline regression tests verify source boundaries, complete-block selection, cross-file producer context, stable aliases and locations, preservation of discovered evidence, selective follow-up rounds and non-overlapping time accounting. Saved repository evidence can quantify prompt-size differences without model calls. Neither test proves production model latency or review recall; this implementation does not claim a fixed runtime reduction.
+
+## Blind review evaluation
+
+Run from the project root with Python 3.11+, Git, Java, and a configured Claude Code command. Choose a real change in the target repository and describe what you want to measure.
+
+```bash
+python3 scripts/review-eval.py prepare \
+  --repo /path/to/project --base main --head HEAD \
+  --focus "Check whether the review detects missing database migrations" \
+  --output outputs/eval-case-01
+```
+
+`prepare` resolves the two local Git revisions to commit IDs and collects evidence with the current JAR's `review --prepare-only`. It calls Claude once to draft three to six case-specific scoring criteria in the selected language. Check those criteria in the generated `cases.json` before running the comparison. Use `--jar` to specify a different JAR for collecting evidence. Each preparation uses a fresh output directory and expects a nonempty Git diff.
+
+`--requirement` and `--knowledge` save snapshots of documents for both reviewers. If you have independently verified findings or a verified empty set, supply a nonempty Markdown reference with `--reference`. The script gives that file to the grader. Preparation also saves the rubric prompt, raw response, and evidence locally for inspection.
+
+You can still pass a manually authored manifest, including the [starter cases](../examples/review-eval-cases.json) for this repository. Each case takes full commit IDs. Relative paths for `repo`, `requirement`, `knowledge`, and `reference` resolve from the manifest's directory. Run preparation again for another change and combine entries if you want one comparison across several cases.
+
+```bash
+python3 scripts/review-eval.py run \
+  --cases outputs/eval-case-01/cases.json \
+  --baseline-jar /path/to/baseline.jar \
+  --candidate-jar build/code-review-agent.jar \
+  --output outputs/review-eval-01
+```
+
+Use a fresh output directory. The tool snapshots both JARs and any supplied documents, randomizes run order and report labels independently per pair, and retains status, end-to-end wall time, model workflow time, and launched attempts. Use `--repeats` for repeated comparisons. Keep the Claude configuration and environment fixed across comparisons. Change one variable at a time. To compare evidence modes, add `--baseline-evidence full --candidate-evidence scoped` with the same JAR on both sides.
+
+To compare initial reviewer model diversity, use the same current JAR and evidence mode on both sides. For a fixed-model control, use `--baseline-models sonnet sonnet sonnet` and compare with `--candidate-models sonnet opus haiku`, or substitute models available in your Claude Code setup. Each side still runs R1 correctness and regressions, R2 requirements and contracts, and R3 boundaries and security. The supplementary discovery, verification, assessment, and publication stages use the normal agent configuration. A custom agent command used with `--discovery-model` must accept `--model MODEL`.
+
+Give the same human reviewer the `blind/` directory and access to the pinned project revisions for verification. The directory contains the anonymous reports, scoring criteria, any supplied reference and the grading sheet. Check the reports for identifiers that disclose the variant before handing them over. Keep `private/` with the experiment operator. It includes the mapping, inputs and original run logs. The grader records applicable counts in `grades.csv`.
+
+- `missed_defects` counts verified in-scope defects the report missed. Case preparation disables this metric unless you supply `--reference`. The grading sheet marks it `N/A`.
+- `false_positives` counts unsupported or refuted claims presented as confirmed defects.
+- `misclassified_uncertainties` counts unresolved policy or behavior questions that the report classified incorrectly. Count each issue only once across the three categories.
+- `unmet_criteria` counts how many rubric criteria the report failed to satisfy. Compare this count separately from the defect counts.
+
+Use `N/A` when a metric cannot be assessed and `notes` to explain the judgment. Leave the counts blank for reports you skip. Existing grading sheets with the original three columns still work. A review that exits `3` can still produce a report for grading. Keep its incomplete status visible when interpreting scores. The tool makes an unavailable report visible in the private results and keeps running the remaining pairs.
+
+```bash
+python3 scripts/review-eval.py summarize --output outputs/review-eval-01
+```
+
+The summary reveals the two variants and compares their metrics across usable pairs. Each quality metric uses only pairs scored on both sides for that metric and shows how many pairs contributed. Compare failures and incomplete statuses alongside those totals. Broader estimates of precision and recall need more cases from the projects and change types you want to cover.

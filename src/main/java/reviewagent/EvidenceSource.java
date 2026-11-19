@@ -12,7 +12,7 @@ import java.util.regex.Pattern;
 
 /** Immutable evidence identity and provenance, independent of Markdown headings. */
 record EvidenceSource(String id, String title, String format, String text, String revision, String path,
-                      int firstLine, Set<Role> roles, boolean authoritative, String baselineRevision, String baselinePath) {
+                      int firstLine, Set<Role> roles, boolean authoritative, String baselineRevision, String baselinePath, boolean endOfFile) {
     enum Role { IMPLEMENTATION, BASELINE, TARGET, CONTRACT, INDEX, DIFF }
     enum Side { FILE, ADDED, REMOVED, CONTEXT }
     record Location(String sourceId, String path, String revision, int firstLine, int lastLine, Side side) {
@@ -33,7 +33,7 @@ record EvidenceSource(String id, String title, String format, String text, Strin
                 + "\0" + format + "\0" + roles.stream().sorted().toList() + "\0" + text;
         try {
             String id = "EV-" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(key.getBytes(StandardCharsets.UTF_8))).substring(0, 24);
-            return new EvidenceSource(id, title, format, text, revision, path, firstLine, roles, authoritative, baselineRevision, baselinePath);
+            return new EvidenceSource(id, title, format, text, revision, path, firstLine, roles, authoritative, baselineRevision, baselinePath, false);
         } catch (NoSuchAlgorithmException impossible) { throw new IllegalStateException(impossible); }
     }
 
@@ -46,6 +46,10 @@ record EvidenceSource(String id, String title, String format, String text, Strin
 
     String markdown() { return EvidenceText.block(title, format, text); }
     boolean role(Role role) { return roles.contains(role); }
+    /** Native readers alone know that an excerpt reaches EOF; this metadata does not rewrite its identity. */
+    EvidenceSource throughEndOfFile() {
+        return new EvidenceSource(id, title, format, text, revision, path, firstLine, roles, authoritative, baselineRevision, baselinePath, true);
+    }
 
     Excerpt excerpt(String selector) throws IOException {
         if (!selector.matches("[1-9][0-9]{0,6}:[1-9][0-9]{0,6}")) {

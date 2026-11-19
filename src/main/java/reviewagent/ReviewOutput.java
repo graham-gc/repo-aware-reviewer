@@ -16,19 +16,29 @@ final class ReviewOutput {
     private static final Set<String> ASSESSMENT_FIELDS = ReviewSchema.ASSESSMENT_ITEM;
 
     enum Status {
-        CONFIRMED, REJECTED, INSUFFICIENT_EVIDENCE
+        CONFIRMED, REJECTED, INSUFFICIENT_EVIDENCE, DISPUTED
     }
 
-    record Verification(ReviewFinding candidate, Status status, String reason, ReviewFinding confirmed, boolean validationFailed) {
+    record Verification(ReviewFinding candidate, Status status, String reason, ReviewFinding confirmed,
+                        boolean validationFailed, String nextCheck) {
         Verification(ReviewFinding candidate, Status status, String reason, ReviewFinding confirmed) {
-            this(candidate, status, reason, confirmed, false);
+            this(candidate, status, reason, confirmed, false, "");
+        }
+
+        Verification(ReviewFinding candidate, Status status, String reason, ReviewFinding confirmed, boolean validationFailed) {
+            this(candidate, status, reason, confirmed, validationFailed, "");
         }
     }
 
     enum Relation { INTRODUCED, EXPOSED_BY_CHANGE, UNMET_REQUIREMENT, PRE_EXISTING, UNRESOLVED }
 
     record Decision(Verification verdict, Relation relation, String baseline, String contract,
-                    List<EvidenceIndex.Citation> citations, ReviewSupport support) {
+                    List<EvidenceIndex.Citation> citations, ReviewSupport support, List<String> sharedCandidates) {
+        Decision(Verification verdict, Relation relation, String baseline, String contract, List<EvidenceIndex.Citation> citations,
+                 ReviewSupport support) {
+            this(verdict, relation, baseline, contract, citations, support, List.of());
+        }
+
         Decision(Verification verdict, Relation relation, String baseline, String contract, List<EvidenceIndex.Citation> citations) {
             this(verdict, relation, baseline, contract, citations, ReviewSupport.unresolved());
         }
@@ -60,11 +70,15 @@ final class ReviewOutput {
     }
 
     static Verification verification(String response, ReviewFinding candidate, List<String> changedFiles) throws IOException {
-        Element root = xml(response, "verification").root();
-        Map<String, Element> fields = fields(root, ReviewSchema.VERIFICATION);
+        return verification(fields(xml(response, "verification").root(), ReviewSchema.VERIFICATION), candidate, changedFiles);
+    }
+
+    private static Verification verification(Map<String, Element> fields, ReviewFinding candidate, List<String> changedFiles)
+            throws IOException {
         Status status;
         try {
             status = Status.valueOf(text(fields, "status"));
+            if (status == Status.DISPUTED) throw new IllegalArgumentException("Programmatic publication status only");
         } catch (IllegalArgumentException invalid) {
             throw new IOException("Unknown verification status", invalid);
         }
@@ -78,20 +92,28 @@ final class ReviewOutput {
         } else if (fields.containsKey("finding")) {
             throw new IOException("Unconfirmed verification contains a finding");
         }
-        return new Verification(candidate, status, reason, confirmed);
+        String nextCheck = status == Status.INSUFFICIENT_EVIDENCE && fields.containsKey("nextCheck")
+                ? fields.get("nextCheck").getTextContent().strip() : "";
+        return new Verification(candidate, status, reason, confirmed, false, nextCheck);
     }
 
     static Decision decision(String response, ReviewFinding candidate, List<String> changedFiles) throws IOException {
-        Verification verdict = verification(response, candidate, changedFiles);
-        Map<String, Element> fields = fields(xml(response, "verification").root(),
-                ReviewSchema.VERIFICATION);
+        return decision(fields(xml(response, "verification").root(), ReviewSchema.VERIFICATION), candidate, changedFiles);
+    }
+
+    static Decision decision(Map<String, Element> fields, ReviewFinding candidate, List<String> changedFiles) throws IOException {
+        Verification verdict = verification(fields, candidate, changedFiles);
         Relation relation = Relation.UNRESOLVED;
         if (fields.containsKey("relation")) {
             try { relation = Relation.valueOf(text(fields, "relation")); }
             catch (IllegalArgumentException invalid) { throw new IOException("Unknown finding relationship", invalid); }
         }
+        var shared = fields.containsKey("sharedCandidates")
+                ? java.util.Arrays.stream(fields.get("sharedCandidates").getTextContent().split(",", -1))
+                    .map(String::strip).toList()
+                : List.<String>of();
         return new Decision(verdict, relation, fields.containsKey("baseline") ? text(fields, "baseline") : "",
-                fields.containsKey("contract") ? text(fields, "contract") : "", citations(fields.get("citations")), support(fields));
+                fields.containsKey("contract") ? text(fields, "contract") : "", citations(fields.get("citations")), support(fields), shared);
     }
 
     private static ReviewSupport support(Map<String, Element> fields) throws IOException {
@@ -160,7 +182,7 @@ final class ReviewOutput {
         return xml(response, rootName).remainder();
     }
 
-    private static List<EvidenceIndex.Citation> citations(Element element) throws IOException {
+    static List<EvidenceIndex.Citation> citations(Element element) throws IOException {
         if (element == null) return List.of();
         var citations = new ArrayList<EvidenceIndex.Citation>();
         var quoteErrors = new ArrayList<String>();
@@ -168,11 +190,7 @@ final class ReviewOutput {
             var fields = fields(citation, Set.of("source", "quote", "lines"));
             String source = text(fields, "source");
             try {
-                if (fields.containsKey("quote") == fields.containsKey("lines")) {
-                    throw new IOException("Use exactly one of quote or lines");
-                }
-                citations.add(fields.containsKey("lines") ? EvidenceIndex.Citation.lines(source, text(fields, "lines"))
-                        : new EvidenceIndex.Citation(source, text(fields, "quote")));
+                citations.add(citation(fields, source));
             } catch (IOException invalidQuote) {
                 quoteErrors.add(EvidenceText.oneLine(source) + ": use exactly one nonempty quote or block-relative lines selector. "
                         + "A quote must contain literal source text; escape XML markup or use CDATA. "
@@ -181,6 +199,14 @@ final class ReviewOutput {
         }
         if (!quoteErrors.isEmpty()) throw new SourceQuotationException(String.join("\n", quoteErrors));
         return List.copyOf(citations);
+    }
+
+    static EvidenceIndex.Citation citation(Map<String, Element> fields, String source) throws IOException {
+        if (fields.containsKey("quote") == fields.containsKey("lines")) {
+            throw new IOException("Use exactly one of quote or lines");
+        }
+        return fields.containsKey("lines") ? EvidenceIndex.Citation.lines(source, text(fields, "lines"))
+                : new EvidenceIndex.Citation(source, text(fields, "quote"));
     }
 
     static String findingXml(ReviewFinding finding) {
@@ -197,7 +223,7 @@ final class ReviewOutput {
                 + "</" + name + ">";
     }
 
-    private static ReviewFinding finding(Element element, String id, List<String> changedFiles, boolean checkCandidateId)
+    static ReviewFinding finding(Element element, String id, List<String> changedFiles, boolean checkCandidateId)
             throws IOException {
         List<Element> contents = children(element, null);
         while (contents.size() == 1 && contents.getFirst().getTagName().equals("finding")) {

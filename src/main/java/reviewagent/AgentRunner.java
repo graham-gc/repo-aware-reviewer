@@ -38,19 +38,38 @@ final class AgentRunner {
     }
 
     final class TaskScope implements AutoCloseable {
-        private TaskScope() {
+        private TaskScope(String model) {
             if (taskBudget.get() != null) throw new IllegalStateException("Nested agent task");
-            taskBudget.set(new Budget());
+            taskBudget.set(new Budget(commandForModel(model)));
         }
         @Override public void close() { taskBudget.remove(); }
         int calls() { return taskBudget.get().calls; }
     }
-    TaskScope task() { return new TaskScope(); }
+    TaskScope task(String model) { return new TaskScope(model); }
+
+    private List<String> commandForModel(String model) {
+        if (model == null) return command;
+        var selected = new ArrayList<String>();
+        selected.add(command.getFirst());
+        for (int i = 1; i < command.size(); i++) {
+            String argument = command.get(i);
+            if (argument.equals("--model")) {
+                i++;
+            } else if (!argument.startsWith("--model=")) {
+                selected.add(argument);
+            }
+        }
+        selected.add("--model");
+        selected.add(model);
+        return List.copyOf(selected);
+    }
 
     private final class Budget {
+        final List<String> command;
         final long started = System.nanoTime();
         int calls;
         int retries;
+        Budget(List<String> command) { this.command = command; }
         Duration remaining() throws AgentCallException {
             long remaining = policy.taskTimeout().toNanos() - (System.nanoTime() - started);
             if (remaining <= 0) throw new AgentCallException(AgentCallException.Kind.BUDGET_EXHAUSTED, "Agent task elapsed-time budget exhausted");
@@ -73,11 +92,11 @@ final class AgentRunner {
 
     String invoke(String prompt, Path logPrefix) throws IOException, InterruptedException {
         Budget budget = taskBudget.get();
-        if (budget == null) budget = new Budget();
+        if (budget == null) budget = new Budget(command);
         while (true) {
             Duration allowed = budget.acquire();
             try {
-                return once(prompt, logPrefix, allowed, budget.calls);
+                return once(prompt, logPrefix, allowed, budget.calls, budget.command);
             } catch (AgentCallException failure) {
                 if (!failure.retryable() || budget.retries >= policy.retries() || budget.calls >= policy.maxCalls()) throw failure;
                 if (!executor.cleanupStatus().equals("OBSERVED_PROCESSES_TERMINATED")) {
@@ -92,7 +111,8 @@ final class AgentRunner {
         }
     }
 
-    private String once(String prompt, Path prefix, Duration allowed, int callNumber) throws IOException, InterruptedException {
+    private String once(String prompt, Path prefix, Duration allowed, int callNumber, List<String> command)
+            throws IOException, InterruptedException {
         Path attempt = attemptPrefix(prefix);
         if (attempt != null) AtomicFiles.write(Path.of(attempt + "-prompt.md"), prompt);
         Path stdout = attempt == null ? null : Path.of(attempt + "-stdout.log");

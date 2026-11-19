@@ -1,0 +1,52 @@
+[
+  {
+    "id": "gitlab-checkpoint-missing",
+    "repo": "..",
+    "base": "2e56c334c96b5a2db4c7d813252b3f23157d10d8",
+    "head": "180588bc12c4fc60b6cf99b6d28347eeeb93949a",
+    "criteria": [
+      "Known defect, later fixed in 35068d4. The Java report links to a task's state properties, while the GitLab adapter exports the report and execution logs without exporting the linked task state. GitLab artifact readers cannot open the diagnostic referenced by an incomplete report.",
+      "The affected path needs an unfinished task and a GitLab artifact. A normal complete run does not exhibit the broken diagnostic link."
+    ]
+  },
+  {
+    "id": "gitlab-checkpoint-exported",
+    "repo": "..",
+    "base": "180588bc12c4fc60b6cf99b6d28347eeeb93949a",
+    "head": "35068d4367df1ad2a28db3174088f7a4d4061657",
+    "criteria": [
+      "The GitLab artifact now includes task-state files at the report-relative paths, including tasks in nested directories. A report that still asserts the previously missing task-state files are never exported is a false positive.",
+      "Execution logs still go under diagnostics. The fix does not add raw model streams or task error text to the export."
+    ]
+  },
+  {
+    "id": "risk-summary-rejected-peer",
+    "repo": "..",
+    "base": "5cf6fb2c3628f28338835e4a182248dbdb4f67c9",
+    "head": "44a5c5604df854257ebaa5bebc1d7c007fb04157",
+    "criteria": [
+      "Known defect, later fixed in 455c11a. A candidate provisionally confirmed and later rejected can supply the representative wording of a grouped pending risk because representative selection also consults preliminary decisions and does not restrict them to the still-pending IDs.",
+      "This affects the wording of a review-required item when the grouped decisions diverge. The candidate is not thereby published as a confirmed defect."
+    ]
+  },
+  {
+    "id": "risk-summary-filtered",
+    "repo": "..",
+    "base": "44a5c5604df854257ebaa5bebc1d7c007fb04157",
+    "head": "455c11a6abc46e9aec1c14087535a1ed4b7d44b0",
+    "criteria": [
+      "Representative wording is selected only from still-pending IDs, including the fallback. A rejected peer can still contribute audit citations. Claiming that its wording remains eligible is a false positive.",
+      "This change does not decide whether a downstream failure is reachable or whether historical behavior is a binding requirement."
+    ]
+  },
+  {
+    "id": "explicit-baseline-comparison",
+    "repo": "..",
+    "base": "ce07eccbb10b00c56cb6470b03bed555abc413bd",
+    "head": "96da98815c61f8d8747797f073c76945fe8247d7",
+    "criteria": [
+      "The documented behavior intentionally compares the two supplied snapshots directly. A claim that using the supplied base instead of the merge base is itself a regression contradicts the explicitly documented contract.",
+      "A report may note how unrelated target-branch changes can appear when the chosen snapshots diverge. A stronger downstream claim needs evidence from actual consumers or requirements."
+    ]
+  }
+]
