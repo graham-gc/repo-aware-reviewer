@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""Prepare project-specific cases and run paired reviews for blind human scoring."""
+"""Prepare project-specific cases and compare reviews with blind human scoring."""
 
 import argparse
 import csv
+from decimal import Decimal, InvalidOperation
 import hashlib
+from itertools import combinations
 import json
+import math
+import os
 from pathlib import Path
 import random
 import re
@@ -15,11 +19,17 @@ import sys
 import tempfile
 import time
 
+import review_eval_pr_agent
+
 
 DEFECT_COUNTS = ("missed_defects", "false_positives", "misclassified_uncertainties")
-SCORES = (*DEFECT_COUNTS, "unmet_criteria")
+SCORES = (*DEFECT_COUNTS, "unmet_criteria", "reviewer_seconds")
 KEY = ("case", "trial", "report")
-VARIANTS = ("baseline", "candidate")
+JAR_VARIANTS = ("baseline", "candidate")
+PR_AGENT = "pr-agent"
+PR_AGENT_ROUTE_SETTINGS = ("CONFIG__MODEL", "CONFIG__FALLBACK_MODELS", "CONFIG__CUSTOM_MODEL_MAX_TOKENS",
+                           "CONFIG__MAX_MODEL_TOKENS", "CONFIG__MAX_OUTPUT_TOKENS",
+                           "PR_REVIEWER__ENABLE_LARGE_PR_CHUNKING", "PR_REVIEWER__MAX_NUMBER_OF_CALLS")
 MODEL_SECONDS = r"(?:Model workflow wall seconds|模型流程墙钟秒数): ([0-9.]+)"
 ATTEMPTS = r"(?:Actual launched attempts|实际启动调用数): ([0-9]+)"
 GIT_OID = re.compile(r"[a-f0-9]{40}|[a-f0-9]{64}")
@@ -29,6 +39,13 @@ def positive_int(value):
     number = int(value)
     if number < 1:
         raise argparse.ArgumentTypeError("must be at least 1")
+    return number
+
+
+def nonnegative_int(value):
+    number = int(value)
+    if number < 0:
+        raise argparse.ArgumentTypeError("must be zero or greater")
     return number
 
 
@@ -66,6 +83,12 @@ def read_cases(manifest):
         case.setdefault("score_missed_defects", True)
         if not isinstance(case["score_missed_defects"], bool):
             raise ValueError(f"{name}: score_missed_defects must be a boolean")
+        if "category" in case and not re.fullmatch(r"[a-z0-9][a-z0-9-]*", case["category"]):
+            raise ValueError(f"{name}: category must be a lowercase identifier")
+        if "reference_defects" in case and (type(case["reference_defects"]) is not int
+                                             or case["reference_defects"] < 0
+                                             or not case["score_missed_defects"] or "reference" not in case):
+            raise ValueError(f"{name}: reference_defects requires a verified reference and a nonnegative integer")
         for key in ("requirement", "knowledge", "reference"):
             if key in case:
                 case[key] = (manifest.parent / case[key]).read_bytes()
@@ -118,7 +141,8 @@ def run_review(case, variant, directory, language, parallelism, documents):
             content = timings.read_text(encoding="utf-8")
             seconds = metric(content, MODEL_SECONDS, float)
             attempts = metric(content, ATTEMPTS, int)
-    usable = result.returncode in (0, 3) and report is not None and report.is_file()
+    usable = (result.returncode in (0, 3) and report is not None and report.is_file()
+              and status in (None, "COMPLETE", "INCOMPLETE"))
     return (report if usable else None,
             {"exit": result.returncode, "status": status, "elapsed_seconds": elapsed,
              "model_seconds": seconds, "model_attempts": attempts})
@@ -131,7 +155,7 @@ def write_json(path, value):
 def draft_criteria(focus, language, evidence, output):
     language_name = "Simplified Chinese" if language == "zh-CN" else "English"
     prompt = f"""You are preparing scoring criteria for a comparison of code review tools.
-Write 3 to 6 concrete checks in {language_name} for the human who will score the two reports.
+Write 3 to 6 concrete checks in {language_name} for the human who will score the reports.
 Tie them to the supplied change and the evaluation focus. Name relevant repository paths,
 symbols, or explicit requirements when the evidence supports them. Make each check something
 the grader can verify by reading the report and the pinned code. Include any important limits
@@ -181,6 +205,14 @@ def prepare(args):
         raise ValueError(f"JAR is not a regular file: {jar}")
     case = {"id": f"change-{base[:8]}-{head[:8]}", "repo": str(repo), "base": base, "head": head, "focus": focus,
             "score_missed_defects": args.reference is not None}
+    if args.category:
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", args.category):
+            raise ValueError("--category must be a lowercase identifier")
+        case["category"] = args.category
+    if args.reference_defects is not None:
+        if args.reference is None:
+            raise ValueError("--reference-defects requires --reference")
+        case["reference_defects"] = args.reference_defects
 
     documents = {}
     for key in ("requirement", "knowledge", "reference"):
@@ -220,19 +252,36 @@ def prepare(args):
 def run(args):
     cases = read_cases(args.cases.resolve())
     variants = {}
-    for name in VARIANTS:
+    for name in JAR_VARIANTS:
         jar = getattr(args, name + "_jar").resolve(strict=True)
         if not jar.is_file():
             raise ValueError(f"{name} JAR is not a regular file: {jar}")
         variants[name] = {"source_jar": str(jar), "models": getattr(args, name + "_models") or [],
                           "evidence": getattr(args, name + "_evidence")}
+    if args.pr_agent:
+        executable = shutil.which(args.pr_agent)
+        if executable is None:
+            raise ValueError(f"PR-Agent executable is unavailable: {args.pr_agent}")
+        executable = str(Path(executable).absolute())
+        try:
+            version = subprocess.run([executable, "--version"], capture_output=True, text=True, timeout=15)
+        except subprocess.TimeoutExpired as error:
+            raise ValueError("PR-Agent did not respond to --version") from error
+        version_line = next((line.strip() for line in reversed(version.stdout.splitlines())
+                             if line.strip().lower().startswith("pr-agent ")), None)
+        if version.returncode or version_line is None:
+            raise ValueError("PR-Agent failed --version. Check the executable in its configured environment.")
+        variants[PR_AGENT] = {"executable": executable, "version": version_line,
+                              "environment_overrides": {key: os.environ[key] for key in PR_AGENT_ROUTE_SETTINGS
+                                                        if key in os.environ}}
 
     root = args.output.resolve()
     root.mkdir(parents=True, exist_ok=False)
     private, blind = root / "private", root / "blind"
     private.mkdir(mode=0o700)
     blind.mkdir()
-    for name, variant in variants.items():
+    for name in JAR_VARIANTS:
+        variant = variants[name]
         saved_jar = private / (name + ".jar")
         shutil.copyfile(variant["source_jar"], saved_jar)
         variant["jar"] = str(saved_jar)
@@ -240,9 +289,11 @@ def run(args):
             variant["sha256"] = hashlib.file_digest(handle, "sha256").hexdigest()
     write_json(private / "configuration.json",
                {"variants": variants, "repeats": args.repeats, "language": args.language,
+                "model_label": args.model_label, "gateway_label": args.gateway_label,
                 "parallelism": args.parallelism, "cases": [
                     {**{key: str(case[key]) for key in ("id", "repo", "base", "head")},
                      "score_missed_defects": case["score_missed_defects"],
+                     **{key: case[key] for key in ("category", "reference_defects") if key in case},
                      **{key + "_sha256": hashlib.sha256(case[key]).hexdigest()
                         for key in ("requirement", "knowledge", "reference") if key in case}}
                     for case in cases]})
@@ -271,18 +322,28 @@ def run(args):
             trial_private, trial_blind = case_private / trial, case_blind / trial
             trial_private.mkdir()
             trial_blind.mkdir()
-            labels, order = ["A", "B"], list(VARIANTS)
+            labels, order = list("ABC"[:len(variants)]), list(variants)
             rng.shuffle(labels)
             rng.shuffle(order)
-            assigned = dict(zip(VARIANTS, labels))
+            assigned = dict(zip(variants, labels))
             for variant in order:
                 print(f"Reviewing {name}, trial {trial}, {variant}", file=sys.stderr, flush=True)
-                report, metrics = run_review(case, variants[variant], trial_private / variant,
-                                             args.language, args.parallelism, documents)
                 label = assigned[variant]
+                output = trial_private / variant
+                if variant == PR_AGENT:
+                    report, metrics = review_eval_pr_agent.run(
+                        case, variants[variant]["executable"], output, args.language, documents)
+                else:
+                    report, metrics = run_review(case, variants[variant], output,
+                                                 args.language, args.parallelism, documents)
                 if report is not None:
-                    shutil.copyfile(report, trial_blind / (label + ".md"))
+                    destination = trial_blind / (label + ".md")
+                    if variant == PR_AGENT:
+                        review_eval_pr_agent.copy_for_grading(report, destination)
+                    else:
+                        shutil.copyfile(report, destination)
                 rows.append({"case": name, "trial": trial, "report": label, "variant": variant,
+                             "category": case.get("category"), "reference_defects": case.get("reference_defects"),
                              "usable": report is not None, "score_missed_defects": case["score_missed_defects"], **metrics})
     rows.sort(key=lambda row: tuple(row[key] for key in KEY))
     write_json(private / "results.json", rows)
@@ -296,9 +357,65 @@ def run(args):
     return int(not all(row["usable"] for row in rows))
 
 
+def read_costs(path, rows):
+    if path is None:
+        return
+    by_run = {(row["case"], row["trial"], row["variant"]): row for row in rows}
+    with path.open(encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        fields = ("case", "trial", "variant", "cost_usd")
+        if not set(fields).issubset(reader.fieldnames or []):
+            raise ValueError("Costs CSV must include case, trial, variant and cost_usd")
+        for record in reader:
+            key = tuple(record[field] for field in fields[:3])
+            if key not in by_run or "cost_usd" in by_run[key]:
+                raise ValueError(f"Unknown or duplicate run in costs CSV: {key}")
+            try:
+                cost = Decimal(record["cost_usd"])
+            except (InvalidOperation, TypeError) as error:
+                raise ValueError(f"Invalid measured cost for {key}") from error
+            if not cost.is_finite() or cost < 0:
+                raise ValueError(f"Invalid measured cost for {key}")
+            by_run[key]["cost_usd"] = cost
+
+
+def summarize_pair(pairs, names, grades):
+    comparable = [pair for pair in pairs if all(row.get("usable") for row in pair)]
+    complete = sum(all(row.get("status") == "COMPLETE" for row in pair) for pair in comparable)
+    scores = [(pair, [grades.get(tuple(row[key] for key in KEY), {}) for row in pair]) for pair in comparable]
+    scored = sum(bool(first.keys() & second.keys()) for _, (first, second) in scores)
+    print(f"Usable pairs: {len(comparable)}/{len(pairs)} | Scored pairs: {scored}/{len(comparable)}")
+    print(f"Complete pairs: {complete}/{len(pairs)}")
+    for index, variant in enumerate(names):
+        print(f"\n{variant}")
+        for field in ("elapsed_seconds", "model_seconds", "model_attempts", "cost_usd"):
+            measured = sorted(pair[index][field] for pair in comparable
+                              if all(row.get(field) is not None for row in pair))
+            if measured:
+                precision = 6 if field == "cost_usd" else 3
+                print(f"  Mean {field}: {statistics.mean(measured):.{precision}f} (n={len(measured)})")
+                if field == "elapsed_seconds":
+                    p95 = measured[math.ceil(0.95 * len(measured)) - 1]
+                    print(f"  p50 elapsed_seconds: {statistics.median(measured):.3f} | p95: {p95:.3f}")
+            else:
+                print(f"  Mean {field}: unavailable")
+        for field in SCORES:
+            values = [pair_grades[index][field] for _, pair_grades in scores
+                      if all(field in grade for grade in pair_grades)]
+            print(f"  Total {field}: {sum(values)} (n={len(values)})" if values else f"  Total {field}: unscored")
+        refs = [(pair[index]["reference_defects"], pair_grades[index]["missed_defects"])
+                for pair, pair_grades in scores if all("missed_defects" in grade for grade in pair_grades)
+                and pair[index].get("reference_defects")]
+        if refs:
+            total = sum(known for known, _ in refs)
+            found = sum(known - missed for known, missed in refs)
+            print(f"  Known-defect recall: {found}/{total} ({100 * found / total:.1f}%)")
+
+
 def summarize(args):
     root = args.output.resolve()
     rows = json.loads((root / "private/results.json").read_text(encoding="utf-8"))
+    read_costs(args.costs, rows)
     reports = {tuple(row[key] for key in KEY): row for row in rows if row["usable"]}
     grades = {}
     with (args.grades or root / "blind/grades.csv").open(encoding="utf-8", newline="") as handle:
@@ -320,35 +437,31 @@ def summarize(args):
                     raise ValueError(f"Use a non-negative integer or N/A for {field} in {key}")
                 if field == "missed_defects" and not reports[key].get("score_missed_defects", True):
                     raise ValueError(f"Missed defects are N/A without a verified reference for {key}")
+                known = reports[key].get("reference_defects")
+                if field == "missed_defects" and known is not None and int(value) > known:
+                    raise ValueError(f"Missed defects exceed the verified reference count for {key}")
                 grade[field] = int(value)
             grades[key] = grade
-    paired = {}
+    trials = {}
     for row in rows:
-        paired.setdefault((row["case"], row["trial"]), []).append(row)
-    comparable = [pair for pair in paired.values() if len(pair) == 2 and all(row["usable"] for row in pair)]
-    score_values = {field: {variant: [] for variant in VARIANTS} for field in SCORES}
-    scored = 0
-    for pair in comparable:
-        first_score, second_score = [grades.get(tuple(row[key] for key in KEY), {}) for row in pair]
-        paired_fields = first_score.keys() & second_score.keys()
-        if paired_fields:
-            scored += 1
-        for field in paired_fields:
-            score_values[field][pair[0]["variant"]].append(first_score[field])
-            score_values[field][pair[1]["variant"]].append(second_score[field])
-    print(f"Usable pairs: {len(comparable)}/{len(paired)} | Scored pairs: {scored}/{len(comparable)}")
-    for variant in VARIANTS:
+        trials.setdefault((row["case"], row["trial"]), {})[row["variant"]] = row
+    variants = [name for name in (*JAR_VARIANTS, PR_AGENT) if any(row["variant"] == name for row in rows)]
+    for variant in variants:
         all_runs = [row for row in rows if row["variant"] == variant]
         print(f"\n{variant} | " + ", ".join(f"{row['case']}/{row['trial']}={row['status'] or row['exit']}"
                                          for row in all_runs))
-        for field in ("elapsed_seconds", "model_seconds", "model_attempts"):
-            measured = [row[field] for pair in comparable if all(row[field] is not None for row in pair)
-                        for row in pair if row["variant"] == variant]
-            print(f"  Mean {field}: {statistics.mean(measured):.3f} (n={len(measured)})" if measured
-                  else f"  Mean {field}: unavailable")
-        for field in SCORES:
-            scores = score_values[field][variant]
-            print(f"  Total {field}: {sum(scores)} (n={len(scores)})" if scores else f"  Total {field}: unscored")
+        tokens = [row["total_tokens"] for row in all_runs if row.get("total_tokens") is not None]
+        if tokens:
+            print(f"  Mean reported total tokens: {statistics.mean(tokens):.0f} (n={len(tokens)})")
+    categories = sorted({row["category"] for row in rows if row.get("category")})
+    for names in combinations(variants, 2):
+        pairs = [tuple(trial.get(name, {}) for name in names) for trial in trials.values()]
+        print(f"\n{names[0]} vs {names[1]} — all cases")
+        summarize_pair(pairs, names, grades)
+        for category in categories:
+            group = [pair for pair in pairs if any(row.get("category") == category for row in pair)]
+            print(f"\n{names[0]} vs {names[1]} — {category}")
+            summarize_pair(group, names, grades)
     return 0
 
 
@@ -366,6 +479,8 @@ def main():
     case.add_argument("--requirement", type=Path)
     case.add_argument("--knowledge", type=Path)
     case.add_argument("--reference", type=Path, help="verified reference findings for the grader only")
+    case.add_argument("--reference-defects", type=nonnegative_int, help="number of defects in the verified reference")
+    case.add_argument("--category", help="label for grouped comparisons, for example small or high-risk")
     case.set_defaults(handle=prepare)
     trial = commands.add_parser("run")
     trial.add_argument("--cases", required=True, type=Path)
@@ -373,7 +488,10 @@ def main():
     trial.add_argument("--language", choices=("en", "zh-CN"), default="en")
     trial.add_argument("--parallelism", type=positive_int, default=3)
     trial.add_argument("--repeats", type=positive_int, default=1)
-    for name in VARIANTS:
+    trial.add_argument("--pr-agent", metavar="EXECUTABLE", help="add PR-Agent with plain-diff and JSON output support")
+    trial.add_argument("--model-label", help="record the operator-configured model without changing routing")
+    trial.add_argument("--gateway-label", help="record a non-secret label for the configured gateway")
+    for name in JAR_VARIANTS:
         trial.add_argument(f"--{name}-jar", required=True, type=Path)
         trial.add_argument(f"--{name}-models", nargs=3, metavar="MODEL")
         trial.add_argument(f"--{name}-evidence", choices=("full", "scoped"))
@@ -381,6 +499,7 @@ def main():
     report = commands.add_parser("summarize")
     report.add_argument("--output", required=True, type=Path)
     report.add_argument("--grades", type=Path)
+    report.add_argument("--costs", type=Path, help="optional measured billing CSV keyed by case, trial and variant")
     report.set_defaults(handle=summarize)
     args = parser.parse_args()
     try:

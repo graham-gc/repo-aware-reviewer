@@ -155,7 +155,8 @@ final class AgentRunner {
             boolean interrupted = Thread.interrupted();
             try {
                 active.decrementAndGet();
-                timings.call(prefix, started, System.nanoTime(), EvidenceText.bytes(prompt), reason);
+                var observed = executor.observations();
+                timings.call(prefix, attempt, started, System.nanoTime(), EvidenceText.bytes(prompt), reason, observed);
                 if (attempt != null) {
                     byte[] input = prompt.getBytes(StandardCharsets.UTF_8);
                     String record = "executable=" + EvidenceText.oneLine(command.getFirst())
@@ -163,6 +164,11 @@ final class AgentRunner {
                             + "\nstartedAt=" + startedAt + "\ntimeoutSeconds=" + timeout.toSeconds()
                             + "\nallowedMillis=" + allowed.toMillis()
                             + "\nelapsedMillis=" + Duration.ofNanos(System.nanoTime() - started).toMillis()
+                            + "\nprocessStartedMillis=" + observedMillis(observed.processStarted())
+                            + "\nstdinClosedMillis=" + observedMillis(observed.stdinClosed())
+                            + "\nfirstStdoutMillis=" + observedMillis(observed.firstStdout())
+                            + "\nfirstStderrMillis=" + observedMillis(observed.firstStderr())
+                            + "\nprocessExitObservedMillis=" + observedMillis(observed.exitObserved())
                             + "\nexitCode=" + (exit == null ? "unavailable" : exit)
                             + "\nterminationReason=" + reason + "\nprocessCleanup=" + executor.cleanupStatus() + "\ninputBytes=" + input.length
                             + "\npromptSha256=" + InputDocument.sha256(input)
@@ -180,6 +186,10 @@ final class AgentRunner {
                 }
             } finally { if (interrupted) Thread.currentThread().interrupt(); }
         }
+    }
+
+    private static String observedMillis(Long millis) {
+        return millis == null ? "unavailable" : millis.toString();
     }
 
     private static Path attemptPrefix(Path prefix) throws IOException {

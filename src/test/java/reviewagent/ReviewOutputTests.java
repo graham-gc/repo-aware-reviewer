@@ -68,6 +68,17 @@ final class ReviewOutputTests {
         require(report.contains("[HIGH] First failure") && report.contains("[LOW] Independent failure"), "severity rendering");
         require(!report.contains("Same failure") && !report.contains("fabricated"), "duplicates and unverified model text excluded");
         require(report.indexOf("First failure") < report.indexOf("Independent failure"), "findings ordered by severity");
+        var reportScope = new ReviewScope(ReviewScope.Mode.COMMIT, "base", "target", "base", "target", "base..target");
+        var reportEvidence = new EvidenceBundle(reportScope, List.of(first.path()), "", "", 0, null, EvidenceCatalog.empty());
+        var separateOutcome = new ReviewFinding(other.id(), other.title(), other.severity(), first.path(), first.line(), first.endLine(),
+                "Input contains an unknown item", "The item is silently dropped", other.evidence(), other.diffRelation());
+        String localReport = ReviewReport.deepReport(reportEvidence, "The function now returns zero for an empty input.",
+                List.of(separateOutcome, duplicate, first), List.of(List.of(first.id(), duplicate.id(), separateOutcome.id())),
+                List.of(), OutputLanguage.EN);
+        require(localReport.contains(first.markdown(OutputLanguage.EN).strip())
+                && localReport.contains(separateOutcome.markdown(OutputLanguage.EN).strip())
+                && !localReport.contains("Same failure") && localReport.contains("returns zero for an empty input."),
+                "local report preserves evidence, one representative per adjudicated group and distinct findings at the same location");
         String finalBody = body;
         fails(() -> ReviewReport.finalReport(finalBody + "\n" + xml(groups.replace("R3-1", "unknown")), List.of(first, duplicate, other), OutputLanguage.EN));
         fails(() -> ReviewReport.finalReport(finalBody + "\n" + xml("<finding-groups/>"), List.of(first), OutputLanguage.EN));

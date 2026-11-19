@@ -169,7 +169,65 @@ final class ReviewReport {
 
     static String adaptiveReport(EvidenceBundle evidence, String summary, List<ReviewFinding> confirmed,
                                  List<ReviewConcerns.Item> concerns, OutputLanguage language) {
+        if (evidence.changedFiles().size() > 1)
+            return structuredReport(evidence, ReportText.inline(summary), confirmed, concerns, language, false, language.text(
+                    "Static review used complete diffs and nearby implementation lines at both revisions. Supporting tests or documents "
+                            + "were reviewed through their diffs. See [coverage.md](coverage.md) for additional evidence.",
+                    "静态审查使用了完整差异和基线、目标版本中靠近改动的实现源码。配套测试或说明按差异审查。"
+                            + "补充证据详见 [coverage.md](coverage.md)。"));
         return structuredReport(evidence, ReportText.inline(summary), confirmed, concerns, language, false);
+    }
+
+    static String documentationReport(EvidenceBundle evidence, String summary, List<ReviewConcerns.Item> concerns, OutputLanguage language) {
+        return structuredReport(evidence, ReportText.inline(summary), List.of(), concerns, language, false, language.text(
+                "Reviewed the complete Markdown diffs at the pinned revisions. Implementation behavior and link availability were not verified. "
+                        + "See [coverage.md](coverage.md) for scope and [evidence-index.md](evidence-index.md) for provenance.",
+                "审查了固定版本的完整 Markdown 差异。未验证实现行为或链接可用性。"
+                        + "范围见 [coverage.md](coverage.md)，证据来源见 [evidence-index.md](evidence-index.md)。"));
+    }
+
+    private record ConfirmedBehavior(String path, int line, int endLine, String trigger, String impact) {
+        ConfirmedBehavior(ReviewFinding finding) {
+            this(finding.path(), finding.line(), finding.endLine(), ReportText.inline(finding.trigger()),
+                    ReportText.inline(finding.impact()));
+        }
+    }
+
+    static String deepReport(EvidenceBundle evidence, String changeSummary, List<ReviewFinding> confirmed,
+                             List<List<String>> publicationGroups, List<ReviewConcerns.Item> concerns,
+                             OutputLanguage language) {
+        var remaining = new LinkedHashMap<String, ReviewFinding>();
+        confirmed.forEach(finding -> remaining.put(finding.id(), finding));
+        var representatives = new ArrayList<ReviewFinding>();
+        var bySeverity = Comparator.comparing(ReviewFinding::severity);
+        for (List<String> group : publicationGroups) {
+            // Independent adjudication can narrow or distinguish candidates after initial grouping.
+            var matching = new LinkedHashMap<ConfirmedBehavior, ReviewFinding>();
+            for (String id : group) {
+                ReviewFinding finding = remaining.remove(id);
+                if (finding == null) continue;
+                matching.merge(new ConfirmedBehavior(finding), finding, java.util.function.BinaryOperator.minBy(bySeverity));
+            }
+            representatives.addAll(matching.values());
+        }
+        representatives.addAll(remaining.values());
+
+        String summary = ReportText.summary(changeSummary, 500);
+        if (summary.isEmpty()) {
+            summary = evidence.changedFiles().stream().limit(8)
+                    .map(path -> "- " + code(ReportText.inline(path)))
+                    .collect(java.util.stream.Collectors.joining("\n",
+                            language.text("Changed paths\n\n", "变更路径\n\n"), ""));
+            if (evidence.changedFiles().size() > 8) {
+                summary += language.text("\n\nSee [evidence.md](evidence.md) for the full change scope.",
+                        "\n\n完整变更范围见 [evidence.md](evidence.md)。");
+            }
+        }
+        return structuredReport(evidence, summary, representatives, concerns, language, false, language.text(
+                "Static review at the pinned revisions. See [coverage.md](coverage.md) for evidence gaps and candidate decisions "
+                        + "and [evidence-index.md](evidence-index.md) for source provenance. No target build or tests were run.",
+                "本轮对固定版本做了静态审查。证据缺口和候选裁决见 [coverage.md](coverage.md)，"
+                        + "来源见 [evidence-index.md](evidence-index.md)。未执行目标项目的构建或测试。"));
     }
 
     static String focusedReport(EvidenceBundle evidence, List<ReviewFinding> confirmed,
@@ -190,9 +248,6 @@ final class ReviewReport {
 
     private static String structuredReport(EvidenceBundle evidence, String summary, List<ReviewFinding> confirmed,
                                            List<ReviewConcerns.Item> concerns, OutputLanguage language, boolean focused) {
-        var scope = evidence.scope();
-        String changed = focused ? language.text("Changed files", "变更文件") + " — " + evidence.changedFiles().size()
-                : language.text("Changed file", "变更文件") + " — " + code(EvidenceText.oneLine(evidence.changedFiles().getFirst()));
         String limits = focused ? language.text(
                 "Static review used bounded diff excerpts and stronger evidence for identified risk areas. See [coverage.md](coverage.md) for each scope, "
                         + "truncated inputs and follow-up decisions. No build or tests were run.",
@@ -201,6 +256,15 @@ final class ReviewReport {
                                 + "See [coverage.md](coverage.md) for evidence and the selected review route.",
                         "静态审查使用了完整的局部差异和基线、目标源码。未执行构建或测试。"
                                 + "审查路线及证据详见 [coverage.md](coverage.md)。");
+        return structuredReport(evidence, summary, confirmed, concerns, language, focused, limits);
+    }
+
+    private static String structuredReport(EvidenceBundle evidence, String summary, List<ReviewFinding> confirmed,
+                                           List<ReviewConcerns.Item> concerns, OutputLanguage language, boolean focused, String limits) {
+        var scope = evidence.scope();
+        String changed = focused || evidence.changedFiles().size() != 1
+                ? language.text("Changed files", "变更文件") + " — " + evidence.changedFiles().size()
+                : language.text("Changed file", "变更文件") + " — " + code(EvidenceText.oneLine(evidence.changedFiles().getFirst()));
         List<String> content = List.of(
                 language.text("Base", "基线") + " — " + code(scope.baseCommit()) + "\n\n"
                         + language.text("Target", "目标") + " — " + code(scope.targetCommit()) + "\n\n"

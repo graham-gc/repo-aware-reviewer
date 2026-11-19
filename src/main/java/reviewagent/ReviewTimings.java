@@ -11,19 +11,26 @@ import java.util.Locale;
 /** Current execution only: distinguish overlapping process durations from stage wall time. */
 final class ReviewTimings {
     record Interval(long start, long end) { }
-    private record Call(Path prefix, Interval interval, int bytes, String result) { }
+    private record Call(Path prefix, Path attempt, Interval interval, int bytes, String result,
+                        ProcessExecutor.Observations observed) { }
+    private record Validation(Path task, long elapsed, boolean cached, boolean accepted) { }
     private record Stage(Path directory, Interval interval) { }
     private record Prepared(Path task, int fullBytes, int selectedBytes, int sources, int totalSources) { }
     private final long started = System.nanoTime();
     private final List<Call> calls = new ArrayList<>();
+    private final List<Validation> validations = new ArrayList<>();
     private final List<Stage> stages = new ArrayList<>();
     private final List<Prepared> prepared = new ArrayList<>();
     private int reused;
     private int failed;
     private int unchanged;
 
-    synchronized void call(Path prefix, long start, long end, int bytes, String result) {
-        calls.add(new Call(prefix, new Interval(start, end), bytes, result));
+    synchronized void call(Path prefix, Path attempt, long start, long end, int bytes, String result,
+                           ProcessExecutor.Observations observed) {
+        calls.add(new Call(prefix, attempt, new Interval(start, end), bytes, result, observed));
+    }
+    synchronized void validation(Path task, long elapsed, boolean cached, boolean accepted) {
+        validations.add(new Validation(task, elapsed, cached, accepted));
     }
     synchronized void stage(Path directory, long start, long end) { stages.add(new Stage(directory, new Interval(start, end))); }
     synchronized void prepared(Path task, int fullBytes, int selectedBytes, int sources, int totalSources) {
@@ -71,8 +78,29 @@ final class ReviewTimings {
         for (Prepared item : prepared) out.append('|').append(root.relativize(item.task())).append('|').append(item.fullBytes()).append('|')
                 .append(item.selectedBytes()).append('|').append(item.sources()).append('/').append(item.totalSources()).append("|\n");
         out.append(language.text("\n## Attempt outcomes\n\n", "\n## 调用结果\n\n"));
-        for (Call call : calls) out.append("- ").append(call.prefix() == null ? "unlogged" : root.relativize(call.prefix()))
-                .append(": ").append(call.result()).append("; ").append(seconds(call.interval().end() - call.interval().start())).append("s\n");
+        out.append(language.text("Pipe and exit observations are local offsets in milliseconds from command launch. A dash marks an unobserved event. Buffered output can arrive well after upstream generation starts.\n\n",
+                "管道和退出事件以本地命令开始启动为起点，单位为毫秒。横线表示未观测到。缓冲输出可能在上游开始生成很久后才出现。\n\n"));
+        out.append(language.text("| Attempt | Result | Total s | Started ms | Stdin closed ms | First stdout ms | First stderr ms | Exit observed ms |\n",
+                "| 调用记录 | 结果 | 总秒数 | 启动成功毫秒 | 输入关闭毫秒 | 首次标准输出毫秒 | 首次标准错误毫秒 | 观测退出毫秒 |\n"));
+        out.append("| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |\n");
+        for (Call call : calls) {
+            var observed = call.observed();
+            out.append('|').append(call.attempt() == null ? "unlogged" : root.relativize(call.attempt())).append('|')
+                    .append(call.result()).append('|').append(seconds(call.interval().end() - call.interval().start())).append('|')
+                    .append(observedMillis(observed.processStarted())).append('|').append(observedMillis(observed.stdinClosed())).append('|')
+                    .append(observedMillis(observed.firstStdout())).append('|').append(observedMillis(observed.firstStderr())).append('|')
+                    .append(observedMillis(observed.exitObserved())).append("|\n");
+        }
+        out.append(language.text("\n## Local response validation\n\nValidation time covers local response checks. Model correction calls appear in the attempt table.\n\n",
+                "\n## 本地响应校验\n\n校验耗时仅统计本地响应检查。模型纠错调用见上表。\n\n"));
+        out.append(language.text("| Task | Response source | Result | Validation s |\n", "| 任务 | 响应来源 | 结果 | 校验秒数 |\n"));
+        out.append("| --- | --- | --- | ---: |\n");
+        for (Validation validation : validations) {
+            out.append('|').append(root.relativize(validation.task())).append('|')
+                    .append(validation.cached() ? language.text("cached", "缓存") : language.text("current", "本次调用")).append('|')
+                    .append(validation.accepted() ? language.text("accepted", "通过") : language.text("rejected", "未通过")).append('|')
+                    .append(seconds(validation.elapsed())).append("|\n");
+        }
         return out.toString();
     }
 
@@ -85,6 +113,7 @@ final class ReviewTimings {
         }
         return sum;
     }
+    private static String observedMillis(Long millis) { return millis == null ? "—" : millis.toString(); }
     private static String seconds(long nanos) { return String.format(Locale.ROOT, "%.3f", nanos / 1_000_000_000.0); }
     private static String phase(Path directory, Path root) {
         if (directory == null) return "unlogged";

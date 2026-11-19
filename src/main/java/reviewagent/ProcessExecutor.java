@@ -25,8 +25,27 @@ final class ProcessExecutor {
             }
         }, "review-command-cleanup"));
     }
+    record Observations(Long processStarted, Long stdinClosed, Long firstStdout, Long firstStderr, Long exitObserved) { }
+
+    private static final class Timing {
+        private final long started = System.nanoTime();
+        private Long processStarted;
+        private volatile Long stdinClosed;
+        private volatile Long firstStdout;
+        private volatile Long firstStderr;
+        private Long exitObserved;
+
+        long elapsedMillis() { return TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started); }
+
+        Observations snapshot() {
+            return new Observations(processStarted, stdinClosed, firstStdout, firstStderr, exitObserved);
+        }
+    }
+
+    private final ThreadLocal<Timing> timing = new ThreadLocal<>();
     private final ThreadLocal<String> cleanupStatus = ThreadLocal.withInitial(() -> "NOT_STARTED");
     String cleanupStatus() { return cleanupStatus.get(); }
+    Observations observations() { return timing.get().snapshot(); }
     CommandResult run(List<String> command, Path workingDirectory, String stdin, Duration timeout)
             throws IOException, InterruptedException {
         return run(command, workingDirectory, stdin, timeout, null, null);
@@ -40,27 +59,33 @@ final class ProcessExecutor {
     CommandResult run(List<String> command, Path workingDirectory, String stdin, Duration timeout,
                       Path stdoutLog, Path stderrLog, java.util.Map<String, String> environment)
             throws IOException, InterruptedException {
-        ProcessBuilder builder = new ProcessBuilder(command).directory(workingDirectory.toFile());
+        var current = new Timing();
+        timing.set(current);
         cleanupStatus.set("NOT_STARTED");
+        ProcessBuilder builder = new ProcessBuilder(command).directory(workingDirectory.toFile());
         builder.environment().putAll(environment);
         long timeoutNanos = timeout.toNanos();
         Process process;
         try { process = builder.start(); }
         catch (IOException failure) { throw new CommandStartException("Cannot start command: " + command.getFirst(), failure); }
+        current.processStarted = current.elapsedMillis();
         long deadline = System.nanoTime() + timeoutNanos;
         java.util.Set<ProcessHandle> children = java.util.concurrent.ConcurrentHashMap.newKeySet();
         ACTIVE.put(process, children);
         boolean treeAvailable = true;
         var readers = Executors.newVirtualThreadPerTaskExecutor();
         try {
-            Future<byte[]> stdoutReader = readers.submit(() -> capture(process.getInputStream(), stdoutLog));
-            Future<byte[]> stderrReader = readers.submit(() -> capture(process.getErrorStream(), stderrLog));
+            Future<byte[]> stdoutReader = readers.submit(() ->
+                    capture(process.getInputStream(), stdoutLog, () -> current.firstStdout = current.elapsedMillis()));
+            Future<byte[]> stderrReader = readers.submit(() ->
+                    capture(process.getErrorStream(), stderrLog, () -> current.firstStderr = current.elapsedMillis()));
             Future<?> writer = readers.submit(() -> {
                 try (var output = process.getOutputStream()) {
                     if (stdin != null) {
                         output.write(stdin.getBytes(StandardCharsets.UTF_8));
                     }
                 }
+                current.stdinClosed = current.elapsedMillis();
                 return null;
             });
             try {
@@ -70,6 +95,7 @@ final class ProcessExecutor {
                     if (remaining <= 0) throw new TimeoutException();
                     if (process.waitFor(Math.min(remaining, TimeUnit.MILLISECONDS.toNanos(25)), TimeUnit.NANOSECONDS)) break;
                 }
+                current.exitObserved = current.elapsedMillis();
                 byte[] stdout = stdoutReader.get(Math.max(0, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
                 String stderr = new String(stderrReader.get(Math.max(0, deadline - System.nanoTime()), TimeUnit.NANOSECONDS),
                         StandardCharsets.UTF_8);
@@ -150,12 +176,13 @@ final class ProcessExecutor {
         try { stream.close(); } catch (IOException ignored) { /* Preserve the original command failure. */ }
     }
 
-    private static byte[] capture(InputStream input, Path log) throws IOException {
+    private static byte[] capture(InputStream input, Path log, Runnable observeFirstByte) throws IOException {
         try (OutputStream output = log == null ? OutputStream.nullOutputStream() : Files.newOutputStream(log)) {
             var captured = new ByteArrayOutputStream();
             byte[] buffer = new byte[8192];
             int count;
             while ((count = input.read(buffer)) != -1) {
+                if (count > 0 && captured.size() == 0) observeFirstByte.run();
                 output.write(buffer, 0, count);
                 output.flush();
                 captured.write(buffer, 0, count);

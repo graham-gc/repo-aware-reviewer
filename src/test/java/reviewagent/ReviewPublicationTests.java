@@ -186,7 +186,12 @@ final class ReviewPublicationTests {
                       'DISCOVERY RESPONSE RECOVERY'*)
                         if [ "$2" = gamma ] && [ -f "$root/fail-discovery" ]; then printf 'Still no findings block.'
                         elif [ "$2" = gamma ] && [ -f "$root/empty-discovery" ]; then printf '<findings/>'
-                        else cat "$root/discovery.xml"; fi ;;
+                        else
+                          cat "$root/discovery.xml"
+                          case "$prompt" in
+                            *'CHANGE_SUMMARY|'*) printf '\\nCHANGE_SUMMARY|The empty-input guard is removed.\\n' ;;
+                          esac
+                        fi ;;
                       'You are the discovery stage'*)
                         if [ "$2" = alpha ]; then printf 'initial malformed discovery'
                         elif [ "$2" = beta ] && [ -f "$root/shared-publication" ]; then cat "$root/duplicate-findings.xml"
@@ -243,7 +248,9 @@ final class ReviewPublicationTests {
             String report = Files.readString(run.resolve("report.md"));
             require(report.contains("Confirmed defects: 0; review-required items: 1; unfinished checks: 0")
                     && report.contains("[Review required — conflicting decisions]") && report.contains("ZeroDivisionError")
-                    && report.contains("Suggested check: " + NEXT_CHECK),
+                    && report.contains("Suggested check: " + NEXT_CHECK)
+                    && report.contains("The empty-input guard is removed.")
+                    && !Files.exists(run.resolve("report-prompt.md")),
                     "the full pipeline surfaces the playground compatibility risk in its main findings");
             require(Files.isRegularFile(run.resolve("discovery/R1-repair-response.md"))
                     && Files.readString(run.resolve("scope.md")).contains("Discovery models (R1, R2, R3): alpha, beta, gamma"),
@@ -267,11 +274,14 @@ final class ReviewPublicationTests {
                         "resume rejects a changed discovery route before launching or reusing tasks");
             }
 
-            // A report model must not put pending IDs into the empty set of confirmed findings.
+            // With supplied knowledge, the report model still cannot put pending IDs into confirmed findings.
+            Path knowledge = fixture.resolve("knowledge.md");
+            Files.writeString(knowledge, "# Project scope\nReview calculator compatibility.\n");
+            var withKnowledge = options(command, "--knowledge", knowledge.toString(), "--output-dir", fixture.resolve("runs").toString());
             String invalidReport = Files.readString(fixture.resolve("report.txt")).replace("<finding-groups/>",
                     "<finding-groups><group><id>R2-1</id></group></finding-groups>");
             Files.writeString(fixture.resolve("report.txt"), invalidReport);
-            Path partial = new ReviewPipeline(new ProcessExecutor(), Clock.systemUTC()).run(options);
+            Path partial = new ReviewPipeline(new ProcessExecutor(), Clock.systemUTC()).run(withKnowledge);
             String fallback = Files.readString(partial.resolve("report.md"));
             String partialStatus = Files.readString(partial.resolve("review-status.md"));
             require(Main.reviewExitCode(partial) == 3 && fallback.contains("[Review required — conflicting decisions]")
@@ -291,7 +301,7 @@ final class ReviewPublicationTests {
                     "the malformed grouping is still rejected and its full local error retained");
             Files.writeString(fixture.resolve("report.txt"), String.join("\n\n", ReviewReport.headings(OutputLanguage.EN)) + "\n<finding-groups/>");
             long beforeRecovery = Files.readAllLines(fixture.resolve("calls")).size();
-            var recover = options(command, "--resume", partial.toString());
+            var recover = options(command, "--knowledge", knowledge.toString(), "--resume", partial.toString());
             new ReviewPipeline(new ProcessExecutor(), Clock.systemUTC()).run(recover);
             require(Main.reviewExitCode(partial) == 0 && Files.readString(partial.resolve("review-status.md")).contains("Candidates requiring human review: 3")
                     && Files.readAllLines(fixture.resolve("calls")).size() == beforeRecovery + 1
@@ -354,6 +364,11 @@ final class ReviewPublicationTests {
                 && Files.exists(separate.resolve("adjudication/R3-1-prompt.md"))
                 && !Files.readString(separate.resolve("coverage.md")).contains("Shared publication adjudication"),
                 "partial coverage falls back to the remaining individual adjudications without rerunning the representative");
+        String separateReport = Files.readString(separate.resolve("report.md"));
+        require(separateReport.lines().filter(line -> line.startsWith("### [MEDIUM]")).count() == 1
+                && separateReport.contains("`calculator.py:2")
+                && !Files.exists(separate.resolve("report-prompt.md")),
+                "local report lists one published defect for the group and preserves grounded source locations");
 
         Files.delete(fixture.resolve("shared-publication"));
         Files.delete(fixture.resolve("decline-sharing"));

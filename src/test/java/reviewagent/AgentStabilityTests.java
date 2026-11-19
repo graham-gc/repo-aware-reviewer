@@ -50,15 +50,24 @@ final class AgentStabilityTests {
         var agent = shell(dir, counting + "[ \"$n\" -eq 1 ] && exit 0; printf VALID", 1, 5, Duration.ofSeconds(2));
         require(agent.invoke("中文 prompt", dir.resolve("empty")).equals("VALID"), "one empty response can recover");
         require(Files.readString(dir.resolve("count")).equals("2"), "empty output uses only one extra attempt");
-        require(Files.readString(dir.resolve("empty-attempts/attempt-0001/call-execution.log")).contains("terminationReason=EMPTY_RESPONSE")
-                && Files.readString(dir.resolve("empty-attempts/attempt-0002/call-execution.log")).contains("terminationReason=SUCCEEDED")
+        String empty = Files.readString(dir.resolve("empty-attempts/attempt-0001/call-execution.log"));
+        String resumed = Files.readString(dir.resolve("empty-attempts/attempt-0002/call-execution.log"));
+        require(empty.contains("terminationReason=EMPTY_RESPONSE")
+                && resumed.contains("terminationReason=SUCCEEDED")
                 && Files.size(dir.resolve("empty-attempts/attempt-0001/call-stdout.log")) == 0,
                 "original empty output and the successful retry remain independently inspectable");
+        require(empty.contains("firstStdoutMillis=unavailable") && observed(resumed, "firstStdoutMillis")
+                && observed(resumed, "processStartedMillis") && observed(resumed, "stdinClosedMillis")
+                && observed(resumed, "processExitObservedMillis"),
+                "process timing records each attempt independently, including missing stdout");
         require(Files.readString(dir.resolve("empty-execution.log")).contains("inputBytes=13"), "input measurement uses UTF-8 bytes");
         Files.delete(dir.resolve("count"));
         shell(dir, counting + "[ \"$n\" -ne 1 ] || { printf 'HTTP 503: unavailable' >&2; exit 1; }; printf VALID",
                 1, 5, Duration.ofSeconds(2)).invoke("prompt", dir.resolve("transient"));
         require(Files.readString(dir.resolve("count")).equals("2"), "explicit temporary upstream errors can recover");
+        require(observed(Files.readString(dir.resolve("transient-attempts/attempt-0001/call-execution.log")), "firstStderrMillis")
+                && Files.readString(dir.resolve("transient-execution.log")).contains("firstStderrMillis=unavailable"),
+                "stderr timing reflects each attempt's own output");
         for (String failure : List.of("exit 9", "printf 'HTTP 401: authentication failed' >&2; exit 1",
                 "printf 'prompt is too long' >&2; exit 1")) {
             Files.delete(dir.resolve("count"));
@@ -78,6 +87,10 @@ final class AgentStabilityTests {
         }
     }
 
+    private static boolean observed(String execution, String key) {
+        return execution.lines().anyMatch(line -> line.matches(key + "=\\d+"));
+    }
+
     private static void sharedBudget() throws Exception {
         Path dir = Files.createTempDirectory("review-agent-budget-");
         var agent = shell(dir, "cat >/dev/null; if [ ! -f called ]; then touch called; exit 0; fi; printf INVALID",
@@ -95,6 +108,10 @@ final class AgentStabilityTests {
         try { slow.invoke("prompt", dir.resolve("deadline")); throw new AssertionError("Expected task deadline"); }
         catch (AgentCallException expired) { require(expired.kind() == AgentCallException.Kind.TIMEOUT, "task deadline limits even the first call"); }
         require(!Files.exists(dir.resolve("deadline-attempts/attempt-0002")), "timeouts do not automatically repeat an expensive request");
+        String deadline = Files.readString(dir.resolve("deadline-execution.log"));
+        require(observed(deadline, "stdinClosedMillis") && deadline.contains("firstStdoutMillis=unavailable")
+                && deadline.contains("processExitObservedMillis=unavailable"),
+                "timeout logs distinguish input sent from missing output and an exit only caused by cleanup");
     }
 
     private static void independentFailures() throws Exception {
@@ -157,23 +174,24 @@ final class AgentStabilityTests {
                 && Files.readString(run.resolve("report.md")).startsWith("> **Review incomplete:"), "a missing discovery role cannot be presented as full review coverage");
         require(Files.isRegularFile(run.resolve("discovery/R2-response.md")) && Files.isRegularFile(run.resolve("discovery/R3-response.md"))
                 && Main.reviewExitCode(run) == 3, "valid reviewers survive and the CLI indicates incomplete execution");
-        require(Files.readString(run.resolve("timings.md")).contains("Actual launched attempts: 4"),
+        require(Files.readString(run.resolve("timings.md")).contains("Actual launched attempts: 3"),
                 "an incomplete run records its actual calls without counting compatibility logs twice");
         Files.delete(dir.resolve("fail-r1"));
         args.addAll(List.of("--resume", run.toString(), "--review-parallelism", "1"));
         pipeline.run(CliOptions.parse(args.toArray(String[]::new)));
         require(Main.reviewExitCode(run) == 0 && Files.readString(run.resolve("review-status.md")).contains("COMPLETE"), "validated resume clears the missing discovery role");
-        require(Files.readString(run.resolve("timings.md")).contains("Actual launched attempts: 2")
+        require(Files.readString(run.resolve("timings.md")).contains("Actual launched attempts: 1")
                 && Files.readString(run.resolve("timings.md")).contains("Valid cached tasks reused: 2"),
                 "resumed timing excludes earlier calls and reports cache reuse separately");
         require(Files.readString(dir.resolve("R1-count")).equals("xx") && Files.readString(dir.resolve("R2-count")).equals("x")
                 && Files.readString(dir.resolve("R3-count")).equals("x"), "changing parallelism does not rerun completed independent reviewers");
         Files.createFile(dir.resolve("fail-report"));
-        // A new execution must not fall back to a previous run's final narrative.
         args.remove(args.indexOf("--resume") + 1); args.remove("--resume");
-        Path partial = pipeline.run(CliOptions.parse(args.toArray(String[]::new)));
-        require(Main.reviewExitCode(partial) == 3 && Files.readString(partial.resolve("report.md")).contains("No publishable conclusions"),
-                "failed consolidation produces a deterministic incomplete report");
+        Path local = pipeline.run(CliOptions.parse(args.toArray(String[]::new)));
+        require(Main.reviewExitCode(local) == 0 && !Files.exists(local.resolve("report-prompt.md"))
+                && Files.readString(local.resolve("report.md")).contains("Changed paths")
+                && Files.readString(local.resolve("timings.md")).contains("Actual launched attempts: 3"),
+                "valid findings can produce a complete report even when the agent would fail report generation");
     }
 
     private static void checkpointsAndStorage() throws Exception {
@@ -194,6 +212,11 @@ final class AgentStabilityTests {
             require(ReviewTasks.run(List.of(task), repair, dir, 1, progress, 1, 2, "Reject truncated checkpoint", true)
                     .get("saved").equals("VALID") && Files.readString(dir.resolve("calls")).equals("x"),
                     "a success marker never bypasses validation of a truncated response");
+            String timing = repair.timings().markdown(dir, OutputLanguage.EN);
+            require(timing.contains("|saved|cached|rejected|") && timing.contains("|saved|current|accepted|")
+                    && !timing.contains("|saved|current|rejected|")
+                    && timing.contains("|saved-repair-attempts/attempt-0001/call|SUCCEEDED|"),
+                    "timing separates cached rejection, model repair and local validation of the repaired result");
             Files.createDirectory(dir.resolve("diag-normalization.log"));
             var diagnostic = new ReviewTasks.Task("diag", "log failure", reply -> ResponseDiagnostics.record("Recovered field"));
             try {

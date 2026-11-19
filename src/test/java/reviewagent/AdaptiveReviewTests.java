@@ -23,6 +23,8 @@ final class AdaptiveReviewTests {
             git(repository, "config", "user.email", "fixture@example.invalid");
             Files.writeString(repository.resolve("calculator.py"), BEFORE);
             Files.writeString(repository.resolve("helper.py"), "from calculator import average\nresult = average([])\n");
+            Files.writeString(repository.resolve("README.md"), "# Guide\nRun the checked example.\n");
+            Files.writeString(repository.resolve("README.zh-CN.md"), "# 指南\n运行已核对的示例。\n");
             Files.writeString(repository.resolve("app.py"), "def has_permission(user):\n    return user.active\n");
             Files.writeString(repository.resolve("review_worker.py"), """
                     def execute_review(actor):
@@ -40,6 +42,7 @@ final class AdaptiveReviewTests {
                     prompt=$(cat)
                     case "$prompt" in
                       'Review this small change'*) cat "$root/local.xml" ;;
+                      'Review these Markdown edits'*) cat "$root/documentation.xml" ;;
                       'Review the supplied scope'*)
                         case "$prompt" in
                           *'<basis>OUTCOME</basis>'*'queue.schedule(actor)'*) cat "$root/scoped.xml" ;;
@@ -103,12 +106,89 @@ final class AdaptiveReviewTests {
 
             writeLocal(fixture, decision("CONFIRMED", "", "LOW").replace("<lines>2:2</lines>", "<lines>1:1</lines>"));
             Path fallback = pipeline.run(options(arguments));
-            check(Main.reviewExitCode(fallback) == 0 && calls(fallback, 6)
+            check(Main.reviewExitCode(fallback) == 0 && calls(fallback, 5)
                     && Files.readString(fallback.resolve("coverage.md")).contains("Local response failed validation"),
                     "unbound finding locations cannot be published and trigger deep review");
 
             Path forced = pipeline.run(options(arguments, "--review-mode", "deep"));
-            check(calls(forced, 4) && !Files.exists(forced.resolve("adaptive")), "explicit deep review bypasses local review");
+            check(calls(forced, 3) && !Files.exists(forced.resolve("adaptive")), "explicit deep review bypasses local review");
+
+            Files.writeString(repository.resolve("README.md"), "# Guide\nRun the missing example.\n");
+            Files.writeString(repository.resolve("README.zh-CN.md"), "# 指南\n运行缺失的示例。\n");
+            git(repository, "commit", "-qam", "update both guides");
+            String docsResponse = """
+                    <documentation-review><summary>Updated two guides.</summary><doc-findings><doc-finding>
+                    <title>Incorrect example</title><trigger>Following the guide</trigger><impact>The example is missing.</impact>
+                    <citations><citation><source>SRC-1</source><lines>6,8</lines></citation></citations>
+                    </doc-finding></doc-findings></documentation-review>
+                    """;
+            Files.writeString(fixture.resolve("documentation.xml"), docsResponse);
+            Path documentation = pipeline.run(options(arguments));
+            check(Main.reviewExitCode(documentation) == 0 && calls(documentation, 1)
+                    && report(documentation).contains("README.md:2")
+                    && report(documentation).contains("[Review required — evidence gap] Incorrect example")
+                    && Files.readString(documentation.resolve("verified-findings.md")).isEmpty(),
+                    "two documentation edits use one call and bind an observation without promoting it to a confirmed finding");
+            check(Files.readString(documentation.resolve("documentation/review-prompt.md")).contains("README.zh-CN.md"),
+                    "the documentation prompt retains the complete diff of both files");
+            pipeline.run(options(arguments, "--resume", documentation.toString()));
+            check(calls(documentation, 0), "documentation reviews resume from their validated checkpoint");
+
+            Files.writeString(fixture.resolve("documentation.xml"), docsResponse.replace("6,8", "7"));
+            Path removed = pipeline.run(options(arguments));
+            check(Main.reviewExitCode(removed) == 3 && calls(removed, 2) && !report(removed).contains("Incorrect example"),
+                    "removed lines alone cannot verify a target finding");
+
+            Files.writeString(fixture.resolve("documentation.xml"),
+                    "<documentation-review><summary>Updated two guides.</summary><doc-findings/>"
+                            + "<escalate>Check the example against the CLI implementation.</escalate></documentation-review>");
+            Path expanded = pipeline.run(options(arguments));
+            check(Main.reviewExitCode(expanded) == 0 && calls(expanded, 4)
+                    && Files.readString(expanded.resolve("coverage.md")).contains("Documentation review requested broader evidence"),
+                    "a documentation issue that needs implementation evidence can request full review");
+            Path deepDocumentation = pipeline.run(options(arguments, "--review-mode", "deep"));
+            check(calls(deepDocumentation, 3) && !Files.exists(deepDocumentation.resolve("documentation")),
+                    "explicit deep review bypasses the documentation route");
+
+            String distantContext = "\n# Unrelated detail.\n".repeat(50) + "# FAR_FROM_EDIT\n";
+            Files.writeString(repository.resolve("calculator.py"), BEFORE + distantContext);
+            git(repository, "commit", "-qam", "restore local behavior");
+            Files.writeString(repository.resolve("calculator.py"), AFTER + distantContext);
+            Files.createDirectories(repository.resolve("tests"));
+            Files.createDirectories(repository.resolve("docs"));
+            Files.writeString(repository.resolve("tests/test_calculator.py"), "from calculator import average\nassert average([2]) == 2\n");
+            Files.writeString(repository.resolve("docs/average.md"), "# Average\nSee the [implementation](../calculator.py).\n");
+            git(repository, "add", ".");
+            git(repository, "commit", "-qm", "edit one implementation and its supporting material");
+            writeLocal(fixture, confirmed);
+            Path grouped = pipeline.run(options(arguments));
+            String groupedPrompt = Files.readString(grouped.resolve("adaptive/local-prompt.md"));
+            check(Main.reviewExitCode(grouped) == 0 && calls(grouped, 1)
+                    && groupedPrompt.contains("tests/test_calculator.py") && groupedPrompt.contains("docs/average.md")
+                    && !groupedPrompt.contains("FAR_FROM_EDIT")
+                    && report(grouped).contains("calculator.py:2 @"),
+                    "one implementation and its related test and documentation share one grounded local call");
+            pipeline.run(options(arguments, "--resume", grouped.toString()));
+            check(calls(grouped, 0), "a grouped local review reuses its validated response");
+
+            String oversized = "\n# Distant implementation detail.\n".repeat(600);
+            Files.writeString(repository.resolve("calculator.py"), AFTER + oversized);
+            git(repository, "commit", "-qam", "expand the file outside the reviewed code");
+            Files.writeString(repository.resolve("calculator.py"), BEFORE + oversized);
+            Files.writeString(repository.resolve("tests/test_calculator.py"), "from calculator import average\nassert average([]) == 0\n");
+            git(repository, "commit", "-qam", "edit a large file and its test");
+            Path largeGroup = pipeline.run(options(arguments));
+            check(Files.exists(largeGroup.resolve("focused/O-prompt.md")) && !Files.exists(largeGroup.resolve("discovery")),
+                    "a group outside the local evidence budget follows its normal focused route");
+
+            Files.writeString(repository.resolve("calculator.py"), AFTER + oversized);
+            Files.createDirectories(repository.resolve("tests/unrelated"));
+            Files.writeString(repository.resolve("tests/unrelated/test_calculator.py"), "assert 1 == 1\n");
+            git(repository, "add", ".");
+            git(repository, "commit", "-qm", "change implementation and a same-named test in another folder");
+            Path unrelated = pipeline.run(options(arguments));
+            check(!Files.exists(unrelated.resolve("adaptive")) && Files.exists(unrelated.resolve("focused/O-prompt.md")),
+                    "a same-named test in an unrelated module cannot qualify for the local route");
 
             Files.writeString(repository.resolve("app.py"), "def has_permission(user):\n    return True\n");
             git(repository, "commit", "-qam", "change permission");
@@ -116,6 +196,15 @@ final class AdaptiveReviewTests {
             check(calls(risk, 1) && !Files.exists(risk.resolve("adaptive"))
                     && Files.readString(risk.resolve("focused/F1-prompt.md")).contains("where authorization is enforced"),
                     "a single-line permission change in a generic path starts in a focused risk check");
+
+            Files.writeString(repository.resolve("app.py"), "def has_permission(user):\n    return False\n");
+            Files.writeString(repository.resolve("tests/test_app.py"), "from app import has_permission\nassert not has_permission(None)\n");
+            git(repository, "add", ".");
+            git(repository, "commit", "-qm", "permission implementation and matching test");
+            Path groupedRisk = pipeline.run(options(arguments));
+            check(!Files.exists(groupedRisk.resolve("adaptive")) && calls(groupedRisk, 2)
+                    && Files.readString(groupedRisk.resolve("focused/F1-prompt.md")).contains("where authorization is enforced"),
+                    "the matching test does not bypass a production risk check");
 
             Path runtime = Files.createDirectory(repository.resolve("runtime"));
             Files.writeString(runtime.resolve("store.py"), "def save(db):\n    db.execute('INSERT INTO events VALUES (1)')\n");

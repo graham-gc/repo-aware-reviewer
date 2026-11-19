@@ -90,12 +90,21 @@ final class ReviewPipeline {
                 options.language(), options.maxSupplementalRequests(), options.maxKnowledgeQueries());
         String discoveryPrompt = prompts.discovery(evidence);
         write(runDirectory.resolve("discover-prompt.md"), discoveryPrompt);
+        boolean renderLocally = requirement == null && knowledge == null;
         List<ReviewTasks.Task> discoveries = new ArrayList<>();
         for (int i = 0; i < PromptFactory.REVIEW_FOCUSES.size(); i++) {
             String reviewer = "R" + (i + 1);
             String model = options.discoveryModels().isEmpty() ? null : options.discoveryModels().get(i);
-            discoveries.add(new ReviewTasks.Task(reviewer,
-                    prompts.independentDiscovery(evidence, PromptFactory.REVIEW_FOCUSES.get(i)),
+            String focus = PromptFactory.REVIEW_FOCUSES.get(i);
+            boolean requestSummary = renderLocally && i == 0;
+            String prompt = prompts.independentDiscovery(evidence, focus, requestSummary);
+            Path savedPrompt = runDirectory.resolve("discovery/R1-prompt.md");
+            if (requestSummary && resume && Files.isRegularFile(savedPrompt)) {
+                // A checkpoint created before the optional summary can still supply valid findings.
+                String saved = Files.readString(savedPrompt, StandardCharsets.UTF_8);
+                if (!saved.equals(prompt) && saved.equals(prompts.independentDiscovery(evidence, focus))) prompt = saved;
+            }
+            discoveries.add(new ReviewTasks.Task(reviewer, prompt,
                     reply -> ReviewOutput.discovery(reply, reviewer, evidence.changedFiles()), model));
         }
         if (options.prepareOnly()) {
@@ -143,16 +152,22 @@ final class ReviewPipeline {
         Throwable executionFailure = null;
         try {
             var selection = resume && Files.isDirectory(runDirectory.resolve("discovery"))
-                    ? AdaptiveReview.Selection.deep("Resuming the recorded deep workflow") : AdaptiveReview.select(options, git, evidence);
+                    ? AdaptiveReview.Selection.deep("Resuming the recorded deep workflow")
+                    : AdaptiveReview.select(options, git, evidence, !resume || !Files.isDirectory(runDirectory.resolve("focused")));
             String routeReason = selection.reason();
-            if (selection.focused()) {
+            if (selection.route() == AdaptiveReview.Route.FOCUSED) {
                 FocusedReview.run(evidence, options, git, executor, prompts, agent, runDirectory, progress, totalSteps);
                 return runDirectory;
             }
-            if (selection.evidence() != null) {
+            if (selection.route() == AdaptiveReview.Route.DOCUMENTATION) {
+                routeReason = DocumentationReview.run(selection.evidence(), options, agent, runDirectory, progress, totalSteps);
+                if (routeReason == null) return runDirectory;
+            }
+            if (selection.route() == AdaptiveReview.Route.LOCAL) {
                 write(runDirectory.resolve("coverage.md"), evidence.coverage()
                         + "\n## Review route\n\n- adaptive — " + routeReason + ".\n");
-                routeReason = AdaptiveReview.run(selection.evidence(), options, git, executor, prompts, agent, runDirectory, progress, totalSteps);
+                routeReason = AdaptiveReview.run(selection.evidence(), options, git, executor, prompts, agent, runDirectory,
+                        progress, totalSteps, routeReason);
                 if (routeReason == null) return runDirectory;
             }
             String route = "\n## Review route\n\n- deep — " + routeReason + ".\n";
@@ -163,6 +178,7 @@ final class ReviewPipeline {
                     progress, 2, totalSteps, "Independent reviewers", resume);
             var findings = new ArrayList<ReviewFinding>();
             StringBuilder discoveryNotes = new StringBuilder();
+            String changeSummary = "";
             StringBuilder rawCandidates = new StringBuilder();
             for (var response : responses.entrySet()) {
                 var outcome = response.getValue();
@@ -173,6 +189,7 @@ final class ReviewPipeline {
                 }
                 ReviewOutput.Discovery parsed = ReviewOutput.discovery(outcome.response(), response.getKey(), evidence.changedFiles());
                 findings.addAll(parsed.findings());
+                if (renderLocally && response.getKey().equals("R1")) changeSummary = parsed.changeSummary();
                 discoveryNotes.append("\n## ").append(response.getKey()).append("\n\n").append(parsed.notes());
                 rawCandidates.append("\n## ").append(response.getKey()).append("\n\n").append(outcome.response()).append('\n');
             }
@@ -261,22 +278,26 @@ final class ReviewPipeline {
             assessmentSnapshot = assessment;
             ReviewQuality.Completion completion = ReviewQuality.completion(preliminary, adjudicated, assessmentPlan, executionIssues, language);
 
-            progress.step(8, totalSteps, "Deduplicating findings and preparing the report");
-            String reportPrompt = prompts.finalizeReport(evidence, confirmed, discoveryNotes.toString(),
-                    supplemental.markdown(), verificationCoverage) + "\nAUDITED REQUIREMENT ASSESSMENT\n" + assessment
-                    + "\nPROGRAMMATIC CANDIDATE COUNTS\nDiscovery: " + findings.size() + "; unmet requirements: "
-                    + requirementDecisions.size() + "; total: " + preliminary.size()
-                    + "\nPROGRAMMATIC REVIEW COMPLETENESS\n" + completion.markdown();
-            reportPrompt += "\nPROGRAMMATIC REVIEW-REQUIRED ITEMS\n" + concerns.size()
-                    + " items will be inserted by the CLI in Findings, separately from confirmed defects. "
-                    + "Do not repeat candidate-by-candidate decisions elsewhere or describe these items as confirmed defects.\n";
-            write(runDirectory.resolve("verify-prompt.md"), reportPrompt);
-            var reportReplies = ReviewTasks.run(List.of(new ReviewTasks.Task("report", reportPrompt,
-                    reply -> ReviewReport.finalReport(reply, confirmed, language, assessment, concerns))), agent, runDirectory,
-                    options.reviewParallelism(), progress, 8, totalSteps, "Finalizing report", resume);
-            String response = reportReplies.get("report");
-            String report = completion.notice() + ReviewReport.finalReport(response, confirmed, language, assessment, concerns);
-            write(runDirectory.resolve("report.md"), report);
+            progress.step(8, totalSteps, "Preparing the report");
+            String report;
+            if (renderLocally) {
+                report = ReviewReport.deepReport(evidence, changeSummary, confirmed, publication.groups(), concerns, language);
+            } else {
+                String reportPrompt = prompts.finalizeReport(evidence, confirmed, discoveryNotes.toString(),
+                        supplemental.markdown(), verificationCoverage) + "\nAUDITED REQUIREMENT ASSESSMENT\n" + assessment
+                        + "\nPROGRAMMATIC CANDIDATE COUNTS\nDiscovery: " + findings.size() + "; unmet requirements: "
+                        + requirementDecisions.size() + "; total: " + preliminary.size()
+                        + "\nPROGRAMMATIC REVIEW COMPLETENESS\n" + completion.markdown();
+                reportPrompt += "\nPROGRAMMATIC REVIEW-REQUIRED ITEMS\n" + concerns.size()
+                        + " items will be inserted by the CLI in Findings, separately from confirmed defects. "
+                        + "Do not repeat candidate-by-candidate decisions elsewhere or describe these items as confirmed defects.\n";
+                write(runDirectory.resolve("verify-prompt.md"), reportPrompt);
+                var reportReplies = ReviewTasks.run(List.of(new ReviewTasks.Task("report", reportPrompt,
+                        reply -> ReviewReport.finalReport(reply, confirmed, language, assessment, concerns))), agent, runDirectory,
+                        options.reviewParallelism(), progress, 8, totalSteps, "Finalizing report", resume);
+                report = ReviewReport.finalReport(reportReplies.get("report"), confirmed, language, assessment, concerns);
+            }
+            write(runDirectory.resolve("report.md"), completion.notice() + report);
             write(runDirectory.resolve("review-status.md"), completion.markdown());
             progress.finish(totalSteps, completion.complete() ? "Wrote report.md" : "Wrote incomplete report.md ("
                     + completion.pendingChecks() + " checks remain unresolved)");

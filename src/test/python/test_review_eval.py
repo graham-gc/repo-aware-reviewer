@@ -47,6 +47,35 @@ else:
         raise AssertionError("Unexpected model call")
 """
 
+PR_AGENT_STUB = '''#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+import sys
+
+args = sys.argv[1:]
+if args == ["--version"]:
+    print("pr-agent test fixture")
+    raise SystemExit(0)
+assert args[-1] == "review"
+def path(flag):
+    return Path(args[args.index(flag) + 1])
+
+assert "return sum(items) // len(items)" in path("--diff-file").read_text()
+assert Path("cart.py").read_text() == "def cart_total(items):\\n    return sum(items) // len(items)\\n"
+assert not Path(".git").exists()
+context = os.environ["PLAIN_DIFF__DESCRIPTION"]
+assert "SNAPSHOTTED_KNOWLEDGE" in context
+assert all(marker not in context for marker in ("VERIFIED_REFERENCE_ONLY", "FOCUS_ONLY", "LIVE_DOCUMENT_EDIT"))
+path("--output").write_text("Review report\\n\\n<details> <summary>Agent run details</summary>\\n"
+                           "- Model: IDENTITY_ONLY\\n</details>\\n")
+if not os.getenv("BROKEN_PR_AGENT"):
+    path("--json-output").write_text(json.dumps({
+        "review": {}, "usage": {"total_tokens": 75},
+        "coverage": {"files_not_reviewed": [], "files_partially_reviewed": ["cart.py"]},
+    }))
+'''
+
 
 class ReviewEvalTests(unittest.TestCase):
     @classmethod
@@ -99,10 +128,10 @@ class ReviewEvalTests(unittest.TestCase):
                             "--focus", "FOCUS_ONLY", "--knowledge", self.knowledge,
                             "--output", self.root / name, *args, expected=expected)
 
-    def run_case(self, manifest, name):
+    def run_case(self, manifest, name, *args, expected=0):
         result = self.root / name
         self.command("run", "--cases", manifest, "--baseline-jar", JAR,
-                     "--candidate-jar", JAR, "--output", result)
+                     "--candidate-jar", JAR, "--output", result, *args, expected=expected)
         return result
 
     def test_prepared_case_pins_inputs_and_keeps_rubric_out_of_reviews(self):
@@ -140,6 +169,54 @@ class ReviewEvalTests(unittest.TestCase):
         grades.write_text(grades.read_text(encoding="utf-8").replace("N/A", "0"), encoding="utf-8")
         rejected = self.command("summarize", "--output", output, expected=2)
         self.assertIn("Missed defects are N/A", rejected.stderr)
+
+    def test_three_way_comparison_uses_pinned_pr_agent_inputs_and_pairs_scores(self):
+        pr_agent = self.root / "test pr-agent"
+        pr_agent.write_text(PR_AGENT_STUB, encoding="utf-8")
+        pr_agent.chmod(0o700)
+        reference = self.root / "verified.md"
+        reference.write_text("VERIFIED_REFERENCE_ONLY\n", encoding="utf-8")
+        manifest = Path(self.prepare("three-way", "--category", "small", "--reference", reference,
+                                     "--reference-defects", "1").stdout.strip())
+        self.source.write_text("LATER_COMMIT_ONLY\n", encoding="utf-8")
+        self.commit("head moved")
+        self.knowledge.write_text("LIVE_DOCUMENT_EDIT\n", encoding="utf-8")
+
+        output = self.run_case(manifest, "three-way-output", "--pr-agent", pr_agent)
+        records = json.loads((output / "private/results.json").read_text(encoding="utf-8"))
+        self.assertEqual({row["report"] for row in records}, {"A", "B", "C"})
+        peer = next(row for row in records if row["variant"] == "pr-agent")
+        self.assertEqual((peer["status"], peer["total_tokens"]), ("INCOMPLETE", 75))
+        blind = output / "blind" / peer["case"] / peer["trial"] / (peer["report"] + ".md")
+        self.assertNotIn("IDENTITY_ONLY", blind.read_text(encoding="utf-8"))
+        self.assertTrue(blind.is_file())
+
+        grades = output / "blind/grades.csv"
+        with grades.open(encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            fields, rows = reader.fieldnames, list(reader)
+        for row in rows:
+            row.update(missed_defects="0", false_positives="0", reviewer_seconds="12")
+        with grades.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields)
+            writer.writeheader()
+            writer.writerows(rows)
+        costs = self.root / "measured-costs.csv"
+        costs.write_text("case,trial,variant,cost_usd\n" + "".join(
+            f"{row['case']},{row['trial']},{row['variant']},0.02\n" for row in records
+        ), encoding="utf-8")
+        summary = self.command("summarize", "--output", output, "--costs", costs).stdout
+        self.assertIn("candidate vs pr-agent — small", summary)
+        self.assertIn("p50 elapsed_seconds:", summary)
+        self.assertIn("Known-defect recall: 1/1 (100.0%)", summary)
+        self.assertIn("Total reviewer_seconds: 12 (n=1)", summary)
+        self.assertIn("Mean cost_usd: 0.020000 (n=1)", summary)
+
+        self.env["BROKEN_PR_AGENT"] = "1"
+        output = self.run_case(manifest, "three-way-failed", "--pr-agent", pr_agent, expected=1)
+        summary = self.command("summarize", "--output", output).stdout
+        self.assertIn("baseline vs candidate — all cases\nUsable pairs: 1/1", summary)
+        self.assertIn("baseline vs pr-agent — all cases\nUsable pairs: 0/1", summary)
 
     def test_verified_reference_goes_to_grader_only(self):
         reference = self.root / "verified.md"

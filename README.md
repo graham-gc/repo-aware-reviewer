@@ -52,13 +52,14 @@ flowchart TD
     S -->|Review code| R["Choose a repository and Git range<br/>Add requirements or knowledge if useful"]
     S -->|Evaluate the reviewer| E["Choose a real change and the reviewer variants"]
     E --> C["Prepare a case from the target repository<br/>Pin inputs and draft scoring criteria"]
-    C --> B["Check the criteria, then run both variants<br/>Each receives the same review inputs"]
+    C --> B["Check the criteria, then run the selected variants<br/>Use the same pinned change and documents"]
 
     subgraph REVIEW["Single review"]
         P1["Resolve the two Git revisions"] --> P2["Collect the diff, source and business evidence"]
         P2 --> Q{"Which review route applies?"}
-        Q -->|Local change with complete evidence| L["One structured review with source validation"]
-        Q -->|Multiple files or risk signals| F["Review selected risk areas and the remaining diff excerpts"]
+        Q -->|Small Markdown-only edits| DOC["Review the complete diffs in one pass<br/>Resolve citations to Git lines"]
+        Q -->|Bounded implementation with related edits| L["Review implementation, related tests and docs together<br/>Validate source citations"]
+        Q -->|Other multi-file changes or risk signals| F["Review selected risk areas and the remaining diff excerpts"]
         Q -->|Deep review requested or required| P3["R1, R2 and R3 independently propose findings"]
         F --> FC["If a confirmed candidate has a broken citation,<br/>try one correction with the supplied source"]
         FC --> FN{"Did a candidate receive new evidence?"}
@@ -70,6 +71,8 @@ flowchart TD
         L -->|Broader risk or conflicting conclusions| P3
         T -->|Broader risk| P3
         L -->|Ready or no new evidence| P8
+        DOC -->|Documentation evidence is sufficient| P8
+        DOC -->|A concrete issue needs implementation evidence| P3
         T -->|Ready| P8
         P3 --> P4["Provide additional evidence on request"]
         P4 --> P5["Verify each proposed finding"]
@@ -79,9 +82,11 @@ flowchart TD
     end
 
     R --> P1
-    B --> P1
+    B -->|JAR variants| P1
+    B -->|Optional PR-Agent| PA["Review the pinned diff and supplied context"]
     P8 -->|Regular review| O["One report<br/>Resume unfinished checks if needed"]
-    P8 -->|Both evaluation reports ready| A["Randomly label reports A and B"]
+    P8 -->|Evaluation report| A["Randomly label the evaluation reports"]
+    PA --> A
     C -.->|Criteria and any verified reference| J["One grader scores the anonymous reports"]
     A --> J
     J --> D["Reveal the variants and compare scores and timings"]
@@ -193,7 +198,13 @@ The report's Findings section separates confirmed defects, risks requiring human
 
 Each model call defaults to a 900-second timeout, configurable with `--agent-timeout-seconds`. Empty responses and recognized temporary errors allow at most one extra retry by default when observed process cleanup is verified; disable this with `--agent-retries 0`. Unfinished checks are distinct from business evidence gaps. Completed review does not establish that all requirements are satisfied or that tests actually ran and passed.
 
-Review defaults to `--review-mode auto`. Small changes with complete evidence can finish in one model call. For multi-file changes or detected risk signals, the CLI gives related files and more source context to a scoped risk check, and reviews the remaining files with bounded diff excerpts. A scoped candidate can receive one citation correction using available source. The CLI rechecks a candidate's conclusion when it receives new evidence. The scoped report summarizes the final decisions. A confirmed finding needs target evidence for its stated impact, and high or critical severity also needs evidence of the material effect or affected scope. See `coverage.md` for evidence gaps and publishing decisions. Supplied review rules and explicit `--review-mode deep` use the full workflow.
+Review defaults to `--review-mode auto`. Small source changes with complete evidence can finish in one model call. One bounded implementation edit can enter the same route with its directly related test or documentation diffs. For example, a test in the matching module can qualify by following a naming convention or referencing the implementation in its added lines. A document can qualify by pointing to the implementation path. The local review can escalate if it identifies a broader effect.
+
+A grouped local review starts with complete diffs and nearby implementation lines at both revisions. It can request another tracked excerpt to resolve an individual finding.
+
+A small change limited to existing Markdown READMEs or files under `docs/` can also finish in one call. The CLI resolves cited lines to the pinned Git revision and lists model observations for human review. A specific issue that needs implementation or contract evidence can trigger deep review.
+
+For other multi-file changes or detected risk signals, the CLI gives related files and more source context to a scoped risk check, and reviews the remaining files with bounded diff excerpts. A scoped candidate can receive one citation correction using available source. The CLI rechecks a candidate's conclusion when it receives new evidence. The scoped report summarizes the final decisions. A confirmed finding needs target evidence for its stated impact, and high or critical severity also needs evidence of the material effect or affected scope. See `coverage.md` for evidence gaps and publishing decisions. Supplied review rules and explicit `--review-mode deep` use the full workflow.
 
 Deep candidate verification uses relevant complete evidence blocks by default. To compare evidence modes, use `--review-mode deep` on both sides and add `--verification-evidence full` on the full-input side.
 
@@ -222,7 +233,7 @@ python3 scripts/review-eval.py run \
   --language en --output outputs/eval-run-01
 ```
 
-Give the same grader the two reports and criteria in `outputs/eval-run-01/blind/`, plus access to the pinned change for verification. After the grader fills in `blind/grades.csv`, reveal and summarize the results with `python3 scripts/review-eval.py summarize --output outputs/eval-run-01`. [Scoring and experiment options](docs/review-performance.md#blind-review-evaluation)
+Add `--pr-agent pr-agent` to include a configured PR-Agent CLI as a third variant. Give the grader the anonymous reports and criteria in `outputs/eval-run-01/blind/`, plus access to the pinned change. After the grader fills in `blind/grades.csv`, reveal and summarize the results with `python3 scripts/review-eval.py summarize --output outputs/eval-run-01`. [Scoring and experiment options](docs/review-performance.md#blind-review-evaluation)
 
 ## Contributing
 

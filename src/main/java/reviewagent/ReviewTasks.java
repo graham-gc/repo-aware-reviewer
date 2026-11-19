@@ -156,7 +156,7 @@ final class ReviewTasks {
                 String raw = Files.readString(saved, StandardCharsets.UTF_8);
                 String cached = cachedFailure == null ? raw : corrected(task, raw, cachedFailure, directory, saved.getFileName().toString().replace("-response.md", "-applied-response.md"));
                 try {
-                    validate(task, cached, directory);
+                    validate(task, cached, directory, agent.timings(), true);
                 } catch (IOException invalid) {
                     if (invalid instanceof ArtifactIOException) throw invalid;
                     response = cached;
@@ -172,6 +172,7 @@ final class ReviewTasks {
                 return cached;
             }
         }
+        boolean responseFromCache = response != null;
         if (response == null) {
             // Invalidate before recording the new prompt: an interrupted invocation must not associate an
             // old response (or repair) with the new evidence on the next resume.
@@ -189,7 +190,7 @@ final class ReviewTasks {
         var attempted = new java.util.HashSet<String>();
         while (true) {
             try {
-                validate(task, response, directory);
+                validate(task, response, directory, agent.timings(), responseFromCache);
             } catch (IOException invalid) {
                 if (invalid instanceof ArtifactIOException) throw invalid;
                 boolean quotation = invalid instanceof SourceQuotationException;
@@ -233,6 +234,7 @@ final class ReviewTasks {
                 String raw = agent.invoke(repairPrompt, directory.resolve(task.id() + "-" + kind));
                 AtomicFiles.write(directory.resolve(task.id() + "-" + kind + "-response.md"), raw);
                 response = corrected(task, raw, invalid, directory, task.id() + "-" + kind + "-applied-response.md");
+                responseFromCache = false;
                 continue;
             }
             AtomicFiles.write(responseFile, response);
@@ -252,11 +254,20 @@ final class ReviewTasks {
                 """ + originalPrompt;
     }
 
-    private static void validate(Task task, String response, Path directory) throws IOException {
+    private static void validate(Task task, String response, Path directory, ReviewTimings timings, boolean cached)
+            throws IOException {
         try (var diagnostics = ResponseDiagnostics.capture()) {
             try {
-                AgentRunner.validateResponse(response);
-                task.validator().validate(response);
+                long started = System.nanoTime();
+                boolean accepted = false;
+                try {
+                    AgentRunner.validateResponse(response);
+                    task.validator().validate(response);
+                    accepted = true;
+                } finally {
+                    long elapsed = System.nanoTime() - started;
+                    timings.validation(directory.resolve(task.id()), elapsed, cached, accepted);
+                }
             } catch (IOException invalid) {
                 if (!(invalid instanceof ArtifactIOException)) ValidationEvents.rejected(directory.resolve(task.id() + "-validation.log"), invalid);
                 throw invalid;

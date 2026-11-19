@@ -40,6 +40,10 @@ final class FocusedReview {
         Risk(String question, String pattern) { this.question = question; this.signal = Pattern.compile(pattern); }
     }
 
+    static boolean hasRiskSignal(String code) {
+        return java.util.Arrays.stream(Risk.values()).anyMatch(risk -> risk.signal.matcher(code).find());
+    }
+
     private record Area(String id, String name, String question, EvidenceBundle evidence, String coverage) { }
 
     static void run(EvidenceBundle original, CliOptions options, GitClient git, ProcessExecutor executor, PromptFactory prompts,

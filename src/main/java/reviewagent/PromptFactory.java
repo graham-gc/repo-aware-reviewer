@@ -98,6 +98,10 @@ final class PromptFactory {
     }
 
     String independentDiscovery(EvidenceBundle evidence, String focus) {
+        return independentDiscovery(evidence, focus, false);
+    }
+
+    String independentDiscovery(EvidenceBundle evidence, String focus, boolean includeChangeSummary) {
         String instructions = """
                 INDEPENDENT REVIEW ASSIGNMENT
                 Work independently from the other reviewers. Give particular attention to this focus:
@@ -127,6 +131,15 @@ final class PromptFactory {
                 ```
 
                 """.formatted(focus);
+        if (includeChangeSummary) {
+            instructions += """
+                    After the findings block, use one plain line starting with %s to summarize the main
+                    functional change in the selected output language. Describe behavior shown by the diff.
+                    Leave out candidate findings, speculative impacts and requirement verdicts. The findings
+                    block must be returned even if the summary is omitted.
+
+                    """.formatted(ReviewOutput.Discovery.CHANGE_SUMMARY_PREFIX);
+        }
         String prompt = discovery(evidence);
         return prompt.replace("EVIDENCE FOLLOWS\n", instructions + "EVIDENCE FOLLOWS\n");
     }

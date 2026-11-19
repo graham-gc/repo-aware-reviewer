@@ -25,11 +25,19 @@ After individual verification, a group of confirmed local regressions with the s
 
 After shared evidence collection, a task whose complete prompt remains unchanged is not automatically called again. Its previous validated or unfinished result is retained and `TASK-unchanged.txt` records the decision. Explicit resume can retry unfinished tasks. New related material, indexes or trusted rules change the prompt and can trigger another verification. Changing the verification-evidence mode is allowed during resume, but changed prompts invalidate their task caches; prior discovery results can still be reused when unchanged.
 
+## Deep review reporting
+
+When no external requirement or knowledge document is supplied, deep review renders the report locally from publication decisions, candidate groups and evidence coverage. Within a group, confirmed findings with matching locations, triggers and impacts share one entry. The first discovery task can include a short change summary. Existing results without a summary can be resumed, and the report can list the changed paths. Reviews with an external document still use the report consolidation call for the narrative and knowledge feedback.
+
 ## Timing report
 
 An execution that enters the model workflow writes `timings.md`, including incomplete or failed executions when artifact storage remains available. Preparation-only and empty-diff runs do not enter that workflow. The report covers this invocation only; earlier calls from a resumed directory are not added again.
 
 It separates stage wall time, cumulative process time and longest process time. Concurrent process durations overlap, so adding them does not measure the user's waiting time. Calls include actual transport retries and output corrections; valid cache reuse and unchanged follow-up skips are counted separately. Stage wall time includes task queueing, backoff and validation. The overall model-workflow clock starts before discovery and also includes intervening local evidence collection; it excludes initial scope resolution and Git evidence preparation.
+
+The attempt table and each execution log record local offsets in milliseconds for process startup, prompt stdin closure, the first byte read from stdout and stderr, and process exit observed during the wait. Missing events appear as a dash in the report and as `unavailable` in the log. A buffered agent command may only write stdout near exit. Use these measurements to locate time spent waiting on the command and its pipes. Provider queueing, upstream retries and token generation need separate telemetry.
+
+The local validation table includes accepted and rejected checks for both fresh and saved responses. It measures response checking separately from diagnostic file writes. A repair that invokes the model has its own attempt row and is included in the correction count.
 
 Candidate prompt comparisons include prepared tasks that may be cached or skipped, and are not a measurement of network traffic saved on those tasks. Actual launched-call input bytes appear in the phase table. UTF-8 byte counts are not model token counts and do not prove an upstream prefill cache miss.
 
@@ -52,7 +60,7 @@ python3 scripts/review-eval.py prepare \
 
 `prepare` resolves the two local Git revisions to commit IDs and collects evidence with the current JAR's `review --prepare-only`. It calls Claude once to draft three to six case-specific scoring criteria in the selected language. Check those criteria in the generated `cases.json` before running the comparison. Use `--jar` to specify a different JAR for collecting evidence. Each preparation uses a fresh output directory and expects a nonempty Git diff.
 
-`--requirement` and `--knowledge` save snapshots of documents for both reviewers. If you have independently verified findings or a verified empty set, supply a nonempty Markdown reference with `--reference`. The script gives that file to the grader. Preparation also saves the rubric prompt, raw response, and evidence locally for inspection.
+`--requirement` and `--knowledge` save document snapshots for all review runs. If you have independently verified findings or a verified empty set, supply a nonempty Markdown reference with `--reference`. The script gives that file to the grader. Preparation also saves the rubric prompt, raw response, and evidence locally for inspection.
 
 You can still pass a manually authored manifest, including the [starter cases](../examples/review-eval-cases.json) for this repository. Each case takes full commit IDs. Relative paths for `repo`, `requirement`, `knowledge`, and `reference` resolve from the manifest's directory. Run preparation again for another change and combine entries if you want one comparison across several cases.
 
@@ -64,7 +72,13 @@ python3 scripts/review-eval.py run \
   --output outputs/review-eval-01
 ```
 
-Use a fresh output directory. The tool snapshots both JARs and any supplied documents, randomizes run order and report labels independently per pair, and retains status, end-to-end wall time, model workflow time, and launched attempts. Use `--repeats` for repeated comparisons. Keep the Claude configuration and environment fixed across comparisons. Change one variable at a time. To compare evidence modes, add `--baseline-evidence full --candidate-evidence scoped` with the same JAR on both sides.
+Use a fresh output directory. The tool snapshots both JARs and any supplied documents, randomizes run order and report labels independently per trial, and retains status, end-to-end wall time, and available model metrics. Use `--repeats` for repeated trials. To compare evidence modes, add `--baseline-evidence full --candidate-evidence scoped` with the same JAR on both sides.
+
+To add PR-Agent as a third variant, install a release that provides `--diff-file`, `--output`, and `--json-output`, and configure its model provider. Pass `--pr-agent pr-agent` or the path to the configured executable. The tool supplies PR-Agent the exact pinned base-to-head diff and regular changed files from the pinned head in an isolated directory. Supplied requirement and knowledge snapshots go into its review description. The JARs use their standard evidence collection, so the comparison holds the change and optional documents fixed while each tool selects its own context.
+
+Use the same model and gateway for both tools when comparing routes. `--model-label` and `--gateway-label` record your settings in `private/configuration.json`. Set the actual routes in the tools' environments. `--parallelism` sets the JARs' review parallelism. Configure PR-Agent separately for chunking or output limits. The operator's private configuration records supported environment overrides for these settings. The adapter records reported PR-Agent tokens, when available, and marks clipped, omitted, or failed chunks as incomplete.
+
+Use `--category` on `prepare` or set `category` in a case manifest to group cases, for example `small`, `cross-module`, `high-risk`, or `clean`. To measure recall against a verified reference, use `--reference-defects` with `--reference`, or set `reference_defects` beside `reference` in the manifest. A verified clean case can use a reference count of zero.
 
 To compare initial reviewer model diversity, use the same current JAR and evidence mode on both sides. For a fixed-model control, use `--baseline-models sonnet sonnet sonnet` and compare with `--candidate-models sonnet opus haiku`, or substitute models available in your Claude Code setup. Each side still runs R1 correctness and regressions, R2 requirements and contracts, and R3 boundaries and security. The supplementary discovery, verification, assessment, and publication stages use the normal agent configuration. A custom agent command used with `--discovery-model` must accept `--model MODEL`.
 
@@ -74,6 +88,7 @@ Give the same human reviewer the `blind/` directory and access to the pinned pro
 - `false_positives` counts unsupported or refuted claims presented as confirmed defects.
 - `misclassified_uncertainties` counts unresolved policy or behavior questions that the report classified incorrectly. Count each issue only once across the three categories.
 - `unmet_criteria` counts how many rubric criteria the report failed to satisfy. Compare this count separately from the defect counts.
+- `reviewer_seconds` records how long the grader spent reading and checking the report, rounded to whole seconds.
 
 Use `N/A` when a metric cannot be assessed and `notes` to explain the judgment. Leave the counts blank for reports you skip. Existing grading sheets with the original three columns still work. A review that exits `3` can still produce a report for grading. Keep its incomplete status visible when interpreting scores. The tool makes an unavailable report visible in the private results and keeps running the remaining pairs.
 
@@ -81,4 +96,6 @@ Use `N/A` when a metric cannot be assessed and `notes` to explain the judgment. 
 python3 scripts/review-eval.py summarize --output outputs/review-eval-01
 ```
 
-The summary reveals the two variants and compares their metrics across usable pairs. Each quality metric uses only pairs scored on both sides for that metric and shows how many pairs contributed. Compare failures and incomplete statuses alongside those totals. Broader estimates of precision and recall need more cases from the projects and change types you want to cover.
+The summary reveals the variants and compares each pair overall and by category. The end-to-end p50 and p95 use matched runs that produced usable reports. Each quality metric uses only pairs scored on both sides for that metric. Read failures and incomplete statuses alongside those numbers.
+
+For billing comparisons, pass `summarize --costs /path/to/costs.csv`. Use `case,trial,variant,cost_usd` as the header, with the matched provider cost per run and the variant name `baseline`, `candidate`, or `pr-agent`. Unavailable measurements remain unavailable. Keep this CSV in the operator's private records.

@@ -58,6 +58,15 @@ final class ReviewOutput {
     }
 
     record Discovery(List<ReviewFinding> findings, String notes) {
+        static final String CHANGE_SUMMARY_PREFIX = "CHANGE_SUMMARY|";
+
+        String changeSummary() {
+            return notes.lines().map(String::strip)
+                    .filter(line -> line.startsWith(CHANGE_SUMMARY_PREFIX))
+                    .map(line -> line.substring(CHANGE_SUMMARY_PREFIX.length()).strip())
+                    .filter(summary -> !summary.isBlank())
+                    .findFirst().orElse("");
+        }
     }
 
     static Discovery discovery(String response, String reviewer, List<String> changedFiles) throws IOException {

@@ -92,8 +92,10 @@ final class VerificationEvidenceTests {
         Path root = Files.createTempDirectory("review-timing-fixture-");
         long second = 1_000_000_000L;
         metrics.stage(root.resolve("verification"), 0, 2 * second);
-        metrics.call(root.resolve("verification/R1-1"), 0, second, 1000, "SUCCEEDED");
-        metrics.call(root.resolve("verification/R2-1-repair"), 0, second, 2000, "TIMEOUT");
+        metrics.call(root.resolve("verification/R1-1"), null, 0, second, 1000, "SUCCEEDED",
+                new ProcessExecutor.Observations(1L, 2L, 950L, null, 975L));
+        metrics.call(root.resolve("verification/R2-1-repair"), null, 0, second, 2000, "TIMEOUT",
+                new ProcessExecutor.Observations(1L, 2L, null, null, null));
         metrics.task(true, true);
         metrics.unchanged();
         String report = metrics.markdown(root, OutputLanguage.EN);
