@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    tags: ['v[0-9]*']
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Build and test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check release tag is on main
+        if: github.ref_type == 'tag'
+        run: git merge-base --is-ancestor HEAD origin/main
+      - name: Set up Java 21
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Run Java tests
+        run: bash scripts/test.sh
+      - name: Build CLI JAR
+        run: bash scripts/build.sh
+      - name: Run GitLab integration tests
+        run: bash scripts/test-gitlab.sh
+      - name: Run blind evaluation tests
+        run: python3 -m unittest discover -s src/test/python -v
+      - name: Smoke-test the packaged CLI
+        run: java -jar build/code-review-agent.jar review --repo . --prepare-only --output-dir build/cli-smoke
+      - name: Generate release checksum
+        if: github.ref_type == 'tag'
+        working-directory: build
+        run: sha256sum code-review-agent.jar > code-review-agent.jar.sha256
+      - name: Save verified release files
+        if: github.ref_type == 'tag'
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: release-files
+          path: |
+            build/code-review-agent.jar
+            build/code-review-agent.jar.sha256
+          if-no-files-found: error
+
+  release:
+    name: Draft release
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified release files
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: release-files
+      - name: Create a GitHub release draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --draft --verify-tag --generate-notes \
+            code-review-agent.jar code-review-agent.jar.sha256
