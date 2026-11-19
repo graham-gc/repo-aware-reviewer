@@ -20,6 +20,12 @@ final class XmlStructureRepair {
     }
 
     static List<Candidate> candidates(String response, String root) {
+        String stripped = response.stripLeading();
+        if (stripped.startsWith(root + ">") && stripped.contains("</" + root + ">")) {
+            int start = response.length() - stripped.length();
+            return List.of(new Candidate(response.substring(0, start) + "<" + stripped,
+                    "Inserted missing < at the opening response tag; delimiter insertion only; raw response retained."));
+        }
         var opening = Pattern.compile("(?m)^[ \\t]*<" + Pattern.quote(root) + "(?=[\\s>])").matcher(response);
         if (!opening.find()) return List.of();
         int start = response.indexOf('<', opening.start());

@@ -27,6 +27,21 @@ final class ReviewXml {
     record Span(int start, int end) {
     }
 
+    private static final class MissingResponseBlock extends IOException {
+        private final String rootName;
+
+        MissingResponseBlock(String rootName) {
+            super("Missing " + rootName + " XML response block");
+            this.rootName = rootName;
+        }
+    }
+
+    static boolean missingResponseBlock(IOException failure, String rootName) {
+        // xml() can wrap the original failure when delimiter recovery has no unique result.
+        Throwable original = failure instanceof MissingResponseBlock ? failure : failure.getCause();
+        return original instanceof MissingResponseBlock missing && missing.rootName.equals(rootName);
+    }
+
     static Map<String, Element> fields(Element root, Set<String> allowed) throws IOException {
         var fields = new LinkedHashMap<String, Element>();
         for (Element element : children(root, null)) {
@@ -225,7 +240,7 @@ final class ReviewXml {
             }
         }
         if (result == null || depth != 0) {
-            throw new IOException("Missing " + rootName + " XML response block");
+            throw new MissingResponseBlock(rootName);
         }
         return result;
     }

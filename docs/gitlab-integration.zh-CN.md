@@ -47,6 +47,7 @@ docker build -f integrations/gitlab/Dockerfile --target webhook \
 | `GITLAB_REVIEW_PROJECT_IDS` | 允许审查的业务项目数字 ID，例如 `123` 或 `123,456`。 |
 | `GITLAB_REVIEW_BOT_USER_ID` | 可选，机器人用户数字 ID，会与写入令牌的身份核对。 |
 | 模型连接变量 | Claude Code 后端所需的环境变量，见下文。 |
+| `REVIEW_MODE` | 默认 `auto`，可设为 `deep`，让每个非空 MR 都走完整的深审流程。 |
 | `REVIEW_KNOWLEDGE_FILE` | 可选，**File 类型变量**，值为人工批准的 UTF-8 Markdown 主知识库内容。 |
 | `REVIEW_REQUIREMENT_FILE` | 可选，**File 类型变量**，值为 UTF-8 需求文档内容。 |
 

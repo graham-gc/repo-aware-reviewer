@@ -39,6 +39,21 @@ final class SupplementalEvidence {
         this.caches = java.util.Map.copyOf(caches);
     }
 
+    boolean requestOnly(EvidenceBundle evidence, String response) {
+        List<String> lines = response.lines().map(String::strip).filter(line -> !line.isEmpty()).toList();
+        if (lines.isEmpty() || !lines.equals(EvidenceRequest.parse(response).stream().map(EvidenceRequest::text).toList())) return false;
+        for (String line : lines) {
+            if (line.startsWith("REQUEST_KNOWLEDGE|")) {
+                String[] fields = line.split("\\|", 3);
+                if (evidence.scopedKnowledge() == null || fields.length != 3 || fields[1].isBlank() || fields[2].isBlank()) return false;
+            } else {
+                try { EvidenceQuery.parse(line, languages); }
+                catch (IOException invalid) { return false; }
+            }
+        }
+        return true;
+    }
+
     Set<String> reusable(EvidenceBundle evidence, String request) {
         if (request.startsWith("REQUEST_KNOWLEDGE|") && evidence.scopedKnowledge() != null)
             return evidence.scopedKnowledge().knownSources(request, evidence.catalog(), true);

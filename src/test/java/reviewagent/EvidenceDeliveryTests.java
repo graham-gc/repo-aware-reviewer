@@ -65,6 +65,11 @@ final class EvidenceDeliveryTests {
         var session = new EvidenceSession(bundle, new SupplementalEvidence(git, new ProcessExecutor(), java.util.Map.of()), 1, 0);
         String all = "REQUEST_FILE|target|" + PATH + "|all|Read reference";
         String range = "REQUEST_FILE|target|" + PATH + "|1:200|Read its opening";
+        require(session.requestOnly(all + "\n" + range)
+                && !session.requestOnly("Some prose\n" + all)
+                && !session.requestOnly("REQUEST_FILE|target|" + PATH + "|all")
+                && !session.requestOnly("REQUEST_UNKNOWN|target|" + PATH + "|all|Read reference"),
+                "only standalone lines with supported request syntax can defer a verification verdict");
         require(!session.load(all, "Initial request") && !session.load(range, "Another candidate"),
                 "reuse adds no new global material and works even after the byte budget is exhausted");
         require(session.catalog().sources().size() == 1 && session.delivery(all, EvidenceCatalog.empty()).equals(Set.of(document.id()))
@@ -116,10 +121,13 @@ final class EvidenceDeliveryTests {
         require(loaded.size() == 1 && loaded.getFirst().endOfFile() && batch.coverage().contains("REUSED")
                 && batch.resolvedSources().values().stream().allMatch(ids -> ids.equals(Set.of(loaded.getFirst().id()))),
                 "all and a covered range in one batch share a single native read and original source identity");
-        for (String mode : List.of("all", "1:200", "repeat-after-delivery")) {
+        for (String mode : List.of("all", "1:200", "repeat-after-delivery", "request-only", "unavailable", "repeat-unavailable", "unbound-quote")) {
             Path run = Files.createDirectory(root.resolve(mode.replace(':', '-')));
+            boolean missingFile = mode.endsWith("unavailable");
+            boolean requestOnly = mode.equals("request-only") || missingFile;
+            boolean unboundQuote = mode.equals("unbound-quote");
             String selector = mode.equals("all") ? "all" : "1:200";
-            String request = "REQUEST_FILE|target|" + PATH + "|" + selector + "|Read the interface reference";
+            String request = "REQUEST_FILE|target|" + (missingFile ? "missing.md" : PATH) + "|" + selector + "|Read the interface reference";
             var session = new EvidenceSession(evidence, new SupplementalEvidence(git, executor, java.util.Map.of()), 0, 0);
             session.load("REQUEST_FILE|target|" + PATH + "|all|Initial discovery read", "Discovery");
             var source = session.catalog().sources().stream().filter(s -> s.path().equals(PATH)).findFirst().orElseThrow();
@@ -128,6 +136,20 @@ final class EvidenceDeliveryTests {
                     ? "<verification><status>INSUFFICIENT_EVIDENCE</status><reason>The policy remains undecided.</reason></verification>\n"
                         + "REQUEST_FILE|target|" + PATH + "|1:1|Ask a differently spelled covered range"
                     : "<verification><status>REJECTED</status><reason>The requested reference was examined.</reason></verification>";
+            if (unboundQuote) {
+                resolved = """
+                    <verification><status>INSUFFICIENT_EVIDENCE</status><reason>The policy is unresolved.</reason>
+                    <premises><premise><statement>Unsupported premise.</statement><basis>IMPLEMENTATION</basis>
+                    <citations><citation><source>%s</source><quote>A made-up continuation of the document.</quote></citation></citations>
+                    </premise></premises>
+                    <citations><citation><source>%s</source><quote>INTERFACE_DOCUMENT_BODY: inspect this pinned reference before deciding.</quote></citation></citations>
+                    </verification>
+                    """.formatted(source.id(), source.id());
+            }
+            String pendingReply = requestOnly ? request : "<verification><status>INSUFFICIENT_EVIDENCE</status>"
+                    + "<reason>Inspect the interface reference.</reason></verification>\n" + request;
+            String unavailableReply = mode.equals("repeat-unavailable") ? request
+                    : "<verification><status>INSUFFICIENT_EVIDENCE</status><reason>The requested reference is unavailable.</reason></verification>";
             String script = """
                     prompt=$(cat)
                     case "$prompt" in
@@ -138,27 +160,58 @@ final class EvidenceDeliveryTests {
                     __RESOLVED_RESPONSE__
                     RESOLVED
                             ;;
-                          *) printf '%s\\n' '<verification><status>INSUFFICIENT_EVIDENCE</status><reason>Inspect the interface reference.</reason></verification>' '__REQUEST__' ;;
+                          *'The earlier request-only reply has been processed'*) cat <<'UNAVAILABLE'
+                    __UNAVAILABLE_RESPONSE__
+                    UNAVAILABLE
+                            ;;
+                          *) cat <<'PENDING'
+                    __PENDING_RESPONSE__
+                    PENDING
+                            ;;
                         esac;;
                       *) printf x >> beta-calls; printf '<verification><status>INSUFFICIENT_EVIDENCE</status><reason>A different unresolved question.</reason></verification>';;
                     esac
-                    """.replace("__REQUEST__", request).replace("__RESOLVED_RESPONSE__", resolved);
+                    """.replace("__PENDING_RESPONSE__", pendingReply).replace("__UNAVAILABLE_RESPONSE__", unavailableReply)
+                    .replace("__RESOLVED_RESPONSE__", resolved);
             try (var progress = new CommandProgress("reuse", new java.io.PrintStream(java.io.OutputStream.nullOutputStream()))) {
                 var findings = List.of(finding("R1-1", "alpha.py"), finding("R2-1", "beta.py"));
                 var agent = new AgentRunner(executor, "/bin/sh", List.of("-c", script), run, Duration.ofSeconds(5));
                 var quality = new ReviewQuality(options, evidence, session, new PromptFactory(), agent, run, progress, 9);
                 var decisions = quality.verify(findings);
-                require(Files.readString(run.resolve("alpha-calls")).equals("xx") && Files.readString(run.resolve("beta-calls")).equals("x"),
+                require(Files.readString(run.resolve("alpha-calls")).equals(mode.equals("repeat-unavailable") || unboundQuote ? "xxx" : "xx")
+                        && Files.readString(run.resolve("beta-calls")).equals("x"),
                         "a globally known source reaches its requester without rerunning an unrelated candidate or repeating already supplied coverage");
                 String followup = Files.readString(run.resolve("verification/round-2/R1-1-prompt.md"));
+                if (missingFile) {
+                    require(followup.contains("The earlier request-only reply has been processed")
+                            && !followup.contains(BODY)
+                            && decisions.getFirst().verdict().status() == ReviewOutput.Status.INSUFFICIENT_EVIDENCE
+                            && decisions.getFirst().verdict().validationFailed() == mode.equals("repeat-unavailable"),
+                            "unavailable evidence gets one verdict-only follow-up, and request-only output cannot finish a review");
+                    continue;
+                }
                 require(followup.contains(BODY) && followup.contains(source.id()) && !followup.contains("(lines 1–"),
                         "follow-up uses the existing immutable source instead of a new presentation-only range identity");
                 require(session.catalog().sources().size() == sourcesBefore, "covered requests do not append duplicate global evidence");
                 require(session.coverage().contains("Fulfilled requests from verification/R1-1: queued for this candidate: " + source.id()),
                         "coverage records which existing source was queued for the requesting candidate");
-                var expected = mode.equals("repeat-after-delivery") ? ReviewOutput.Status.INSUFFICIENT_EVIDENCE : ReviewOutput.Status.REJECTED;
+                var expected = mode.equals("repeat-after-delivery") || unboundQuote
+                        ? ReviewOutput.Status.INSUFFICIENT_EVIDENCE : ReviewOutput.Status.REJECTED;
                 require(decisions.getFirst().verdict().status() == expected, "evidence delivery never fabricates a semantic verdict");
-                if (mode.equals("all")) {
+                if (mode.equals("request-only"))
+                    require(!Files.exists(run.resolve("verification/R1-1-repair-prompt.md"))
+                            && !decisions.getFirst().verdict().validationFailed(),
+                            "a valid standalone request uses the follow-up directly without a format call");
+                if (unboundQuote) {
+                    var verdict = decisions.getFirst();
+                    Path repair = run.resolve("verification/round-2/R1-1-quote-repair-response.md");
+                    require(!verdict.verdict().validationFailed() && verdict.citations().size() == 1
+                            && verdict.support().premises().isEmpty()
+                            && Files.readString(repair).contains("A made-up continuation")
+                            && !Files.readString(repair.resolveSibling("R1-1-response.md")).contains("A made-up continuation"),
+                            "the bounded source correction preserves raw output, then omits only unsupported evidence from the unresolved verdict");
+                }
+                if (mode.equals("all") || mode.equals("request-only")) {
                     var resumedSession = new EvidenceSession(evidence, new SupplementalEvidence(git, executor, java.util.Map.of()), 0, 0);
                     resumedSession.load("REQUEST_FILE|target|" + PATH + "|all|Initial discovery read", "Discovery");
                     var resumedOptions = CliOptions.parse(new String[]{"review", "--repo", repo.toString(), "--resume", run.toString()});

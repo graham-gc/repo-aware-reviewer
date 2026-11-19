@@ -42,6 +42,17 @@ final class CitationRangeTests {
                 + selected + "</citations></verification>";
         var finding = new ReviewFinding("S1-2", "Producer evidence", ReviewFinding.Severity.MEDIUM, "FlowService.java", 411, 411,
                 "Unproved trigger", "Unconfirmed impact", "Evidence", "Unresolved");
+        String mixed = invalid.replace("</citations>", selected + "</citations>");
+        String recovery = ReviewGrounding.recoverPendingCitations(mixed, finding, evidence, index);
+        var recovered = ReviewGrounding.verification(recovery, finding, evidence, index);
+        require(recovered.verdict().status() == ReviewOutput.Status.INSUFFICIENT_EVIDENCE
+                && recovered.citations().size() == 1 && recovered.citations().getFirst().quote().equals(code)
+                && !recovery.contains("selectByRunNodeId"),
+                "an unresolved recovery retains exact evidence and excludes the unsupported quote");
+        String rejected = mixed.replace("INSUFFICIENT_EVIDENCE", "REJECTED");
+        require(ReviewGrounding.recoverPendingCitations(rejected, finding, evidence, index).equals(rejected)
+                && ReviewGrounding.recoverPendingCitations(invalid, finding, evidence, index).equals(invalid),
+                "recovery requires an unresolved verdict and at least one exact remaining citation");
         var decision = ReviewGrounding.verification(corrected, finding, evidence, index);
         var citation = decision.citations().getFirst();
         require(citation.quote().equals(code) && !citation.quote().contains("selectByRunNodeId"),

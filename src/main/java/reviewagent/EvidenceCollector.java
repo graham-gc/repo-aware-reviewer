@@ -178,8 +178,9 @@ final class EvidenceCollector {
             }
             String block = EvidenceText.block(title, "diff", patch);
             out.append(block);
-            sources.add(EvidenceSource.diff(change.path(), change.previousPath(), patch, scope,
-                    EvidenceCatalog.implementation(languages, change.path())));
+            var diff = EvidenceSource.diff(change.path(), change.previousPath(), patch, scope,
+                    EvidenceCatalog.implementation(languages, change.path()));
+            sources.add(patch.equals(change.patch()) && !binaryPatch(patch) ? diff.throughEndOfFile() : diff);
             int bytes = EvidenceText.bytes(block);
             diffBudget -= bytes;
             remaining -= bytes;

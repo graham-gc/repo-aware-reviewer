@@ -104,7 +104,7 @@ final class ReviewTaskIsolationTests {
                 """.replace("DISCOVERIES", discoveries).replace("INVALID_REPLY", MALFORMED)
                 .replace("REJECTED_REPLY", REJECTED).replace("FINAL_REPORT", finalReport);
         var args = new ArrayList<>(List.of("review", "--repo", repo.toString(), "--language", "zh-CN", "--output-dir", dir.resolve("runs").toString(),
-                "--agent-command", "/bin/sh", "--agent-arg", "-c", "--agent-arg", script));
+                "--review-mode", "deep", "--agent-command", "/bin/sh", "--agent-arg", "-c", "--agent-arg", script));
         Path run = new ReviewPipeline(new ProcessExecutor(), Clock.systemUTC()).run(CliOptions.parse(args.toArray(String[]::new)));
         String report = Files.readString(run.resolve("report.md"));
         require(report.startsWith("> **审查未完成：**") && report.contains("R1-1") && report.contains("未完成复核")

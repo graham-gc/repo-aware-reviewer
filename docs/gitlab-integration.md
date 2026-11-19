@@ -68,6 +68,7 @@ This container does not inherit the developer laptop's Claude login or `~/.claud
 | --- | --- |
 | `REVIEW_LANGUAGE` | `en`; also supports `zh-CN`. Set a project CI variable to override the template. |
 | `REVIEW_PARALLELISM` | `1` in this integration; avoids concurrent model pressure by default. |
+| `REVIEW_MODE` | `auto` by default. Set `deep` to run the full workflow for every nonempty MR. |
 | `REVIEW_TIMEOUT_SECONDS` | `5400`, total CLI process timeout; must leave time before the CI job deadline. |
 | `REVIEW_AGENT_TIMEOUT_SECONDS` | CLI default, currently `900` per model call. |
 | `REVIEW_AGENT_RETRIES` | CLI default, currently `1` extra transport retry subject to cleanup checks. |

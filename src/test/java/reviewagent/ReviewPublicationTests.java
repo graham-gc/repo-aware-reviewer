@@ -63,6 +63,15 @@ final class ReviewPublicationTests {
         var r2 = ReviewGrounding.verification(positive("R2-1", target.id(), base.id(), originalGuard), candidate("R2-1"), evidence, index);
         var r3 = ReviewGrounding.verification(positive("R3-1", target.id(), base.id(), originalGuard), candidate("R3-1"), evidence, index);
         require(r2.verdict().status() == ReviewOutput.Status.CONFIRMED, "a locally proved failure needs no external requirement document");
+        require(SharedAdjudication.eligible(List.of(r1, r2, r3), scope, catalog) == null,
+                "an unresolved peer keeps publication decisions independent");
+        var shared = SharedAdjudication.eligible(List.of(r2, r3), scope, catalog);
+        require(shared != null && !shared.accepts(r2, scope, catalog),
+                "matching source locations still require an explicit independently validated shared verdict");
+        var differentBaseline = ReviewGrounding.verification(positive("R3-1", target.id(), base.id(), "def average(values):"),
+                candidate("R3-1"), evidence, index);
+        require(SharedAdjudication.eligible(List.of(r2, differentBaseline), scope, catalog) == null,
+                "sharing needs matching cited baseline spans, even when the changed location and source block agree");
         var opposite = ReviewGrounding.verification(uncertain(target.id(), base.id(), originalGuard), candidate("R3-1"), evidence, index);
         var groups = List.of(List.of("R1-1", "R2-1", "R3-1"));
         var adjudicated = ReviewQuality.resolveConflicts(List.of(r2, opposite), groups, OutputLanguage.EN);
@@ -140,7 +149,7 @@ final class ReviewPublicationTests {
             Files.writeString(repo.resolve("calculator.py"), TARGET);
             git(repo, "add", "--all"); git(repo, "commit", "-qm", "target");
             Path stub = fixture.resolve("agent.sh");
-            var command = List.of("review", "--repo", repo.toString(), "--agent-command", "/bin/sh", "--agent-arg", stub.toString(),
+            var command = List.of("review", "--repo", repo.toString(), "--review-mode", "deep", "--agent-command", "/bin/sh", "--agent-arg", stub.toString(),
                     "--agent-arg", "--model=judge", "--discovery-model", "alpha", "--discovery-model", "beta",
                     "--discovery-model", "gamma");
             var options = options(command, "--output-dir", fixture.resolve("runs").toString());
@@ -151,13 +160,19 @@ final class ReviewPublicationTests {
             Files.writeString(fixture.resolve("positive.xml"), positive("CANDIDATE_ID", source.id(), diff.id(), REMOVED));
             Files.writeString(fixture.resolve("uncertain.xml"), uncertain(source.id(), diff.id(), REMOVED));
             Files.writeString(fixture.resolve("discovery.xml"), "<findings>" + ReviewOutput.findingXml(candidate("unused")) + "</findings>");
+            var different = new ReviewFinding("unused", "Handling non-numeric items", ReviewFinding.Severity.MEDIUM, "calculator.py", 2, 2,
+                    "average([None])", "Raises TypeError", "The same expression consumes the item.", "Check the input contract.");
+            Files.writeString(fixture.resolve("two-findings.xml"), "<findings>" + ReviewOutput.findingXml(candidate("unused"))
+                    + ReviewOutput.findingXml(different) + "</findings>");
+            Files.writeString(fixture.resolve("duplicate-findings.xml"),
+                    "<findings>" + ReviewOutput.findingXml(candidate("unused")).repeat(2) + "</findings>");
             Files.writeString(fixture.resolve("report.txt"), String.join("\n\n", ReviewReport.headings(OutputLanguage.EN)) + "\n<finding-groups/>");
             Files.writeString(stub, """
                     set -eu
                     root=$(dirname "$0")
                     prompt=$(cat)
                     case "$prompt" in
-                      'You are the discovery stage'*)
+                      'You are the discovery stage'*|'DISCOVERY RESPONSE RECOVERY'*)
                         [ "$#" -eq 2 ] && [ "$1" = '--model' ] || exit 93
                         case "$prompt" in
                           *'Correctness and regressions.'*) [ "$2" = alpha ] || exit 94 ;;
@@ -168,14 +183,40 @@ final class ReviewPublicationTests {
                     esac
                     printf 'call\\n' >> "$root/calls"
                     case "$prompt" in
+                      'DISCOVERY RESPONSE RECOVERY'*)
+                        if [ "$2" = gamma ] && [ -f "$root/fail-discovery" ]; then printf 'Still no findings block.'
+                        elif [ "$2" = gamma ] && [ -f "$root/empty-discovery" ]; then printf '<findings/>'
+                        else cat "$root/discovery.xml"; fi ;;
                       'You are the discovery stage'*)
-                        case "$2:$prompt" in
-                          alpha:*'OUTPUT FORMAT CORRECTION'*) cat "$root/discovery.xml" ;;
-                          alpha:*) printf 'initial malformed discovery' ;;
-                          *) cat "$root/discovery.xml" ;;
-                        esac ;;
+                        if [ "$2" = alpha ]; then printf 'initial malformed discovery'
+                        elif [ "$2" = beta ] && [ -f "$root/shared-publication" ]; then cat "$root/duplicate-findings.xml"
+                        elif [ -f "$root/pending-only" ]; then
+                          if [ "$2" = gamma ]; then printf '<findings><finding>'
+                          else cat "$root/two-findings.xml"; fi
+                        else cat "$root/discovery.xml"; fi ;;
                       'You are the independent candidate verification'*|'You are the independent publication adjudication'*)
                         candidate=$(printf '%s\\n' "$prompt" | sed -n '/^CANDIDATE TO VERIFY$/{n;p;}')
+                        if [ -f "$root/shared-publication" ]; then
+                          id=$(printf '%s\\n' "$candidate" | sed -n 's/.*<finding id="\\(R[123]-[12]\\)".*/\\1/p')
+                          [ -n "$id" ] || exit 98
+                          case "$id:$prompt" in
+                            *'SHARING THIS PUBLICATION VERDICT'*)
+                              ids=R3-1,R2-2,R2-1,R1-1
+                              if [ -f "$root/decline-sharing" ]; then ids=R1-1,R2-1; fi
+                              sed -e "s/CANDIDATE_ID/$id/g" -e "s|<verification>|<verification><sharedCandidates>$ids</sharedCandidates>|" "$root/positive.xml" ;;
+                            'R2-2:You are the independent candidate verification'*)
+                              sed -e "s/CANDIDATE_ID/$id/g" -e 's|<severity>MEDIUM</severity>|<severity>LOW</severity>|' "$root/positive.xml" ;;
+                            *) sed "s/CANDIDATE_ID/$id/g" "$root/positive.xml";;
+                          esac
+                          exit
+                        fi
+                        if [ -f "$root/pending-only" ]; then
+                          case "$candidate" in
+                            *'id="R2-2"'*) printf '<verification><status>INSUFFICIENT_EVIDENCE</status><reason>The input contract does not specify non-numeric items.</reason></verification>' ;;
+                            *) cat "$root/uncertain.xml" ;;
+                          esac
+                          exit
+                        fi
                         case "$candidate" in
                           *'id="R1-1"'*) cat "$root/uncertain.xml" ;;
                           *'id="R2-1"'*) sed 's/CANDIDATE_ID/R2-1/g' "$root/positive.xml" ;;
@@ -188,6 +229,11 @@ final class ReviewPublicationTests {
                         esac ;;
                       'You are the candidate reconciliation'*)
                         if [ -f "$root/fail-groups" ]; then printf '<candidate-groups><group><id>unknown</id></group></candidate-groups>'
+                        elif [ -f "$root/shared-publication" ]; then printf '<candidate-groups><group><id>R1-1</id><id>R2-1</id><id>R2-2</id><id>R3-1</id></group></candidate-groups>'
+                        elif [ -f "$root/pending-only" ]; then
+                          printf '<candidate-groups><group><id>R1-1</id><id>R2-1</id>'
+                          case "$prompt" in *'<finding id="R3-1">'*) printf '<id>R3-1</id>' ;; esac
+                          printf '</group><group><id>R2-2</id></group></candidate-groups>'
                         else printf '<candidate-groups><group><id>R1-1</id><id>R2-1</id><id>R3-1</id></group></candidate-groups>'; fi ;;
                       'You are the report consolidation'*) cat "$root/report.txt" ;;
                       *) exit 92 ;;
@@ -263,11 +309,99 @@ final class ReviewPublicationTests {
                     && !Files.exists(blocked.resolve("report-prompt.md"))
                     && blockedReport.contains("[adjudication/groups-state.properties](adjudication/groups-state.properties)"),
                     "completed verification remains auditable even when required publication grouping blocks dependent stages");
+            Files.delete(fixture.resolve("fail-groups"));
+            sharedWorkflow(fixture, command, options);
+            pendingWorkflow(fixture, command, options);
         } finally {
             try (var paths = Files.walk(fixture)) {
                 for (Path path : paths.sorted(Comparator.reverseOrder()).toList()) Files.delete(path);
             }
         }
+    }
+
+    private static void sharedWorkflow(Path fixture, List<String> command, CliOptions options) throws Exception {
+        Files.createFile(fixture.resolve("shared-publication"));
+        Path reportReply = fixture.resolve("report.txt");
+        String headings = String.join("\n\n", ReviewReport.headings(OutputLanguage.EN));
+        Files.writeString(reportReply, headings + "\n<finding-groups><group><id>R1-1</id></group></finding-groups>");
+        Path shared = new ReviewPipeline(new ProcessExecutor(), Clock.systemUTC()).run(options);
+        String report = Files.readString(shared.resolve("report.md"));
+        String coverage = Files.readString(shared.resolve("coverage.md"));
+        String timings = Files.readString(shared.resolve("timings.md"));
+        require(Main.reviewExitCode(shared) == 0 && report.contains("ZeroDivisionError")
+                && timings.contains("|adjudication|2|")
+                && coverage.contains("R1-1 covers R1-1, R2-1, R2-2, R3-1 in one validated publication verdict."),
+                "four equivalent verifications with different provisional severities share one publication call plus grouping");
+        require(List.of("R1-1", "R2-1", "R2-2", "R3-1").stream()
+                .allMatch(id -> coverage.contains(id + " — CONFIRMED")
+                        && Files.exists(shared.resolve("verification/" + id + "-response.md")))
+                && Files.readString(shared.resolve("verification/R1-1-response.md")).contains("<severity>MEDIUM</severity>")
+                && Files.readString(shared.resolve("verification/R2-2-response.md")).contains("<severity>LOW</severity>")
+                && !Files.exists(shared.resolve("adjudication/R2-1-prompt.md")),
+                "one publication decision preserves all four individual verification records");
+        long beforeResume = Files.readAllLines(fixture.resolve("calls")).size();
+        new ReviewPipeline(new ProcessExecutor(), Clock.systemUTC()).run(options(command, "--resume", shared.toString()));
+        require(Files.readAllLines(fixture.resolve("calls")).size() == beforeResume
+                && Files.readString(shared.resolve("report.md")).equals(report),
+                "resume revalidates and reuses a shared verdict without another model call");
+
+        Files.createFile(fixture.resolve("decline-sharing"));
+        Files.writeString(reportReply, headings + "\n<finding-groups><group><id>R1-1</id><id>R2-1</id><id>R2-2</id>"
+                + "<id>R3-1</id></group></finding-groups>");
+        Path separate = new ReviewPipeline(new ProcessExecutor(), Clock.systemUTC()).run(options);
+        require(Main.reviewExitCode(separate) == 0
+                && Files.readString(separate.resolve("timings.md")).contains("|adjudication|5|")
+                && Files.exists(separate.resolve("adjudication/R3-1-prompt.md"))
+                && !Files.readString(separate.resolve("coverage.md")).contains("Shared publication adjudication"),
+                "partial coverage falls back to the remaining individual adjudications without rerunning the representative");
+
+        Files.delete(fixture.resolve("shared-publication"));
+        Files.delete(fixture.resolve("decline-sharing"));
+        Files.writeString(reportReply, headings + "\n<finding-groups/>");
+    }
+
+    private static void pendingWorkflow(Path fixture, List<String> command, CliOptions options) throws Exception {
+        Files.createFile(fixture.resolve("pending-only"));
+        Path recovered = new ReviewPipeline(new ProcessExecutor(), Clock.systemUTC()).run(options);
+        String report = Files.readString(recovered.resolve("report.md"));
+        require(Main.reviewExitCode(recovered) == 0
+                && report.contains("Confirmed defects: 0; review-required items: 2; unfinished checks: 0")
+                && report.contains("R1-1, R2-1, R3-1") && report.contains("Handling non-numeric items"),
+                "an all-pending review groups equivalent risks and retains a distinct trigger at the same line");
+        String coverage = Files.readString(recovered.resolve("coverage.md"));
+        require(List.of("R1-1", "R2-1", "R2-2", "R3-1").stream()
+                .allMatch(id -> coverage.contains(id + " — INSUFFICIENT_EVIDENCE"))
+                && !Files.exists(recovered.resolve("adjudication/R1-1-prompt.md")),
+                "grouping preserves each grounded verdict without another candidate adjudication");
+        String retry = Files.readString(recovered.resolve("discovery/R3-repair-prompt.md"));
+        require(retry.startsWith("DISCOVERY RESPONSE RECOVERY") && retry.contains("Boundary conditions and security.")
+                && retry.contains("<findings/>") && !retry.contains("PREVIOUS RESPONSE")
+                && Files.readString(recovered.resolve("discovery/R3-validation.log")).contains("MISSING_RESPONSE_BLOCK"),
+                "truncated discovery gets one fresh structure-first request with the original focus and audit record");
+
+        Files.createFile(fixture.resolve("fail-discovery"));
+        Path incomplete = new ReviewPipeline(new ProcessExecutor(), Clock.systemUTC()).run(options);
+        require(Main.reviewExitCode(incomplete) == 3
+                && Files.readString(incomplete.resolve("review-status.md")).contains("discovery/R3 [INVALID_OUTPUT]")
+                && Files.readString(incomplete.resolve("discovery/R3-validation.log")).split("event=VALIDATION_REJECTED", -1).length == 3
+                && Files.readString(incomplete.resolve("report.md")).contains("R1-1, R2-1"),
+                "two missing blocks leave the review incomplete while valid peers remain grouped");
+        Files.delete(fixture.resolve("fail-discovery"));
+        Files.createFile(fixture.resolve("empty-discovery"));
+        new ReviewPipeline(new ProcessExecutor(), Clock.systemUTC()).run(options(command, "--resume", incomplete.toString()));
+        require(Main.reviewExitCode(incomplete) == 0
+                && Files.readString(incomplete.resolve("review-status.md")).contains("Status: COMPLETE")
+                && Files.readString(incomplete.resolve("discovery/R3-response.md")).equals("<findings/>"),
+                "resume only accepts an explicit valid empty result before marking discovery complete");
+        Files.delete(fixture.resolve("empty-discovery"));
+
+        Files.createFile(fixture.resolve("fail-groups"));
+        Path ungrouped = new ReviewPipeline(new ProcessExecutor(), Clock.systemUTC()).run(options);
+        require(Main.reviewExitCode(ungrouped) == 0
+                && Files.readString(ungrouped.resolve("report.md")).contains("review-required items: 4")
+                && Files.readString(ungrouped.resolve("coverage.md")).contains("Review-required candidates are shown individually.")
+                && Files.readString(ungrouped.resolve("adjudication/groups-state.properties")).contains("failureKind=INVALID_OUTPUT"),
+                "optional grouping failure retains each valid risk and records its checkpoint without blocking completion");
     }
 
     private static CliOptions options(List<String> command, String... extra) {

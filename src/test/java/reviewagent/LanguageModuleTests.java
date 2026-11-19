@@ -169,7 +169,7 @@ final class LanguageModuleTests {
                 esac
                 """;
         var args = new ArrayList<>(List.of("review", "--repo", repo.toString(), "--output-dir", fixture.resolve("profile-output").toString(),
-                "--agent-command", "/bin/sh", "--agent-arg", "-c", "--agent-arg", stub));
+                "--review-mode", "deep", "--agent-command", "/bin/sh", "--agent-arg", "-c", "--agent-arg", stub));
         Path run = new ReviewPipeline(EXECUTOR, Clock.systemUTC()).run(CliOptions.parse(args.toArray(String[]::new)));
         require(Files.readString(run.resolve("supplemental-evidence.md")).contains("def helper(): return 2"), "text language requests work end-to-end");
         String scope = Files.readString(run.resolve("scope.md"));

@@ -256,10 +256,11 @@ final class PromptFactory {
     String groupCandidates(List<ReviewOutput.Decision> decisions, EvidenceIndex index) {
         StringBuilder prompt = new StringBuilder("""
                 You are the candidate reconciliation stage of a read-only code review.
-                Group candidates describing the SAME defect, reachable trigger and observable impact. Include
-                rejected and insufficient-evidence candidates: an opposite verdict must not disappear. Wording
-                and line numbers can differ for the same defect. Independent defects at the same location stay
-                separate. Do not decide correctness here. Return only the complete partition as XML:
+                Group candidates describing the SAME underlying issue. Compare the concrete trigger, observable
+                behavior and applicable contract or open policy question. Include rejected and insufficient-evidence
+                candidates so opposite verdicts remain visible. Wording and line numbers can differ for the same
+                issue. Keep distinct issues separate even at the same location. Do not decide correctness here.
+                Return only the complete partition as XML:
                 <candidate-groups><group><id>R1-1</id><id>R2-1</id></group><group><id>R3-1</id></group></candidate-groups>
                 Every supplied candidate ID must occur exactly once. Singleton groups are valid.
 
@@ -299,7 +300,7 @@ final class PromptFactory {
         return decisionSummary(decision, null);
     }
 
-    private static String decisionSummary(ReviewOutput.Decision decision, EvidenceIndex index) {
+    static String decisionSummary(ReviewOutput.Decision decision, EvidenceIndex index) {
         var verdict = decision.verdict();
         return "\n" + ReviewOutput.findingXml(verdict.confirmed() == null ? verdict.candidate() : verdict.confirmed())
                 + "\nVerdict: " + verdict.status() + ". Reason: " + verdict.reason()

@@ -239,6 +239,7 @@ def review(env=os.environ, *, api=None, fetcher=fetch_snapshot, runner=execute_c
                         args += ["--knowledge-mode", "scoped"]
             for variable, option in (("REVIEW_AGENT_TIMEOUT_SECONDS", "--agent-timeout-seconds"),
                                      ("REVIEW_AGENT_RETRIES", "--agent-retries"),
+                                     ("REVIEW_MODE", "--review-mode"),
                                      ("REVIEW_MAX_EVIDENCE_BYTES", "--max-evidence-bytes")):
                 if env.get(variable):
                     args += [option, env[variable]]

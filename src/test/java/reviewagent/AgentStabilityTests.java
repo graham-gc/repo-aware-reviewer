@@ -290,7 +290,8 @@ final class AgentStabilityTests {
     }
     private static ArrayList<String> arguments(Path dir, Path script) {
         return new ArrayList<>(List.of("review", "--repo", dir.resolve("repo").toString(), "--output-dir", dir.resolve("runs").toString(),
-                "--agent-command", "/bin/sh", "--agent-arg", script.toString(), "--agent-arg", dir.toString(), "--agent-retries", "0"));
+                "--review-mode", "deep", "--agent-command", "/bin/sh", "--agent-arg", script.toString(), "--agent-arg", dir.toString(),
+                "--agent-retries", "0"));
     }
     private static AgentRunner shell(Path dir, String script, int retries, int calls, Duration timeout) {
         return new AgentRunner(new ProcessExecutor(), "/bin/sh", List.of("-c", script), dir, timeout,

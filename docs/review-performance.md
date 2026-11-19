@@ -1,6 +1,6 @@
 # Verification performance
 
-Candidate verification, requirement-finding verification and publication adjudication default to `--verification-evidence scoped`. Use `--verification-evidence full` to compare the previous full-input behavior. This option is independent of `--knowledge-mode`, which controls the business knowledge document. Both modes retain independent per-candidate verification, exact quotation validation, source provenance, location coverage and publication checks. Batching and local-only final report generation are not enabled by this change.
+Candidate verification, requirement-finding verification and publication adjudication default to `--verification-evidence scoped`. Use `--verification-evidence full` to compare the previous full-input behavior. This option is independent of `--knowledge-mode`, which controls the business knowledge document. Both modes retain independent per-candidate verification, exact quotation validation, source provenance, location coverage and publication checks.
 
 ## Supplied material
 
@@ -21,6 +21,8 @@ Every candidate task writes `TASK-evidence.md` beside its prompt. It records ful
 
 A candidate's selected evidence is retained across its verification rounds and subsequent publication adjudication. Requested new material is pinned into the requester's next task even if it has no lexical match in the original allegation. This prevents a smaller publication prompt from accidentally losing a producer guard discovered during verification.
 
+After individual verification, a group of confirmed local regressions with the same code anchor and shared pinned baseline and target sources can receive one publication verdict. The adjudicator resolves provisional severity differences using the proved impact and preconditions. Sharing requires explicit coverage of every candidate ID in the independent publication response and revalidation of the common evidence. The remaining candidates run separately when the response leaves applicability uncertain. Coverage retains the individual verification records and lists which candidates shared a publication verdict.
+
 After shared evidence collection, a task whose complete prompt remains unchanged is not automatically called again. Its previous validated or unfinished result is retained and `TASK-unchanged.txt` records the decision. Explicit resume can retry unfinished tasks. New related material, indexes or trusted rules change the prompt and can trigger another verification. Changing the verification-evidence mode is allowed during resume, but changed prompts invalidate their task caches; prior discovery results can still be reused when unchanged.
 
 ## Timing report
@@ -33,7 +35,7 @@ Candidate prompt comparisons include prepared tasks that may be cached or skippe
 
 ## Comparing quality and latency
 
-Use the same fixed target/baseline, documents, model route, concurrency and budgets in separate output directories. Compare `--verification-evidence full` with `--verification-evidence scoped`; do not use cache reuse as a latency benchmark. Check missing/false findings and human-adjudicated outcomes alongside stage wall time, call count, corrections and input bytes. Model generation and gateway variability require repeated comparisons before claiming a speedup.
+Use the same fixed target/baseline, documents, model route, concurrency and budgets in separate output directories. When comparing `--verification-evidence full` with `--verification-evidence scoped`, select `--review-mode deep` for both runs. For adaptive routing comparisons, use a fresh run for each mode. Check missing and false findings and human-adjudicated outcomes alongside stage wall time, call count, corrections and input bytes. Model generation and gateway variability require repeated comparisons before claiming a speedup.
 
 Offline regression tests verify source boundaries, complete-block selection, cross-file producer context, stable aliases and locations, preservation of discovered evidence, selective follow-up rounds and non-overlapping time accounting. Saved repository evidence can quantify prompt-size differences without model calls. Neither test proves production model latency or review recall; this implementation does not claim a fixed runtime reduction.
 

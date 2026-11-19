@@ -13,7 +13,9 @@ import java.util.function.Function;
 
 /** Evidence-driven verification, cross-verdict adjudication and independent acceptance audit. */
 final class ReviewQuality {
-    record Adjudication(List<ReviewOutput.Decision> decisions, List<List<String>> groups) { }
+    record Adjudication(List<ReviewOutput.Decision> decisions, List<List<String>> groups, String groupingNote) {
+        Adjudication(List<ReviewOutput.Decision> decisions, List<List<String>> groups) { this(decisions, groups, ""); }
+    }
     record AssessmentResult(String details, String summary, List<ReviewOutput.AssessmentItem> items) {
         AssessmentResult(String details, String summary) { this(details, summary, List.of()); }
     }
@@ -47,28 +49,88 @@ final class ReviewQuality {
                 candidate -> Set.of(), "verification", 5, "Verifying candidate issues");
     }
 
-    Adjudication adjudicate(List<ReviewOutput.Decision> preliminary, String assessment) throws IOException, InterruptedException {
-        if (preliminary.stream().noneMatch(d -> d.verdict().status() == ReviewOutput.Status.CONFIRMED)) {
+    List<ReviewOutput.Decision> verifyAfterEvidence(List<ReviewOutput.Decision> candidates, Map<String, Set<String>> delivered)
+            throws IOException, InterruptedException {
+        var previous = candidates.stream().collect(java.util.stream.Collectors.toMap(
+                decision -> decision.verdict().candidate().id(), Function.identity()));
+        return verifyRounds(candidates.stream().map(decision -> decision.verdict().candidate()).toList(),
+                (candidate, view) -> prompts.verifyFinding(view.bundle(), candidate, "", view.index())
+                        + "\nPREVIOUS DECISION — RECHECK WITH THE NEW EVIDENCE\n"
+                        + PromptFactory.decisionSummary(previous.get(candidate.id()), view.index()),
+                candidate -> {
+                    var sources = new LinkedHashSet<>(delivered.get(candidate.id()));
+                    sources.addAll(citationIds(previous.get(candidate.id()).citations()));
+                    return sources;
+                }, "adaptive/verification", 5, "Verifying candidates with new evidence");
+    }
+
+    Adjudication adjudicate(List<ReviewOutput.Decision> preliminary, String assessment, Set<String> requirementCandidates)
+            throws IOException, InterruptedException {
+        List<ReviewFinding> positives = preliminary.stream().filter(d -> d.verdict().status() == ReviewOutput.Status.CONFIRMED)
+                .map(d -> d.verdict().confirmed()).toList();
+        List<ReviewOutput.Decision> toGroup = positives.isEmpty()
+                ? preliminary.stream().filter(d -> d.verdict().status() == ReviewOutput.Status.INSUFFICIENT_EVIDENCE
+                        && !d.verdict().validationFailed()).toList()
+                : preliminary;
+        if (positives.isEmpty() && toGroup.size() < 2) {
             return new Adjudication(List.of(), List.of());
         }
-        List<ReviewFinding> candidates = preliminary.stream().map(d -> d.verdict().candidate()).toList();
-        var groupsReply = tasks(List.of(new ReviewTasks.Task("groups", prompts.groupCandidates(preliminary, session.index()),
-                reply -> ReviewOutput.candidateGroups(reply, candidates))), "adjudication", 7, "Reconciling candidate verdicts");
-        var groups = ReviewOutput.candidateGroups(groupsReply.get("groups"), candidates);
+        List<ReviewFinding> candidates = toGroup.stream().map(d -> d.verdict().candidate()).toList();
+        List<List<String>> groups;
+        try {
+            var groupsReply = tasks(List.of(new ReviewTasks.Task("groups", prompts.groupCandidates(toGroup, session.index()),
+                    reply -> ReviewOutput.candidateGroups(reply, candidates))), "adjudication", 7, "Reconciling candidate verdicts");
+            groups = ReviewOutput.candidateGroups(groupsReply.get("groups"), candidates);
+        } catch (ReviewStageException failure) {
+            if (!positives.isEmpty()) throw failure;
+            return new Adjudication(List.of(), List.of(), "\nReview-required candidates are shown individually. "
+                    + failure.reportMessage(directory) + "\n");
+        }
+        if (positives.isEmpty()) return new Adjudication(List.of(), groups);
+
         Map<String, List<ReviewOutput.Decision>> related = new LinkedHashMap<>();
+        Map<String, SharedAdjudication> shared = new LinkedHashMap<>();
+        Set<String> deferred = new LinkedHashSet<>();
         for (List<String> ids : groups) {
             List<ReviewOutput.Decision> members = preliminary.stream().filter(d -> ids.contains(d.verdict().candidate().id())).toList();
             for (String id : ids) related.put(id, members);
+            if (ids.stream().anyMatch(requirementCandidates::contains)) continue;
+            var proposed = SharedAdjudication.eligible(members, evidence.scope(), session.catalog());
+            if (proposed != null) {
+                shared.put(proposed.candidateIds().getFirst(), proposed);
+                deferred.addAll(proposed.candidateIds().subList(1, proposed.candidateIds().size()));
+            }
         }
-        // Verify each positive member, so an incorrect semantic grouping cannot erase independent defects.
-        List<ReviewFinding> positives = preliminary.stream().filter(d -> d.verdict().status() == ReviewOutput.Status.CONFIRMED)
-                .map(d -> d.verdict().confirmed()).toList();
-        List<ReviewOutput.Decision> adjudicated = verifyRounds(positives, (candidate, view) -> prompts.adjudicate(view.bundle(), candidate,
-                related.get(candidate.id()), "", view.index()) + "\nINDEPENDENTLY AUDITED REQUIREMENT ASSESSMENT\n"
-                + "Recheck any contradiction between the proposed finding and this assessment against the source.\n" + assessment,
-                candidate -> groupEvidence(related.get(candidate.id())),
-                "adjudication", 7, "Adjudicating findings before publication");
-        return new Adjudication(resolveConflicts(adjudicated, groups, OutputLanguage.parse(options.language())), groups);
+        VerificationPrompt publicationPrompt = (candidate, view) -> {
+            var proposal = shared.get(candidate.id());
+            return prompts.adjudicate(view.bundle(), candidate, related.get(candidate.id()), "", view.index())
+                    + "\nINDEPENDENTLY AUDITED REQUIREMENT ASSESSMENT\n"
+                    + "Recheck any contradiction between the proposed finding and this assessment against the source.\n" + assessment
+                    + (proposal == null ? "" : "\n\n" + proposal.instructions());
+        };
+        Function<ReviewFinding, Set<String>> publicationEvidence = candidate -> groupEvidence(related.get(candidate.id()));
+        var decisions = new LinkedHashMap<String, ReviewOutput.Decision>();
+        var firstPass = positives.stream().filter(candidate -> !deferred.contains(candidate.id())).toList();
+        for (var decision : verifyRounds(firstPass, publicationPrompt, publicationEvidence,
+                "adjudication", 7, "Adjudicating findings before publication"))
+            decisions.put(decision.verdict().candidate().id(), decision);
+
+        var sharingNotes = new StringBuilder();
+        for (var entry : shared.entrySet()) {
+            var proposal = entry.getValue();
+            if (!proposal.accepts(decisions.get(entry.getKey()), evidence.scope(), session.catalog())) continue;
+            deferred.removeAll(proposal.candidateIds());
+            sharingNotes.append("- ").append(entry.getKey()).append(" covers ")
+                    .append(String.join(", ", proposal.candidateIds())).append(" in one validated publication verdict.\n");
+        }
+        var remaining = positives.stream().filter(candidate -> deferred.contains(candidate.id())).toList();
+        for (var decision : verifyRounds(remaining, publicationPrompt, publicationEvidence,
+                "adjudication", 7, "Adjudicating findings separately"))
+            decisions.put(decision.verdict().candidate().id(), decision);
+
+        var adjudicated = positives.stream().map(candidate -> decisions.get(candidate.id())).filter(java.util.Objects::nonNull).toList();
+        String note = sharingNotes.isEmpty() ? "" : "\n## Shared publication adjudication\n\n" + sharingNotes;
+        return new Adjudication(resolveConflicts(adjudicated, groups, OutputLanguage.parse(options.language())), groups, note);
     }
 
     static List<ReviewOutput.Decision> resolveConflicts(List<ReviewOutput.Decision> decisions, List<List<String>> groups,
@@ -115,6 +177,8 @@ final class ReviewQuality {
         var results = new LinkedHashMap<String, ReviewOutput.Decision>();
         var priorPrompts = new LinkedHashMap<String, String>();
         var continuations = new LinkedHashMap<String, VerificationContinuation>();
+        var awaitingVerdicts = new LinkedHashSet<String>();
+        OutputLanguage language = OutputLanguage.parse(options.language());
         List<ReviewFinding> pending = findings;
         int round = 1;
         while (!pending.isEmpty()) {
@@ -132,25 +196,43 @@ final class ReviewQuality {
                         : VerificationEvidence.select(evidence, available, supplemental, candidate, pinned, false);
                 String basePrompt = prompt.build(candidate, view);
                 boolean unchanged = basePrompt.equals(priorPrompts.put(candidate.id(), basePrompt)) && results.containsKey(candidate.id());
+                boolean verdictRequired = unchanged && awaitingVerdicts.contains(candidate.id());
+                boolean reuse = unchanged && !verdictRequired;
                 var continuation = continuations.get(candidate.id());
-                String text = basePrompt + (continuation == null || unchanged ? "" : continuation.markdown(view));
+                String followup = verdictRequired ? """
+
+                        The earlier request-only reply has been processed. Return a complete <verification> block now.
+                        Use INSUFFICIENT_EVIDENCE if the supplied material still leaves a decisive gap.
+                        """ : "";
+                String text = basePrompt + (continuation == null || reuse ? "" : continuation.markdown(view)) + followup;
                 retainedEvidence.computeIfAbsent(candidate.id(), unused -> new LinkedHashSet<>())
                         .addAll(view.bundle().catalog().sources().stream().map(EvidenceSource::id).toList());
                 int selectedBytes = EvidenceText.bytes(text);
                 int fullBytes = view.fallback() ? selectedBytes : EvidenceText.bytes(prompt.build(candidate, full)
-                        + (continuation == null || unchanged ? "" : continuation.markdown(full)));
+                        + (continuation == null || reuse ? "" : continuation.markdown(full)) + followup);
                 agent.timings().prepared(taskDirectory.resolve(candidate.id()), fullBytes, selectedBytes,
                         view.bundle().catalog().sources().size(), available.sources().size());
                 AtomicFiles.write(taskDirectory.resolve(candidate.id() + "-evidence.md"), view.manifest(fullBytes, selectedBytes));
                 views.put(candidate.id(), view);
                 // Same instructions and same actual evidence cannot justify another automatic reasoning pass.
-                if (unchanged) {
+                if (reuse) {
                     agent.timings().unchanged();
                     AtomicFiles.write(taskDirectory.resolve(candidate.id() + "-unchanged.txt"), "No new task evidence; retained the previous validated or unfinished result.\n");
                     continue;
                 }
-                tasks.add(new ReviewTasks.Task(candidate.id(), text,
-                        reply -> ReviewGrounding.verification(reply, candidate, view.bundle(), view.index())));
+                tasks.add(new ReviewTasks.Task(candidate.id(), text, new ReviewTasks.Validator() {
+                    @Override
+                    public void validate(String reply) throws IOException {
+                        if (verdictRequired || !session.requestOnly(reply))
+                            ReviewGrounding.verification(reply, candidate, view.bundle(), view.index());
+                    }
+
+                    @Override
+                    public String corrected(String response, IOException failure) {
+                        return failure instanceof SourceQuotationException
+                                ? ReviewGrounding.recoverPendingCitations(response, candidate, view.bundle(), view.index()) : response;
+                    }
+                }));
             }
             if (tasks.isEmpty()) break;
             var replies = ReviewTasks.runIsolated(tasks, agent, taskDirectory, options.reviewParallelism(), progress,
@@ -161,15 +243,23 @@ final class ReviewQuality {
                 var reply = replies.get(candidate.id());
                 if (reply == null) continue;
                 var view = views.get(candidate.id());
-                results.put(candidate.id(), reply.valid() ? ReviewGrounding.verification(reply.response(), candidate, view.bundle(), view.index())
-                        : invalidCandidate(candidate, path, reply, OutputLanguage.parse(options.language())));
-                if (reply.valid()) {
-                    String requests = ReviewOutput.requestText(reply.response(), "verification");
-                    var parsedRequests = EvidenceRequest.parse(requests);
-                    candidateRequests.put(candidate.id(), parsedRequests.stream().map(EvidenceRequest::text)
-                            .collect(java.util.stream.Collectors.joining("\n")));
-                    evidenceRequests.append(requests).append('\n');
+                awaitingVerdicts.remove(candidate.id());
+                if (!reply.valid()) {
+                    results.put(candidate.id(), invalidCandidate(candidate, path, reply, language));
+                    continue;
                 }
+                String response = reply.response();
+                boolean requestOnly = session.requestOnly(response);
+                if (requestOnly) awaitingVerdicts.add(candidate.id());
+                results.put(candidate.id(), requestOnly
+                        ? unfinishedCandidate(candidate, language.text(
+                            "The reply requested evidence. A validated verification verdict is still pending.",
+                            "回复仅请求了证据，尚无经过校验的复核结论。"))
+                        : ReviewGrounding.verification(response, candidate, view.bundle(), view.index()));
+                String requests = requestOnly ? response : ReviewOutput.requestText(response, "verification");
+                candidateRequests.put(candidate.id(), EvidenceRequest.parse(requests).stream().map(EvidenceRequest::text)
+                        .collect(java.util.stream.Collectors.joining("\n")));
+                evidenceRequests.append(requests).append('\n');
             }
             boolean material = session.load(evidenceRequests.toString(), folder + " round " + round);
             for (String id : replies.keySet()) continuations.put(id, new VerificationContinuation(results.get(id),
@@ -185,7 +275,7 @@ final class ReviewQuality {
                 }
             }
             saveEvidence();
-            if (!material && !delivered) break;
+            if (!material && !delivered && awaitingVerdicts.isEmpty()) break;
             pending = findings.stream().filter(candidate -> results.get(candidate.id()).verdict().status()
                     == ReviewOutput.Status.INSUFFICIENT_EVIDENCE).toList();
             round++;
@@ -199,6 +289,10 @@ final class ReviewQuality {
         if (!outcome.failureKind().equals("INVALID_OUTPUT")) reason = language.text("Task did not complete (", "任务执行失败（")
                 + outcome.failureKind() + language.text("); no validated decision is available. See ", "），该候选未完成复核。详见 ")
                 + failureLink(folder, candidate.id());
+        return unfinishedCandidate(candidate, reason);
+    }
+
+    private static ReviewOutput.Decision unfinishedCandidate(ReviewFinding candidate, String reason) {
         return new ReviewOutput.Decision(new ReviewOutput.Verification(candidate, ReviewOutput.Status.INSUFFICIENT_EVIDENCE,
                 reason, null, true), ReviewOutput.Relation.UNRESOLVED, "", "", List.of());
     }
@@ -366,7 +460,7 @@ final class ReviewQuality {
         return new Completion(complete, invalid.size(), plan.unmapped().size(), failedTasks.size(), notice, status.toString());
     }
 
-    private static List<ReviewOutput.Decision> latest(List<ReviewOutput.Decision> preliminary, List<ReviewOutput.Decision> adjudicated) {
+    static List<ReviewOutput.Decision> latest(List<ReviewOutput.Decision> preliminary, List<ReviewOutput.Decision> adjudicated) {
         var latest = new LinkedHashMap<String, ReviewOutput.Decision>();
         preliminary.forEach(d -> latest.put(d.verdict().candidate().id(), d));
         adjudicated.forEach(d -> latest.put(d.verdict().candidate().id(), d));

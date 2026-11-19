@@ -27,6 +27,8 @@ final class EvidenceSession {
         this.knowledgeLimit = knowledgeLimit;
     }
 
+    boolean requestOnly(String response) { return collector.requestOnly(evidence, response); }
+
     boolean load(String replies, String phase) throws InterruptedException {
         int coverageStart = coverage.length();
         try { return loadRound(replies, phase); }

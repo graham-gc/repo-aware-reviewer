@@ -4,11 +4,63 @@ import static reviewagent.ReviewOutput.*;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
+import org.w3c.dom.Element;
 
 /** Semantic publication rules, independent of XML decoding and Markdown rendering. */
 final class ReviewGrounding {
+    static String recoverPendingCitations(String response, ReviewFinding candidate, EvidenceBundle evidence, EvidenceIndex index) {
+        try {
+            if (ReviewOutput.verification(response, candidate, evidence.changedFiles()).status() != Status.INSUFFICIENT_EVIDENCE)
+                return response;
+            Element root = ReviewXml.xml(response, "verification").root();
+            var fields = ReviewXml.fields(root, ReviewSchema.VERIFICATION);
+            int removed = discardUnbound(fields.get("citations"), index);
+            Element premises = fields.get("premises");
+            if (premises != null) {
+                for (Element premise : ReviewXml.children(premises, "premise")) {
+                    var premiseFields = ReviewXml.fields(premise, Set.of("statement", "basis", "citations"));
+                    int unsupported = discardUnbound(premiseFields.get("citations"), index);
+                    if (unsupported > 0) {
+                        premises.removeChild(premise);
+                        removed += unsupported;
+                    }
+                }
+            }
+            if (removed == 0) return response;
+            String recovered = ReviewXml.replaceRoot(response, "verification", root);
+            if (verification(recovered, candidate, evidence, index).citations().isEmpty()) return response;
+            ResponseDiagnostics.record("Discarded unverified citations and any dependent premises from an unresolved verdict after source correction.");
+            return recovered;
+        } catch (IOException invalid) {
+            return response;
+        }
+    }
+
+    private static int discardUnbound(Element citations, EvidenceIndex index) throws IOException {
+        if (citations == null) return 0;
+        int removed = 0;
+        for (Element citation : ReviewXml.children(citations, "citation")) {
+            var fields = ReviewXml.fields(citation, Set.of("source", "quote", "lines"));
+            var parsed = ReviewOutput.citation(fields, ReviewXml.text(fields, "source"));
+            try {
+                index.validate(List.of(parsed));
+            } catch (SourceQuotationException invalid) {
+                citations.removeChild(citation);
+                removed++;
+            }
+        }
+        return removed;
+    }
+
     static Decision verification(String response, ReviewFinding candidate, EvidenceBundle evidence, EvidenceIndex index) throws IOException {
         Decision parsed = ReviewOutput.decision(response, candidate, evidence.changedFiles());
+        boolean requests = parsed.verdict().status() == Status.CONFIRMED
+                && !EvidenceRequest.parse(ReviewOutput.requestText(response, "verification")).isEmpty();
+        return verification(parsed, index, requests);
+    }
+
+    static Decision verification(Decision parsed, EvidenceIndex index, boolean requests) throws IOException {
         Verification verdict = parsed.verdict();
         Relation relation = parsed.relation();
         index.validate(java.util.stream.Stream.concat(parsed.citations().stream(),
@@ -23,7 +75,7 @@ final class ReviewGrounding {
         citations = java.util.stream.Stream.concat(citations.stream(), premises.stream().flatMap(p -> p.citations().stream()))
                 .distinct().toList();
         if (verdict.status() == Status.CONFIRMED) {
-            if (!EvidenceRequest.parse(ReviewOutput.requestText(response, "verification")).isEmpty()) {
+            if (requests) {
                 throw new ReviewDecisionException("A finding with unresolved evidence requests must be INSUFFICIENT_EVIDENCE");
             }
             if (relation == Relation.UNRESOLVED || relation == Relation.PRE_EXISTING || baseline.isEmpty() || contract.isEmpty()) {
@@ -41,7 +93,7 @@ final class ReviewGrounding {
             index.validateLocation(verdict.confirmed(), citations);
             validateSupport(support, index);
         }
-        return new Decision(verdict, relation, baseline, contract, citations, support);
+        return new Decision(verdict, relation, baseline, contract, citations, support, parsed.sharedCandidates());
     }
 
     private static void validateSupport(ReviewSupport support, EvidenceIndex index) throws IOException {

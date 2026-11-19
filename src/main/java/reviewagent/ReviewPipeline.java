@@ -142,6 +142,18 @@ final class ReviewPipeline {
                 options.repo(), options.agentTimeout(), options.agentPolicy());
         Throwable executionFailure = null;
         try {
+            var selection = resume && Files.isDirectory(runDirectory.resolve("discovery"))
+                    ? AdaptiveReview.Selection.deep("Resuming the recorded deep workflow") : AdaptiveReview.select(options, git, evidence);
+            String routeReason = selection.reason();
+            if (selection.evidence() != null) {
+                write(runDirectory.resolve("coverage.md"), evidence.coverage()
+                        + "\n## Review route\n\n- adaptive — " + routeReason + ".\n");
+                routeReason = AdaptiveReview.run(selection.evidence(), options, git, executor, prompts, agent, runDirectory, progress, totalSteps);
+                if (routeReason == null) return runDirectory;
+            }
+            String route = "\n## Review route\n\n- deep — " + routeReason + ".\n";
+            write(runDirectory.resolve("coverage.md"), evidence.coverage() + route);
+            write(runDirectory.resolve("evidence-index.md"), evidence.catalog().manifest());
             progress.step(2, totalSteps, "Independent reviewers (0 of " + discoveries.size() + " complete)");
             var responses = ReviewTasks.runIsolated(discoveries, agent, runDirectory.resolve("discovery"), options.reviewParallelism(),
                     progress, 2, totalSteps, "Independent reviewers", resume);
@@ -209,7 +221,7 @@ final class ReviewPipeline {
             String verificationCoverage = ReviewQuality.coverage("Individual candidate verification", preliminary);
             verificationCoverage += "\nCandidates: " + findings.size() + ". Confirmed before deduplication: "
                     + preliminary.stream().filter(d -> d.verdict().status() == ReviewOutput.Status.CONFIRMED).count() + ".\n";
-            write(runDirectory.resolve("coverage.md"), evidence.coverage() + supplemental.coverage() + verificationCoverage);
+            write(runDirectory.resolve("coverage.md"), evidence.coverage() + route + supplemental.coverage() + verificationCoverage);
 
             progress.step(6, totalSteps, "Assessing and independently auditing requirements");
             ReviewQuality.AssessmentResult assessed = quality.assess(requirement, verificationCoverage);
@@ -223,14 +235,16 @@ final class ReviewPipeline {
             verificationCoverage += ReviewQuality.coverage("Unmet requirement candidate verification", requirementDecisions);
             verificationCoverage += "\nCandidates including unmet requirements: " + preliminary.size() + ". Confirmed before publication: "
                     + preliminary.stream().filter(d -> d.verdict().status() == ReviewOutput.Status.CONFIRMED).count() + ".\n";
-            write(runDirectory.resolve("coverage.md"), evidence.coverage() + supplemental.coverage() + verificationCoverage);
-            ReviewQuality.Adjudication publication = quality.adjudicate(preliminary, assessed.details());
+            write(runDirectory.resolve("coverage.md"), evidence.coverage() + route + supplemental.coverage() + verificationCoverage);
+            var requirementCandidates = requirementDecisions.stream().map(decision -> decision.verdict().candidate().id())
+                    .collect(java.util.stream.Collectors.toSet());
+            ReviewQuality.Adjudication publication = quality.adjudicate(preliminary, assessed.details(), requirementCandidates);
             List<ReviewOutput.Decision> adjudicated = publication.decisions();
             adjudicatedSnapshot = adjudicated;
             groupsSnapshot = publication.groups();
             List<ReviewConcerns.Item> concerns = ReviewConcerns.collect(preliminary, adjudicated, publication.groups());
-            verificationCoverage += ReviewQuality.coverage("Publication adjudication", adjudicated);
-            write(runDirectory.resolve("coverage.md"), evidence.coverage() + supplemental.coverage() + verificationCoverage);
+            verificationCoverage += publication.groupingNote() + ReviewQuality.coverage("Publication adjudication", adjudicated);
+            write(runDirectory.resolve("coverage.md"), evidence.coverage() + route + supplemental.coverage() + verificationCoverage);
             OutputLanguage language = OutputLanguage.parse(options.language());
             List<ReviewFinding> confirmed = adjudicated.stream()
                     .filter(d -> d.verdict().status() == ReviewOutput.Status.CONFIRMED)

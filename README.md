@@ -49,7 +49,14 @@ flowchart TD
 
     subgraph REVIEW["Single review"]
         P1["Resolve the two Git revisions"] --> P2["Collect the diff, source and business evidence"]
-        P2 --> P3["R1, R2 and R3 independently propose findings"]
+        P2 --> Q{"Local change with complete evidence?"}
+        Q -->|Yes| L["One structured review with source validation"]
+        Q -->|Broader impact or review rules| P3["R1, R2 and R3 independently propose findings"]
+        L -->|Specific new evidence needed| T["Verify the affected candidate"]
+        L -->|Broader risk or conflicting conclusions| P3
+        T -->|Broader risk| P3
+        L -->|Ready| P8
+        T -->|Ready| P8
         P3 --> P4["Provide additional evidence on request"]
         P4 --> P5["Verify each proposed finding"]
         P5 --> P6["Assess supplied requirements"]
@@ -172,7 +179,9 @@ The report's Findings section separates confirmed defects, risks requiring human
 
 Each model call defaults to a 900-second timeout, configurable with `--agent-timeout-seconds`. Empty responses and recognized temporary errors allow at most one extra retry by default when observed process cleanup is verified; disable this with `--agent-retries 0`. Unfinished checks are distinct from business evidence gaps. Completed review does not establish that all requirements are satisfied or that tests actually ran and passed.
 
-Candidate verification uses relevant complete evidence blocks by default. Add `--verification-evidence full` for full-input quality and payload comparisons; reviewer independence and confirmation checks stay in place.
+Review defaults to `--review-mode auto`. A small change to one existing source file with complete evidence at both revisions can finish in one model call. The CLI validates citations and renders the report. Available new evidence triggers follow-up for the candidate that needs it. Broader changes, supplied review rules, serious findings, or conflicting conclusions use the deep workflow. Use `--review-mode deep` to select that workflow explicitly. See `coverage.md` for the selected route.
+
+Deep candidate verification uses relevant complete evidence blocks by default. To compare evidence modes, use `--review-mode deep` on both sides and add `--verification-evidence full` on the full-input side.
 
 Review-required findings can include a suggested check for the maintainer, covering the missing premise, a concrete action, and the observation that would resolve it. The CLI performs static review.
 

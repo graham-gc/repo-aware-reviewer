@@ -37,6 +37,12 @@ The executor observes descendants while its own parent process runs and retains 
 
 Each invocation gets a new `*-attempts/attempt-NNNN/` directory containing `call-prompt.md`, `call-stdout.log`, `call-stderr.log`, and `call-execution.log`. This applies to initial calls, retries, output corrections and resumed attempts. Top-level log names remain compatibility views of the latest attempt.
 
+A discovery reply without a complete `<findings>` block gets one format recovery that repeats the review from the original evidence and asks for the XML block first. A second invalid result remains an unfinished discovery task.
+
+A candidate verification reply containing only supported evidence requests can advance to evidence delivery. A validated verdict is still required. If the requests add no evidence to that candidate, one follow-up asks for the verdict using the available evidence and the request outcomes.
+
+If an `INSUFFICIENT_EVIDENCE` reply still contains an unbound citation after source correction, verification can discard that citation and dependent premises when at least one exact citation remains. The result is validated again, and the raw reply and normalization remain in the local run directory.
+
 Execution records include start time, working directory, prompt SHA-256 and UTF-8 byte count, process timeout, actual allowed duration, task call count, configured budgets, concurrency at launch, termination reason and process-cleanup coverage. Command arguments are recorded only as a fingerprint; credentials are not read from Claude settings for logging. Input bytes are not model token counts, and concurrency at launch is not a diagnosis of gateway overload.
 
 Task `*-state.properties` checkpoints record `RUNNING`, `SUCCEEDED`, `FAILED`, `CANCELLED`, or `BLOCKED`, plus the prompt hash and failure kind. A state file alone never authorizes reuse. Resume requires the original scope and initial evidence, matches each full task prompt, and revalidates saved responses and corrections against the current validator. Changed tasks invalidate and archive their prior responses. The actual model route behind an external CLI is not a reliable cache identity; reusing a valid completed result does not establish that route is unchanged.

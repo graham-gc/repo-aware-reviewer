@@ -279,7 +279,7 @@ final class GoLanguageTests {
                 esac
                 """;
         var args = new ArrayList<>(List.of("review", "--repo", repo.toString(), "--output-dir", fixture.resolve("go-output").toString(),
-                "--agent-command", "/bin/sh", "--agent-arg", "-c", "--agent-arg", stub));
+                "--review-mode", "deep", "--agent-command", "/bin/sh", "--agent-arg", "-c", "--agent-arg", stub));
         Path run = new ReviewPipeline(EXECUTOR, Clock.systemUTC()).run(CliOptions.parse(args.toArray(String[]::new)));
         require(Files.readString(run.resolve("supplemental-evidence.md")).contains("func Parse() int { return 2 }"), "Go language requests flow end-to-end through the CLI pipeline");
         require(Files.readString(run.resolve("coverage.md")).contains("Supplemental requests included: 1/1"), "parallel Go requests deduplicate before collection");

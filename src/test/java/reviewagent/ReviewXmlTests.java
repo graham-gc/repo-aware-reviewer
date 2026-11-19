@@ -15,8 +15,21 @@ final class ReviewXmlTests {
         missingContainerClosers();
         opaqueTextAndEnvelope();
         protocolFenceBoundaries();
+        missingOpeningBracket();
         rejectedStructures();
         normalizationArtifacts();
+    }
+
+    private static void missingOpeningBracket() throws Exception {
+        String body = "verification>\n<status>INSUFFICIENT_EVIDENCE</status>"
+                + "\n<reason>The contract is unresolved.</reason>\n</verification>";
+        String request = "\nREQUEST_FILE|target|README.md|all|Check the public contract\n";
+        var parsed = ReviewXml.xml(body + request, "verification");
+        require(parsed.normalizations().size() == 1 && parsed.remainder().equals(request)
+                && parsed.root().getElementsByTagName("status").item(0).getTextContent().equals("INSUFFICIENT_EVIDENCE"),
+                "restore the leading bracket while preserving the entire closed XML body and its following requests");
+        fails(() -> ReviewXml.xml(body.replace("</verification>", ""), "verification"));
+        fails(() -> ReviewXml.xml(body.replace("</verification>", "</findings>"), "verification"));
     }
 
     private static void protocolFenceBoundaries() throws Exception {

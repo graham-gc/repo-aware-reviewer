@@ -221,9 +221,11 @@ final class ReviewTasks {
                         : "OUTPUT FORMAT CORRECTION\n"
                             + "The previous response failed structural validation. Correct only its serialization and comply with the response schema above. "
                             + "Preserve the evidence-based decisions and reasoning. Do not invent facts or promote an unconfirmed finding. ";
-                String repairPrompt = task.prompt() + "\n\n" + correction + task.validator().correctionInstructions(invalid)
-                        + "Return the complete corrected response.\nValidation error: " + invalid.getMessage()
-                        + "\n\nPREVIOUS RESPONSE\n" + response;
+                String repairPrompt = ReviewXml.missingResponseBlock(invalid, "findings")
+                        ? retryDiscoveryPrompt(task.prompt())
+                        : task.prompt() + "\n\n" + correction + task.validator().correctionInstructions(invalid)
+                            + "Return the complete corrected response.\nValidation error: " + invalid.getMessage()
+                            + "\n\nPREVIOUS RESPONSE\n" + response;
                 AtomicFiles.write(directory.resolve(task.id() + "-" + kind + "-prompt.md"), repairPrompt);
                 String raw = agent.invoke(repairPrompt, directory.resolve(task.id() + "-" + kind));
                 AtomicFiles.write(directory.resolve(task.id() + "-" + kind + "-response.md"), raw);
@@ -233,6 +235,18 @@ final class ReviewTasks {
             AtomicFiles.write(responseFile, response);
             return response;
         }
+    }
+
+    private static String retryDiscoveryPrompt(String originalPrompt) {
+        return """
+                DISCOVERY RESPONSE RECOVERY
+                Run the original review again using the evidence below. Start the reply with exactly one complete
+                fenced XML block with the root <findings>. Close every element. If the review yields no candidates,
+                return <findings/> in that block. Put any necessary evidence requests or review notes after the block,
+                using the original request syntax. Include any evidence-supported candidates you find.
+
+                ORIGINAL REVIEW
+                """ + originalPrompt;
     }
 
     private static void validate(Task task, String response, Path directory) throws IOException {
