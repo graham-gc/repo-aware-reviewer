@@ -145,6 +145,10 @@ final class ReviewPipeline {
             var selection = resume && Files.isDirectory(runDirectory.resolve("discovery"))
                     ? AdaptiveReview.Selection.deep("Resuming the recorded deep workflow") : AdaptiveReview.select(options, git, evidence);
             String routeReason = selection.reason();
+            if (selection.focused()) {
+                FocusedReview.run(evidence, options, git, executor, prompts, agent, runDirectory, progress, totalSteps);
+                return runDirectory;
+            }
             if (selection.evidence() != null) {
                 write(runDirectory.resolve("coverage.md"), evidence.coverage()
                         + "\n## Review route\n\n- adaptive — " + routeReason + ".\n");

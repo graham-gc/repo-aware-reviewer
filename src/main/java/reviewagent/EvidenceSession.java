@@ -109,6 +109,14 @@ final class EvidenceSession {
         coverage.append("- Fulfilled requests from ").append(requester).append(": queued for this candidate: ").append(sources).append(".\n");
     }
 
+    void recordFollowup(String requester, String requests, Set<String> ids) {
+        coverage.append("- ").append(requester).append(": ")
+                .append(ids.isEmpty() ? "Stopped; no new evidence for this question." : "Follow-up on newly supplied evidence.").append("\n");
+        for (var request : EvidenceRequest.parse(requests))
+            coverage.append("  - Question and requested evidence: ").append(EvidenceText.oneLine(request.text())).append('\n');
+        recordDelivery(requester, ids);
+    }
+
     private EvidenceBundle bundle(EvidenceCatalog sources, int budget) {
         return new EvidenceBundle(evidence.scope(), evidence.changedFiles(), evidence.markdown(), evidence.coverage(), budget,
                 evidence.scopedKnowledge(), sources);

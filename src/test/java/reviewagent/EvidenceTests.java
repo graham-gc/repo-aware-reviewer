@@ -192,7 +192,7 @@ final class EvidenceTests {
                 """.replace("FIRST_XML", first).replace("REJECTED_XML", rejected).replace("DUPLICATE_XML", duplicate)
                 .replace("INSUFFICIENT_XML", insufficient).replace("SEPARATE_XML", separate)
                 .replace("GROUNDING_XML", grounding("Z-small.java", "class ZSmall { int change = 7; }"));
-        CliOptions options = CliOptions.parse(new String[]{"review", "--repo", repo.toString(), "--review-parallelism", "2",
+        CliOptions options = CliOptions.parse(new String[]{"review", "--repo", repo.toString(), "--review-parallelism", "2", "--review-mode", "deep",
                 "--output-dir", fixture.resolve("multi-review").toString(), "--agent-command", "/bin/sh", "--agent-arg", "-c",
                 "--agent-arg", stub, "--agent-arg", "multi-review-stub", "--agent-arg", signals.toString()});
         Path run = new ReviewPipeline(new ProcessExecutor(), Clock.systemUTC()).run(options);

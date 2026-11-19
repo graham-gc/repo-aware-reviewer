@@ -152,6 +152,12 @@ final class EvidenceIndex {
                     && (!source.role(EvidenceSource.Role.DIFF) || quotesDiffSide(c, source, '+'));
         });
     }
+    boolean hasPinnedTarget(List<Citation> citations) {
+        return hasTarget(citations.stream().filter(citation -> {
+            var source = source(citation);
+            return source != null && source.authoritative();
+        }).toList());
+    }
     private static boolean quotesDiffSide(Citation citation, EvidenceSource source, char marker) {
         String quote = normalize(citation.quote());
         if (quote.length() < 12) return false;

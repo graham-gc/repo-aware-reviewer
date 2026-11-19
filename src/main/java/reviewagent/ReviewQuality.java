@@ -49,19 +49,21 @@ final class ReviewQuality {
                 candidate -> Set.of(), "verification", 5, "Verifying candidate issues");
     }
 
-    List<ReviewOutput.Decision> verifyAfterEvidence(List<ReviewOutput.Decision> candidates, Map<String, Set<String>> delivered)
+    List<ReviewOutput.Decision> verifyAfterEvidence(List<ReviewOutput.Decision> candidates, Map<String, Set<String>> delivered,
+                                                  String folder, String outcomeRules)
             throws IOException, InterruptedException {
         var previous = candidates.stream().collect(java.util.stream.Collectors.toMap(
                 decision -> decision.verdict().candidate().id(), Function.identity()));
         return verifyRounds(candidates.stream().map(decision -> decision.verdict().candidate()).toList(),
                 (candidate, view) -> prompts.verifyFinding(view.bundle(), candidate, "", view.index())
+                        + outcomeRules
                         + "\nPREVIOUS DECISION — RECHECK WITH THE NEW EVIDENCE\n"
                         + PromptFactory.decisionSummary(previous.get(candidate.id()), view.index()),
                 candidate -> {
                     var sources = new LinkedHashSet<>(delivered.get(candidate.id()));
                     sources.addAll(citationIds(previous.get(candidate.id()).citations()));
                     return sources;
-                }, "adaptive/verification", 5, "Verifying candidates with new evidence");
+                }, folder, 5, "Verifying candidates with new evidence", true);
     }
 
     Adjudication adjudicate(List<ReviewOutput.Decision> preliminary, String assessment, Set<String> requirementCandidates)
@@ -174,6 +176,12 @@ final class ReviewQuality {
     private List<ReviewOutput.Decision> verifyRounds(List<ReviewFinding> findings, VerificationPrompt prompt,
             Function<ReviewFinding, Set<String>> requiredSources, String folder, int stage, String description)
             throws IOException, InterruptedException {
+        return verifyRounds(findings, prompt, requiredSources, folder, stage, description, false);
+    }
+
+    private List<ReviewOutput.Decision> verifyRounds(List<ReviewFinding> findings, VerificationPrompt prompt,
+            Function<ReviewFinding, Set<String>> requiredSources, String folder, int stage, String description, boolean newEvidenceOnly)
+            throws IOException, InterruptedException {
         var results = new LinkedHashMap<String, ReviewOutput.Decision>();
         var priorPrompts = new LinkedHashMap<String, String>();
         var continuations = new LinkedHashMap<String, VerificationContinuation>();
@@ -223,7 +231,7 @@ final class ReviewQuality {
                 tasks.add(new ReviewTasks.Task(candidate.id(), text, new ReviewTasks.Validator() {
                     @Override
                     public void validate(String reply) throws IOException {
-                        if (verdictRequired || !session.requestOnly(reply))
+                        if (newEvidenceOnly || verdictRequired || !session.requestOnly(reply))
                             ReviewGrounding.verification(reply, candidate, view.bundle(), view.index());
                     }
 
@@ -265,19 +273,22 @@ final class ReviewQuality {
             for (String id : replies.keySet()) continuations.put(id, new VerificationContinuation(results.get(id),
                     candidateRequests.getOrDefault(id, ""), session.lastCoverage(),
                     views.get(id).bundle().catalog().sources().stream().map(EvidenceSource::id).collect(java.util.stream.Collectors.toSet())));
-            boolean delivered = false;
+            var delivered = new LinkedHashSet<String>();
             for (var entry : candidateRequests.entrySet()) {
                 Set<String> needed = session.delivery(entry.getValue(), views.get(entry.getKey()).bundle().catalog());
                 retainedEvidence.computeIfAbsent(entry.getKey(), unused -> new LinkedHashSet<>()).addAll(needed);
-                if (!needed.isEmpty() && results.get(entry.getKey()).verdict().status() == ReviewOutput.Status.INSUFFICIENT_EVIDENCE) {
-                    delivered = true;
-                    session.recordDelivery(path + "/" + entry.getKey(), needed);
+                if (results.get(entry.getKey()).verdict().status() == ReviewOutput.Status.INSUFFICIENT_EVIDENCE) {
+                    if (!needed.isEmpty()) delivered.add(entry.getKey());
+                    if (newEvidenceOnly && !entry.getValue().isBlank())
+                        session.recordFollowup(path + "/" + entry.getKey(), entry.getValue(), needed);
+                    else session.recordDelivery(path + "/" + entry.getKey(), needed);
                 }
             }
             saveEvidence();
-            if (!material && !delivered && awaitingVerdicts.isEmpty()) break;
+            if (newEvidenceOnly ? delivered.isEmpty() : !material && delivered.isEmpty() && awaitingVerdicts.isEmpty()) break;
             pending = findings.stream().filter(candidate -> results.get(candidate.id()).verdict().status()
-                    == ReviewOutput.Status.INSUFFICIENT_EVIDENCE).toList();
+                    == ReviewOutput.Status.INSUFFICIENT_EVIDENCE)
+                    .filter(candidate -> !newEvidenceOnly || delivered.contains(candidate.id())).toList();
             round++;
         }
         return findings.stream().map(candidate -> results.get(candidate.id())).toList();

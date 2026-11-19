@@ -96,6 +96,32 @@ final class ReviewGrounding {
         return new Decision(verdict, relation, baseline, contract, citations, support, parsed.sharedCandidates());
     }
 
+    static Decision scopedPublication(Decision grounded, OutputLanguage language) {
+        var verdict = grounded.verdict();
+        if (verdict.status() != Status.CONFIRMED) return grounded;
+        var finding = verdict.confirmed();
+        var premises = grounded.support().premises();
+        boolean outcomeProved = premises.stream().anyMatch(premise -> premise.basis() == ReviewSupport.Basis.OUTCOME
+                && EvidenceIndex.normalize(premise.statement()).equals(EvidenceIndex.normalize(finding.impact())));
+        if (!outcomeProved) {
+            String gap = language.text("The stated impact has no explicit supporting outcome citation. Check how far the effect proceeds.",
+                    "所述影响缺少明确的结果证据，需核对该影响实际发生到哪一步。");
+            var pending = new Verification(verdict.candidate(), Status.INSUFFICIENT_EVIDENCE, gap, null);
+            return new Decision(pending, grounded.relation(), grounded.baseline(), "", grounded.citations(),
+                    grounded.support(), grounded.sharedCandidates());
+        }
+        if (finding.severity().compareTo(ReviewFinding.Severity.MEDIUM) >= 0
+                || premises.stream().anyMatch(premise -> premise.basis() == ReviewSupport.Basis.SEVERITY)) return grounded;
+        var limited = new ReviewFinding(finding.id(), finding.title(), ReviewFinding.Severity.MEDIUM,
+                finding.path(), finding.line(), finding.endLine(), finding.trigger(), finding.impact(), finding.evidence(),
+                finding.diffRelation());
+        String note = language.text("Severity limited to MEDIUM because material impact or scope was not separately supported.",
+                "缺少支持更高等级的实际影响或范围证据，严重性限定为中。");
+        var revised = new Verification(verdict.candidate(), Status.CONFIRMED, verdict.reason() + " " + note, limited);
+        return new Decision(revised, grounded.relation(), grounded.baseline(), grounded.contract(), grounded.citations(),
+                grounded.support(), grounded.sharedCandidates());
+    }
+
     private static void validateSupport(ReviewSupport support, EvidenceIndex index) throws IOException {
         if (support.kind() == ReviewSupport.Kind.UNRESOLVED || support.kind() == ReviewSupport.Kind.HARDENING
                 || support.premises().isEmpty()) {
@@ -103,10 +129,13 @@ final class ReviewGrounding {
                     + "Unresolved producer behavior or a hardening suggestion is not a confirmed reachable failure.");
         }
         for (var premise : support.premises()) {
-            if (premise.basis() == ReviewSupport.Basis.ASSUMPTION
-                    || premise.basis() == ReviewSupport.Basis.IMPLEMENTATION
-                        && !index.hasTarget(premise.citations()) && !index.hasBaseline(premise.citations())
-                    || premise.basis() == ReviewSupport.Basis.CONTRACT && !index.hasContract(premise.citations())) {
+            boolean proved = switch (premise.basis()) {
+                case IMPLEMENTATION -> index.hasTarget(premise.citations()) || index.hasBaseline(premise.citations());
+                case CONTRACT -> index.hasContract(premise.citations());
+                case OUTCOME, SEVERITY -> index.hasPinnedTarget(premise.citations());
+                case ASSUMPTION -> false;
+            };
+            if (!proved) {
                 throw new ReviewDecisionException("Unproved finding premise: " + premise.statement()
                         + ". Supply decisive implementation/contract quotations, or mark the finding INSUFFICIENT_EVIDENCE.");
             }

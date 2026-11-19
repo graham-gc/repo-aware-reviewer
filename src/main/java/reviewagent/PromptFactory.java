@@ -4,6 +4,21 @@ import java.util.List;
 import java.util.stream.Collectors;
 
 final class PromptFactory {
+    static final String SCOPED_OUTCOME_RULES = """
+            For each CONFIRMED scoped finding, add a premise with <basis>OUTCOME</basis>. Copy the exact finding impact
+            into its statement and cite the target code or configuration that proves the last observable effect.
+            Add it alongside the trigger premise, using the same <premise><statement>…</statement><basis>OUTCOME</basis>
+            <citations>…</citations></premise> structure with actual statement text and source citations.
+            A request sent, job scheduled, job executed and result published are distinct effects.
+            Before claiming a later effect, cite the downstream behavior and address any later guard, configuration
+            or external contract that could prevent it. If only a narrower actionable effect is proved, limit the
+            title and impact to that effect and stop. If no actionable effect is proved, use INSUFFICIENT_EVIDENCE
+            and request the specific missing source only if it can resolve that question.
+            Rate severity from the proved effect. Use LOW for an actionable failure whose impact is bounded overhead.
+            Use HIGH or CRITICAL only when a separate <basis>SEVERITY</basis> premise cites target implementation
+            or configuration proving the material loss, exposure, or affected scope that warrants the rating.
+            """;
+
     static final List<String> REVIEW_FOCUSES = List.of(
             "Correctness and regressions. Trace control flow, state changes, and compatibility with the base revision.",
             "Requirements and business contracts. Check observable behavior, consumers, and supplied business rules.",

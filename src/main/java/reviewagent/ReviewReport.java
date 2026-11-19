@@ -142,17 +142,15 @@ final class ReviewReport {
         String findingsHeading = headings.get(2);
         int start = report.indexOf("\n" + findingsHeading + "\n") + 1 + findingsHeading.length();
         int end = report.indexOf("\n" + headings.get(3) + "\n", start) + 1;
-        return report.substring(0, start) + "\n\n" + findingsMarkdown(representatives, concerns, language) + report.substring(end) + "\n";
+        return report.substring(0, start) + "\n\n" + findingsMarkdown(representatives, concerns, language, true) + report.substring(end) + "\n";
     }
 
-    private static String findingsMarkdown(List<ReviewFinding> confirmed, List<ReviewConcerns.Item> concerns, OutputLanguage language) {
+    private static String findingsMarkdown(List<ReviewFinding> confirmed, List<ReviewConcerns.Item> concerns,
+                                           OutputLanguage language, boolean includeCounts) {
         StringBuilder findings = new StringBuilder();
-        if (!concerns.isEmpty()) {
-            long unfinished = concerns.stream().filter(item -> item.kind() == ReviewConcerns.Kind.NOT_COMPLETED).count();
-            findings.append(language.text("Confirmed defects: ", "已确认缺陷：")).append(confirmed.size())
-                    .append(language.text("; review-required items: ", "；需人工确认事项：")).append(concerns.size() - unfinished)
-                    .append(language.text("; unfinished checks: ", "；未完成检查：")).append(unfinished).append(".\n\n");
-        } else if (confirmed.isEmpty()) {
+        if (includeCounts && !concerns.isEmpty()) {
+            findings.append(verdictCounts(confirmed, concerns, language)).append("\n\n");
+        } else if (confirmed.isEmpty() && concerns.isEmpty()) {
             findings.append(language.text("No verified findings.", "未发现经复核确认的问题。")).append("\n\n");
         }
         for (ReviewFinding finding : confirmed.stream().sorted(Comparator.comparing(ReviewFinding::severity)).toList()) {
@@ -171,19 +169,47 @@ final class ReviewReport {
 
     static String adaptiveReport(EvidenceBundle evidence, String summary, List<ReviewFinding> confirmed,
                                  List<ReviewConcerns.Item> concerns, OutputLanguage language) {
+        return structuredReport(evidence, ReportText.inline(summary), confirmed, concerns, language, false);
+    }
+
+    static String focusedReport(EvidenceBundle evidence, List<ReviewFinding> confirmed,
+                                List<ReviewConcerns.Item> concerns, OutputLanguage language) {
+        String summary = verdictCounts(confirmed, concerns, language);
+        String highlights = confirmed.stream().sorted(Comparator.comparing(ReviewFinding::severity)).limit(3)
+                .map(finding -> "- " + ReportText.inline(finding.title())).collect(java.util.stream.Collectors.joining("\n"));
+        return structuredReport(evidence, summary + (highlights.isEmpty() ? "" : "\n\n" + highlights),
+                confirmed, concerns, language, true);
+    }
+
+    private static String verdictCounts(List<ReviewFinding> confirmed, List<ReviewConcerns.Item> concerns, OutputLanguage language) {
+        long unfinished = concerns.stream().filter(item -> item.kind() == ReviewConcerns.Kind.NOT_COMPLETED).count();
+        return language.text("Confirmed defects: %d; review-required items: %d; unfinished checks: %d.",
+                "已确认缺陷：%d；需人工确认事项：%d；未完成检查：%d。")
+                .formatted(confirmed.size(), concerns.size() - unfinished, unfinished);
+    }
+
+    private static String structuredReport(EvidenceBundle evidence, String summary, List<ReviewFinding> confirmed,
+                                           List<ReviewConcerns.Item> concerns, OutputLanguage language, boolean focused) {
         var scope = evidence.scope();
+        String changed = focused ? language.text("Changed files", "变更文件") + " — " + evidence.changedFiles().size()
+                : language.text("Changed file", "变更文件") + " — " + code(EvidenceText.oneLine(evidence.changedFiles().getFirst()));
+        String limits = focused ? language.text(
+                "Static review used bounded diff excerpts and stronger evidence for identified risk areas. See [coverage.md](coverage.md) for each scope, "
+                        + "truncated inputs and follow-up decisions. No build or tests were run.",
+                "静态审查使用有界的 diff 摘录，并为识别出的风险范围提供更完整的证据。各范围、截断输入和追加决定详见 [coverage.md](coverage.md)。未执行构建或测试。")
+                : language.text("Static review with the complete local diff and source at both revisions. No build or tests were run. "
+                                + "See [coverage.md](coverage.md) for evidence and the selected review route.",
+                        "静态审查使用了完整的局部差异和基线、目标源码。未执行构建或测试。"
+                                + "审查路线及证据详见 [coverage.md](coverage.md)。");
         List<String> content = List.of(
                 language.text("Base", "基线") + " — " + code(scope.baseCommit()) + "\n\n"
                         + language.text("Target", "目标") + " — " + code(scope.targetCommit()) + "\n\n"
-                        + language.text("Changed file", "变更文件") + " — " + code(EvidenceText.oneLine(evidence.changedFiles().getFirst())),
-                ReportText.inline(summary),
-                findingsMarkdown(confirmed, concerns, language),
+                        + changed,
+                summary,
+                findingsMarkdown(confirmed, concerns, language, !focused),
                 assessmentMarkdown(List.of(), language),
                 language.text("No knowledge base was supplied.", "未提供知识库。"),
-                language.text("Static review with the complete local diff and source at both revisions. No build or tests were run. "
-                                + "See [coverage.md](coverage.md) for evidence and the selected review route.",
-                        "静态审查使用了完整的局部差异和基线、目标源码。未执行构建或测试。"
-                                + "审查路线及证据详见 [coverage.md](coverage.md)。"));
+                limits);
         return sections(content, language);
     }
 
@@ -205,7 +231,7 @@ final class ReviewReport {
                     "已完成阶段尚无可发布的结论，这不代表变更没有问题。")
                 : language.text("The following results are retained from completed stages; final report grouping may be unfinished.\n\n",
                     "以下结果保留自已完成阶段；最终报告去重可能尚未完成。\n\n")
-                    + findingsMarkdown(published, concerns, language);
+                    + findingsMarkdown(published, concerns, language, true);
         List<String> content = List.of(
                 language.text("Base", "基线") + ": `" + scope.baseCommit() + "`\n\n"
                         + language.text("Target", "目标") + ": `" + scope.targetCommit() + "`",

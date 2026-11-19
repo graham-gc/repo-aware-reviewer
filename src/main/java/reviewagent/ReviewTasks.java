@@ -19,6 +19,7 @@ final class ReviewTasks {
         void validate(String response) throws IOException;
         default String corrected(String response, IOException failure) throws IOException { return response; }
         default String correctionInstructions(IOException failure) { return ""; }
+        default boolean allowOutputCorrection() { return true; }
     }
 
     record Task(String id, String prompt, Validator validator, String model) {
@@ -194,8 +195,10 @@ final class ReviewTasks {
                 boolean quotation = invalid instanceof SourceQuotationException;
                 boolean decision = invalid instanceof ReviewDecisionException;
                 String kind = quotation ? "quote-repair" : decision ? "decision-repair" : "repair";
-                if (!attempted.add(kind)) {
-                    throw new InvalidReviewResponseException("Task " + task.id() + " returned invalid structured output after bounded output correction: "
+                boolean correct = task.validator().allowOutputCorrection();
+                if (!correct || !attempted.add(kind)) {
+                    throw new InvalidReviewResponseException("Task " + task.id() + " returned invalid structured output"
+                            + (correct ? " after bounded output correction" : "") + ": "
                             + invalid.getMessage(), invalid);
                 }
                 AtomicFiles.write(directory.resolve(task.id() + (quotation ? "-quote-invalid-response.md" : decision ? "-decision-invalid-response.md" : "-invalid-response.md")),

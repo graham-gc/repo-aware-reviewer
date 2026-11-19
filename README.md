@@ -51,7 +51,10 @@ flowchart TD
         P1["Resolve the two Git revisions"] --> P2["Collect the diff, source and business evidence"]
         P2 --> Q{"Local change with complete evidence?"}
         Q -->|Yes| L["One structured review with source validation"]
-        Q -->|Broader impact or review rules| P3["R1, R2 and R3 independently propose findings"]
+        Q -->|Multiple files or risk signals| F["Review selected risk areas and the remaining diff excerpts"]
+        Q -->|Explicit deep review or supplied rules| P3["R1, R2 and R3 independently propose findings"]
+        F -->|Specific new evidence available| T
+        F -->|Ready or no further evidence| P8
         L -->|Specific new evidence needed| T["Verify the affected candidate"]
         L -->|Broader risk or conflicting conclusions| P3
         T -->|Broader risk| P3
@@ -179,7 +182,7 @@ The report's Findings section separates confirmed defects, risks requiring human
 
 Each model call defaults to a 900-second timeout, configurable with `--agent-timeout-seconds`. Empty responses and recognized temporary errors allow at most one extra retry by default when observed process cleanup is verified; disable this with `--agent-retries 0`. Unfinished checks are distinct from business evidence gaps. Completed review does not establish that all requirements are satisfied or that tests actually ran and passed.
 
-Review defaults to `--review-mode auto`. A small change to one existing source file with complete evidence at both revisions can finish in one model call. The CLI validates citations and renders the report. Available new evidence triggers follow-up for the candidate that needs it. Broader changes, supplied review rules, serious findings, or conflicting conclusions use the deep workflow. Use `--review-mode deep` to select that workflow explicitly. See `coverage.md` for the selected route.
+Review defaults to `--review-mode auto`. Small changes with complete evidence can finish in one model call. For multi-file changes or detected risk signals, the CLI gives related files and more source context to a scoped risk check, and reviews the remaining files with bounded diff excerpts. A scoped candidate can receive one citation correction using available source. The CLI rechecks a candidate's conclusion when it receives new evidence. The scoped report summarizes the final decisions. A confirmed finding needs target evidence for its stated impact, and high or critical severity also needs evidence of the material effect or affected scope. See `coverage.md` for evidence gaps and publishing decisions. Supplied review rules and explicit `--review-mode deep` use the full workflow.
 
 Deep candidate verification uses relevant complete evidence blocks by default. To compare evidence modes, use `--review-mode deep` on both sides and add `--verification-evidence full` on the full-input side.
 

@@ -182,7 +182,7 @@ final class ReviewOutput {
         return xml(response, rootName).remainder();
     }
 
-    private static List<EvidenceIndex.Citation> citations(Element element) throws IOException {
+    static List<EvidenceIndex.Citation> citations(Element element) throws IOException {
         if (element == null) return List.of();
         var citations = new ArrayList<EvidenceIndex.Citation>();
         var quoteErrors = new ArrayList<String>();
