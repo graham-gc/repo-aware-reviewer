@@ -182,13 +182,14 @@ final class AdaptiveReview {
             var element = values.get("finding");
             if (element == null) throw new IOException("Every local candidate requires a finding");
             String id = prefix + "-" + (candidates.size() + 1);
-            var candidate = ReviewOutput.finding(element, id, evidence.changedFiles(), false);
+            String status = text(values, "status");
+            var candidate = ReviewOutput.finding(element, id, evidence.changedFiles(), false,
+                    scoped && status.equals("INSUFFICIENT_EVIDENCE"));
             var completeTarget = evidence.catalog().sources().stream().filter(source -> source.path().equals(candidate.path())
                     && source.role(EvidenceSource.Role.TARGET) && !source.role(EvidenceSource.Role.DIFF)
                     && source.endOfFile() && source.firstLine() == 1).findFirst();
             if (completeTarget.isPresent() && candidate.endLine() > completeTarget.get().text().lines().count())
                 throw new IOException("Local candidate location is outside the target file");
-            String status = text(values, "status");
             if (!status.equals("CONFIRMED")) values.remove("finding");
             if (status.equals("INSUFFICIENT_EVIDENCE") && values.containsKey("support")
                     && java.util.Arrays.stream(ReviewSupport.Kind.values()).noneMatch(kind -> kind.name().equals(values.get("support").getTextContent().strip()))) {
@@ -307,10 +308,11 @@ final class AdaptiveReview {
                 REQUEST_FILE|target|path|all|Question this source can answer (base is also allowed).
                 Omit disproved candidates. For DEEP, supply a summary and <decisions/>.
 
-                EVIDENCE INVENTORY
+                %sEVIDENCE INVENTORY
                 %s
                 PINNED EVIDENCE
                 %s
-                """.formatted(language.code(), index.inventory(), evidence.markdown());
+                """.formatted(language.code(), EvidenceIndex.LINE_CITATION_GUIDANCE, index.inventory(),
+                index.numberedMarkdown(evidence.markdown()));
     }
 }

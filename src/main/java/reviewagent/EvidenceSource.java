@@ -18,7 +18,21 @@ record EvidenceSource(String id, String title, String format, String text, Strin
     record Location(String sourceId, String path, String revision, int firstLine, int lastLine, Side side) {
         String reference() { return path + ":" + firstLine + (lastLine == firstLine ? "" : "–" + lastLine) + " at " + revision; }
     }
-    record Excerpt(String text, List<Location> locations) { }
+    record Excerpt(String text, List<Location> locations, String selector) { }
+
+    record LineRange(int first, int last) {
+        private static final Pattern SELECTOR = Pattern.compile(
+                "([1-9][0-9]{0,6})(?:\\h*[:–—-]\\h*([1-9][0-9]{0,6}))?");
+
+        static LineRange parse(String text) {
+            var selector = SELECTOR.matcher(text.strip());
+            if (!selector.matches()) return null;
+            int first = Integer.parseInt(selector.group(1));
+            return new LineRange(first, selector.group(2) == null ? first : Integer.parseInt(selector.group(2)));
+        }
+
+        String selector() { return first + ":" + last; }
+    }
 
     EvidenceSource { roles = Set.copyOf(roles); }
 
@@ -52,11 +66,11 @@ record EvidenceSource(String id, String title, String format, String text, Strin
     }
 
     Excerpt excerpt(String selector) throws IOException {
-        if (!selector.matches("[1-9][0-9]{0,6}:[1-9][0-9]{0,6}")) {
-            throw new IOException("Expected <lines>first:last</lines> with positive block-relative line numbers");
+        LineRange range = LineRange.parse(selector);
+        if (range == null) {
+            throw new IOException("Expected a positive block-relative line number or range in <lines>");
         }
-        String[] endpoints = selector.split(":");
-        int from = Integer.parseInt(endpoints[0]), to = Integer.parseInt(endpoints[1]);
+        int from = range.first(), to = range.last();
         List<String> lines = text.lines().toList();
         if (to < from || to - from >= 200 || to > lines.size()) {
             throw new IOException("Citation range must contain 1–200 lines entirely inside the included block ("
@@ -66,7 +80,9 @@ record EvidenceSource(String id, String title, String format, String text, Strin
                 : role(Role.DIFF) ? diffLocations(lines, from, to)
                 : firstLine < 1 ? List.of() : List.of(new Location(id, path, revision,
                     firstLine + from - 1, firstLine + to - 1, Side.FILE));
-        return new Excerpt(String.join("\n", lines.subList(from - 1, to)), locations);
+        String canonical = range.selector();
+        if (!canonical.equals(selector)) ResponseDiagnostics.record("Normalized an evidence line selector.");
+        return new Excerpt(String.join("\n", lines.subList(from - 1, to)), locations, canonical);
     }
 
     List<Location> locations(String quotation) {

@@ -42,8 +42,17 @@ final class AdaptiveReviewTests {
                     prompt=$(cat)
                     case "$prompt" in
                       'Review this small change'*) cat "$root/local.xml" ;;
-                      'Review these Markdown edits'*) cat "$root/documentation.xml" ;;
+                      'Review these Markdown edits'*)
+                        if [ -f "$root/documentation-first.txt" ]; then cat "$root/documentation-first.txt"
+                        else cat "$root/documentation.xml"; fi ;;
+                      'DOCUMENTATION RESPONSE RECOVERY'*) cat "$root/documentation.xml" ;;
+                      'ADAPTIVE RESPONSE RECOVERY'*)
+                        case "$prompt" in
+                          *'before the effect'*) printf '<adaptive-review><route>LOCAL</route><summary>Checked the recovered scope.</summary><decisions/></adaptive-review>' ;;
+                          *) cat "$root/focused-first.txt" ;;
+                        esac ;;
                       'Review the supplied scope'*)
+                        if [ -f "$root/focused-first.txt" ]; then cat "$root/focused-first.txt"; exit; fi
                         case "$prompt" in
                           *'<basis>OUTCOME</basis>'*'queue.schedule(actor)'*) cat "$root/scoped.xml" ;;
                           *) printf '<adaptive-review><route>LOCAL</route><summary>Checked the supplied scope.</summary><decisions/></adaptive-review>' ;;
@@ -122,17 +131,37 @@ final class AdaptiveReviewTests {
                     <citations><citation><source>SRC-1</source><lines>6,8</lines></citation></citations>
                     </doc-finding></doc-findings></documentation-review>
                     """;
-            Files.writeString(fixture.resolve("documentation.xml"), docsResponse);
+            String mixedRanges = docsResponse.replace("6,8", "6-6,8");
+            Files.writeString(fixture.resolve("documentation.xml"), mixedRanges);
             Path documentation = pipeline.run(options(arguments));
             check(Main.reviewExitCode(documentation) == 0 && calls(documentation, 1)
                     && report(documentation).contains("README.md:2")
                     && report(documentation).contains("[Review required — evidence gap] Incorrect example")
                     && Files.readString(documentation.resolve("verified-findings.md")).isEmpty(),
                     "two documentation edits use one call and bind an observation without promoting it to a confirmed finding");
-            check(Files.readString(documentation.resolve("documentation/review-prompt.md")).contains("README.zh-CN.md"),
-                    "the documentation prompt retains the complete diff of both files");
+            String documentationPrompt = Files.readString(documentation.resolve("documentation/review-prompt.md"));
+            check(documentationPrompt.contains("README.zh-CN.md") && documentationPrompt.contains("Do not call or request any tools.")
+                    && Files.readString(documentation.resolve("documentation/review-normalization.log"))
+                            .contains("Normalized an evidence line selector."),
+                    "the full diff is available without tools and dashed block ranges are validated locally");
             pipeline.run(options(arguments, "--resume", documentation.toString()));
             check(calls(documentation, 0), "documentation reviews resume from their validated checkpoint");
+
+            Path firstDocumentationReply = fixture.resolve("documentation-first.txt");
+            Files.writeString(firstDocumentationReply, "Tool request instead of a review.");
+            Path recoveredDocumentation = pipeline.run(options(arguments));
+            String recoveryPrompt = Files.readString(recoveredDocumentation.resolve("documentation/review-repair-prompt.md"));
+            check(Main.reviewExitCode(recoveredDocumentation) == 0 && calls(recoveredDocumentation, 2)
+                    && recoveryPrompt.startsWith("DOCUMENTATION RESPONSE RECOVERY")
+                    && !recoveryPrompt.contains("Tool request instead of a review.")
+                    && report(recoveredDocumentation).contains("README.md:2"),
+                    "a missing review block gets a fresh evidence-based attempt and a grounded report");
+            Files.delete(firstDocumentationReply);
+
+            Files.writeString(fixture.resolve("documentation.xml"), docsResponse.replace("6,8", "6-500"));
+            Path outOfRange = pipeline.run(options(arguments));
+            check(Main.reviewExitCode(outOfRange) == 3 && calls(outOfRange, 2) && !report(outOfRange).contains("Incorrect example"),
+                    "dashed citation ranges must still be inside the supplied evidence block");
 
             Files.writeString(fixture.resolve("documentation.xml"), docsResponse.replace("6,8", "7"));
             Path removed = pipeline.run(options(arguments));
@@ -217,12 +246,32 @@ final class AdaptiveReviewTests {
             Path focused = pipeline.run(options(arguments));
             String riskPrompt = Files.readString(focused.resolve("focused/F1-prompt.md"));
             String overview = Files.readString(focused.resolve("focused/O-prompt.md"));
+            String attemptOrder = Files.readString(focused.resolve("timings.md"));
+            int firstRiskCall = attemptOrder.indexOf("|focused/F1-attempts/");
+            int overviewCall = attemptOrder.indexOf("|focused/O-attempts/");
+            check(firstRiskCall >= 0 && overviewCall > firstRiskCall,
+                    "serial focused reviews start the targeted risk checks before the overview");
             check(Main.reviewExitCode(focused) == 0 && calls(focused, 2)
                     && riskPrompt.contains("before the effect") && riskPrompt.contains("runtime/store.py")
                     && riskPrompt.contains("runtime/worker.py") && !riskPrompt.contains("notes.md")
                     && overview.contains("notes.md") && overview.contains("ops/deploy.yaml") && !overview.contains("runtime/worker.py")
                     && !Files.exists(focused.resolve("discovery")),
                     "multi-file risk checking retains the producer and side effect together while keeping unrelated scope separate");
+            check(riskPrompt.contains("Do not call or request any tools."),
+                    "focused requests ask for a complete review from the supplied evidence");
+
+            Path malformedScope = fixture.resolve("focused-first.txt");
+            Files.writeString(malformedScope, "<tool_call>No review content</tool_call>");
+            Path partialFocused = pipeline.run(options(arguments));
+            String scopeRecovery = Files.readString(partialFocused.resolve("focused/F1-repair-prompt.md"));
+            check(Main.reviewExitCode(partialFocused) == 3 && calls(partialFocused, 4)
+                    && scopeRecovery.startsWith("ADAPTIVE RESPONSE RECOVERY")
+                    && scopeRecovery.contains("runtime/worker.py") && !scopeRecovery.contains("No review content")
+                    && Files.readString(partialFocused.resolve("focused/F1-state.properties")).contains("status=SUCCEEDED")
+                    && Files.readString(partialFocused.resolve("focused/O-state.properties")).contains("status=FAILED")
+                    && report(partialFocused).contains("unfinished checks: 1."),
+                    "a tool-only reply retries the review from its evidence and an unrecovered scope counts as unfinished");
+            Files.delete(malformedScope);
 
             Files.writeString(repository.resolve("authorization.py"), """
                     def request_review(actor, queue):
@@ -237,12 +286,12 @@ final class AdaptiveReviewTests {
             String publication = scopedFinding("CONFIRMED", "Publishes a review after revocation",
                     "A review comment is published.", outcome);
             String execution = scopedFinding("INSUFFICIENT_EVIDENCE", "Runs a review after revocation",
-                    "A review job runs.", "").replace("</local-decision>",
+                    "A review job runs.", "").replace("<severity>HIGH</severity>", "").replace("</local-decision>",
                     "<requests>REQUEST_FILE|target|review_worker.py|all|Check whether the worker authorizes again</requests></local-decision>");
             Files.writeString(fixture.resolve("scoped.xml"), "<adaptive-review><route>LOCAL</route>"
                     + "<summary>The worker stops before the claim is written and the report is published after revocation.</summary>"
                     + "<decisions>" + queue + publication + execution
-                    + "</decisions></adaptive-review>");
+                    + "</decisions><nextCheck>Root advice without a candidate.</nextCheck></adaptive-review>");
             Path limited = pipeline.run(options(arguments));
             String finalReport = report(limited);
             String summary = finalReport.substring(0, finalReport.indexOf("# Findings"));
@@ -254,8 +303,11 @@ final class AdaptiveReviewTests {
                     && !summary.contains("before the claim")
                     && published.contains("### [MEDIUM] Attempts to queue a job after the initial check")
                     && !published.contains("Publishes a review") && finalReport.contains("stated impact has no explicit supporting outcome citation")
-                    && coverage.contains("Severity limited to MEDIUM") && coverage.contains("The worker checks authorization again."),
-                    "the final summary reflects bounded impact and the downstream guard without extra publication calls");
+                    && coverage.contains("Severity limited to MEDIUM") && coverage.contains("The worker checks authorization again.")
+                    && Files.readString(limited.resolve("focused/F1-normalization.log")).contains("without a model severity")
+                    && Files.readString(limited.resolve("focused/F1-normalization.log")).contains("Omitted misplaced advisory")
+                    && !finalReport.contains("Root advice without a candidate."),
+                    "scoped decisions remain grounded with an unrated candidate or an unassigned advisory");
         } finally {
             try (var paths = Files.walk(fixture)) {
                 for (var path : paths.sorted(Comparator.reverseOrder()).toList()) Files.delete(path);

@@ -234,6 +234,11 @@ final class ReviewOutput {
 
     static ReviewFinding finding(Element element, String id, List<String> changedFiles, boolean checkCandidateId)
             throws IOException {
+        return finding(element, id, changedFiles, checkCandidateId, false);
+    }
+
+    static ReviewFinding finding(Element element, String id, List<String> changedFiles, boolean checkCandidateId,
+                                 boolean allowUnrated) throws IOException {
         List<Element> contents = children(element, null);
         while (contents.size() == 1 && contents.getFirst().getTagName().equals("finding")) {
             if (element.getAttributes().getLength() > (element.hasAttribute("id") ? 1 : 0)) {
@@ -262,7 +267,15 @@ final class ReviewOutput {
             if (first < 1 || last < first) {
                 throw new IllegalArgumentException("Invalid finding line range");
             }
-            return new ReviewFinding(id, text(fields, "title"), ReviewFinding.Severity.parse(text(fields, "severity")),
+            ReviewFinding.Severity severity;
+            if (allowUnrated && !fields.containsKey("severity")) {
+                // The internal ordering value is never published as a severity for an unresolved concern.
+                severity = ReviewFinding.Severity.LOW;
+                ResponseDiagnostics.record("Kept an unresolved scoped finding without a model severity.");
+            } else {
+                severity = ReviewFinding.Severity.parse(text(fields, "severity"));
+            }
+            return new ReviewFinding(id, text(fields, "title"), severity,
                     path, first, last, text(fields, "trigger"), text(fields, "impact"), text(fields, "evidence"),
                     text(fields, "diffRelation"));
         } catch (IllegalArgumentException invalid) {

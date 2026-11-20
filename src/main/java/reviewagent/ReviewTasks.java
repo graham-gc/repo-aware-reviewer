@@ -225,11 +225,33 @@ final class ReviewTasks {
                         : "OUTPUT FORMAT CORRECTION\n"
                             + "The previous response failed structural validation. Correct only its serialization and comply with the response schema above. "
                             + "Preserve the evidence-based decisions and reasoning. Do not invent facts or promote an unconfirmed finding. ";
-                String repairPrompt = ReviewXml.missingResponseBlock(invalid, "findings")
-                        ? retryDiscoveryPrompt(task.prompt())
-                        : task.prompt() + "\n\n" + correction + task.validator().correctionInstructions(invalid)
+                String repairPrompt;
+                if (ReviewXml.missingResponseBlock(invalid, "findings")) {
+                    repairPrompt = retryDiscoveryPrompt(task.prompt());
+                } else if (ReviewXml.missingResponseBlock(invalid, "documentation-review")) {
+                    repairPrompt = """
+                            DOCUMENTATION RESPONSE RECOVERY
+                            Review the supplied diff again. Start with one complete <documentation-review> XML
+                            document. Include a summary and use <doc-findings/> if the diff supports no finding.
+                            Do not call or request any tools.
+
+                            ORIGINAL REVIEW
+                            """ + task.prompt();
+                } else if (ReviewXml.missingResponseBlock(invalid, "adaptive-review")) {
+                    repairPrompt = """
+                            ADAPTIVE RESPONSE RECOVERY
+                            Review the assigned scope again using the supplied Git evidence. Start with one complete
+                            <adaptive-review> XML document with a route, summary, and decisions. Consider each assigned
+                            risk before returning <decisions/>. Do not call or request any tools. Record missing
+                            tracked evidence through the XML requests field.
+
+                            ORIGINAL REVIEW
+                            """ + task.prompt();
+                } else {
+                    repairPrompt = task.prompt() + "\n\n" + correction + task.validator().correctionInstructions(invalid)
                             + "Return the complete corrected response.\nValidation error: " + invalid.getMessage()
                             + "\n\nPREVIOUS RESPONSE\n" + response;
+                }
                 AtomicFiles.write(directory.resolve(task.id() + "-" + kind + "-prompt.md"), repairPrompt);
                 String raw = agent.invoke(repairPrompt, directory.resolve(task.id() + "-" + kind));
                 AtomicFiles.write(directory.resolve(task.id() + "-" + kind + "-response.md"), raw);

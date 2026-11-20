@@ -149,7 +149,7 @@ final class ReviewReport {
                                            OutputLanguage language, boolean includeCounts) {
         StringBuilder findings = new StringBuilder();
         if (includeCounts && !concerns.isEmpty()) {
-            findings.append(verdictCounts(confirmed, concerns, language)).append("\n\n");
+            findings.append(verdictCounts(confirmed, concerns, 0, language)).append("\n\n");
         } else if (confirmed.isEmpty() && concerns.isEmpty()) {
             findings.append(language.text("No verified findings.", "未发现经复核确认的问题。")).append("\n\n");
         }
@@ -231,19 +231,20 @@ final class ReviewReport {
     }
 
     static String focusedReport(EvidenceBundle evidence, List<ReviewFinding> confirmed,
-                                List<ReviewConcerns.Item> concerns, OutputLanguage language) {
-        String summary = verdictCounts(confirmed, concerns, language);
+                                List<ReviewConcerns.Item> concerns, int failedScopes, OutputLanguage language) {
+        String summary = verdictCounts(confirmed, concerns, failedScopes, language);
         String highlights = confirmed.stream().sorted(Comparator.comparing(ReviewFinding::severity)).limit(3)
                 .map(finding -> "- " + ReportText.inline(finding.title())).collect(java.util.stream.Collectors.joining("\n"));
         return structuredReport(evidence, summary + (highlights.isEmpty() ? "" : "\n\n" + highlights),
                 confirmed, concerns, language, true);
     }
 
-    private static String verdictCounts(List<ReviewFinding> confirmed, List<ReviewConcerns.Item> concerns, OutputLanguage language) {
+    private static String verdictCounts(List<ReviewFinding> confirmed, List<ReviewConcerns.Item> concerns,
+                                        int failedScopes, OutputLanguage language) {
         long unfinished = concerns.stream().filter(item -> item.kind() == ReviewConcerns.Kind.NOT_COMPLETED).count();
         return language.text("Confirmed defects: %d; review-required items: %d; unfinished checks: %d.",
                 "已确认缺陷：%d；需人工确认事项：%d；未完成检查：%d。")
-                .formatted(confirmed.size(), concerns.size() - unfinished, unfinished);
+                .formatted(confirmed.size(), concerns.size() - unfinished, unfinished + failedScopes);
     }
 
     private static String structuredReport(EvidenceBundle evidence, String summary, List<ReviewFinding> confirmed,

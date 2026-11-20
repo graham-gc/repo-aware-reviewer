@@ -230,9 +230,8 @@ final class PromptFactory {
                 Diff headers, new-file metadata and +/- patch markers belong to DIFF evidence, not full source files.
                 An unchanged line may be present in TARGET_SOURCE but absent from the truncated-context diff.
                 Cite the block actually containing the quote; do not mix a source-file ID with a patch excerpt.
-                For a source-correction candidate supplied by the CLI, you may use
-                <citation><source>SRC-17</source><lines>first:last</lines></citation> instead of retyping quote.
-                Copy the supplied selector; its line numbers are relative to the included block, not the file.
+                For a numbered evidence block or supplied correction excerpt, use
+                <citation><source>SRC-17</source><lines>first:last</lines></citation> with the printed block line numbers.
                 Use exactly one of quote or lines. The CLI extracts the actual source text and validates its spans.
                 A selector is a source reference, not proof that your reasoning is correct: re-evaluate the claim
                 against the actual excerpt, particularly changed method names, arguments and returned values.
@@ -260,8 +259,9 @@ final class PromptFactory {
                 """.formatted(candidate.id()) + languageInstructions() + acceptanceInstructions() + evidenceRequestInstructions(evidence)
                 + "For the XML response, severity and status values always use the canonical English protocol keywords.\n\n"
                 + "CANDIDATE TO VERIFY\n" + ReviewOutput.findingXml(candidate)
-                + "\n\nEVIDENCE CITATION SOURCE NAMES\n" + index.inventory()
-                + "\n\nEVIDENCE FOLLOWS\n=================\n" + evidence.markdown() + supplemental;
+                + "\n\n" + EvidenceIndex.LINE_CITATION_GUIDANCE
+                + "EVIDENCE CITATION SOURCE NAMES\n" + index.inventory()
+                + "\n\nEVIDENCE FOLLOWS\n=================\n" + index.numberedMarkdown(evidence.markdown() + supplemental);
     }
 
     String verifyAssessmentFinding(EvidenceBundle evidence, ReviewFinding candidate, ReviewOutput.AssessmentItem item,
@@ -407,8 +407,8 @@ final class PromptFactory {
                 A supplied scoped knowledge section can be cited by its unique KB-number ID, its title without
                 the line-position suffix, or its complete evidence title. The quotation itself must still be exact.
                 Escape XML special characters or use CDATA. Citation quotes must be verbatim (at least 12 characters).
-                A CLI-provided correction excerpt may instead be cited with source plus <lines>first:last</lines>,
-                omitting quote. These are included-block line numbers; the CLI extracts the actual text.
+                Numbered evidence may be cited with source plus <lines>first:last</lines>. The CLI extracts the
+                actual text for the selected block-relative line numbers.
                 Reassess the verdict against that text rather than preserving reasoning based on a misquotation.
                 All file/dependency reading is performed by the CLI. For missing decisive code, emit registered
                 evidence requests outside XML and mark affected items INSUFFICIENT_EVIDENCE.
@@ -417,8 +417,9 @@ final class PromptFactory {
                 """ + languageInstructions() + acceptanceInstructions() + evidenceRequestInstructions(evidence)
                 + "\nCANDIDATE DECISIONS (not substitutes for source evidence)\n" + decisions
                 + "\nPRIOR ASSESSMENT\n" + previousResponse
-                + "\nEVIDENCE CITATION SOURCE NAMES\n" + index.inventory()
-                + "\nEVIDENCE FOLLOWS\n=================\n" + evidence.markdown() + supplemental;
+                + "\n\n" + EvidenceIndex.LINE_CITATION_GUIDANCE
+                + "EVIDENCE CITATION SOURCE NAMES\n" + index.inventory()
+                + "\nEVIDENCE FOLLOWS\n=================\n" + index.numberedMarkdown(evidence.markdown() + supplemental);
     }
 
     String finalizeReport(EvidenceBundle evidence, List<ReviewFinding> confirmed,

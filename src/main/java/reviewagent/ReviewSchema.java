@@ -2,7 +2,10 @@ package reviewagent;
 
 import org.w3c.dom.Element;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -41,6 +44,63 @@ final class ReviewSchema {
     }
     static boolean container(String name) { return CHILDREN.containsKey(name); }
     static boolean allows(String parent, String child) { return CHILDREN.getOrDefault(parent, Set.of()).contains(child); }
+
+    // These fields describe a maintainer action. Verdicts, proof and evidence requests stay structural.
+    private static final Set<String> ADVISORY = Set.of("nextCheck");
+
+    static List<String> normalizeAdvisories(Element root) throws IOException {
+        var notes = new LinkedHashSet<String>();
+        if (root.getTagName().equals("adaptive-review")) {
+            var candidates = new ArrayList<Element>();
+            var misplaced = new ArrayList<>(advisories(root));
+            for (Element list : ReviewXml.children(root, null)) {
+                if (!list.getTagName().equals("decisions")) continue;
+                misplaced.addAll(advisories(list));
+                for (Element entry : ReviewXml.children(list, null)) {
+                    if (entry.getTagName().equals("local-decision")) candidates.add(entry);
+                }
+            }
+            for (Element candidate : candidates) normalizeFindingAdvisories(candidate, notes);
+            placeAdvisories(misplaced, candidates.size() == 1 ? candidates.getFirst() : null, notes);
+        } else if (root.getTagName().equals("verification")) {
+            normalizeFindingAdvisories(root, notes);
+        }
+        return List.copyOf(notes);
+    }
+
+    private static List<Element> advisories(Element parent) throws IOException {
+        return ReviewXml.children(parent, null).stream().filter(child -> ADVISORY.contains(child.getTagName())).toList();
+    }
+
+    private static void normalizeFindingAdvisories(Element owner, Set<String> notes) throws IOException {
+        var misplaced = new ArrayList<Element>();
+        var findings = owner.getElementsByTagName("finding");
+        for (int i = 0; i < findings.getLength(); i++) misplaced.addAll(advisories((Element) findings.item(i)));
+        placeAdvisories(misplaced, owner, notes);
+    }
+
+    private static void placeAdvisories(List<Element> misplaced, Element owner, Set<String> notes) throws IOException {
+        if (misplaced.isEmpty()) return;
+        var fields = owner == null ? List.<Element>of() : ReviewXml.children(owner, null);
+        var statuses = fields.stream().filter(field -> field.getTagName().equals("status")).toList();
+        boolean unresolved = statuses.size() == 1 && statuses.getFirst().getTextContent().strip().equals("INSUFFICIENT_EVIDENCE");
+        for (String name : ADVISORY) {
+            var suggestions = misplaced.stream().filter(field -> field.getTagName().equals(name)).toList();
+            if (suggestions.isEmpty()) continue;
+            Element suggestion = suggestions.getFirst();
+            boolean canMove = unresolved && suggestions.size() == 1
+                    && fields.stream().noneMatch(field -> field.getTagName().equals(name))
+                    && !suggestion.hasAttributes() && suggestion.getElementsByTagName("*").getLength() == 0
+                    && !suggestion.getTextContent().isBlank();
+            if (canMove) {
+                owner.appendChild(suggestion);
+                notes.add("Moved misplaced advisory <" + name + "> to its unresolved candidate; raw response retained.");
+            } else {
+                for (Element field : suggestions) field.getParentNode().removeChild(field);
+                notes.add("Omitted misplaced advisory <" + name + "> without a unique unresolved recipient; raw response retained.");
+            }
+        }
+    }
 
     static void validate(Element element) throws IOException {
         String name = element.getTagName();

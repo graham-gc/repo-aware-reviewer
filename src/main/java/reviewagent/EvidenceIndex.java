@@ -6,6 +6,14 @@ import java.util.List;
 
 /** Validates quotations and binds them to collector-owned identities and source spans. */
 final class EvidenceIndex {
+    static final String LINE_CITATION_GUIDANCE = """
+            Cite a numbered evidence block by copying its SRC reference from the block heading and the printed
+            line numbers before the pipe into <lines>first:last</lines>. These numbers belong to that block.
+            Use actual target-file coordinates for a finding's line and endLine. For verbatim quote citations,
+            copy the source text after the pipe. Use either quote or lines for each citation.
+
+            """;
+
     record Citation(String source, String quote, String sourceId, List<EvidenceSource.Location> locations, String excerptLines) {
         Citation(String source, String quote) { this(source, quote, "", List.of(), ""); }
         static Citation lines(String source, String selector) { return new Citation(source, "", "", List.of(), selector); }
@@ -25,6 +33,7 @@ final class EvidenceIndex {
         this(evidence.catalog().plus(LegacyEvidenceAdapter.read(supplemental, evidence.scope(), LanguageRegistry.defaults())));
     }
     String inventory() { return catalog.inventory(); }
+    String numberedMarkdown(String markdown) { return catalog.numberedMarkdown(markdown); }
     String reference(String id) {
         EvidenceSource source = catalog.source(id);
         return source == null ? id : catalog.reference(source);
@@ -38,14 +47,16 @@ final class EvidenceIndex {
             EvidenceSource source = source(citation);
             String original = citation.quote();
             List<EvidenceSource.Location> selectedLocations = null;
-            if (source != null && !citation.excerptLines().isEmpty()) {
+            String selector = citation.excerptLines();
+            if (source != null && !selector.isEmpty()) {
                 try {
-                    EvidenceSource.Excerpt excerpt = source.excerpt(citation.excerptLines());
+                    EvidenceSource.Excerpt excerpt = source.excerpt(selector);
                     if (!original.isEmpty() && !normalize(original).equals(normalize(excerpt.text()))) {
                         throw new IOException("Quotation does not match the selected source lines");
                     }
                     original = excerpt.text();
                     selectedLocations = excerpt.locations();
+                    selector = excerpt.selector();
                 } catch (IOException invalid) {
                     errors.add(EvidenceText.oneLine(citation.source()) + "; invalid citation range: "
                             + EvidenceText.oneLine(citation.excerptLines()) + "; " + invalid.getMessage());
@@ -63,7 +74,7 @@ final class EvidenceIndex {
                         + (quote.length() >= 12 ? referenceHint(source, quote) : ""));
             } else {
                 bound.add(new Citation(source.title(), original, source.id(),
-                        selectedLocations == null ? source.locations(original) : selectedLocations, citation.excerptLines()));
+                        selectedLocations == null ? source.locations(original) : selectedLocations, selector));
             }
         }
         if (!errors.isEmpty()) throw new SourceQuotationException("Citation must quote an included evidence block verbatim:\n"

@@ -17,10 +17,8 @@ final class ScopedCitationRepair {
         boolean permits(EvidenceIndex.Citation citation, EvidenceCatalog catalog) {
             var selected = catalog.source(citation.source());
             if (selected == null || !selected.id().equals(source.id()) || !citation.quote().isEmpty()) return false;
-            String[] range = range(citation.excerptLines());
-            if (range.length != 2) return false;
-            int from = Integer.parseInt(range[0]), to = Integer.parseInt(range[1]);
-            return from >= first && to >= from && to <= last;
+            var range = EvidenceSource.LineRange.parse(citation.excerptLines());
+            return range != null && range.first() >= first && range.last() >= range.first() && range.last() <= last;
         }
     }
 
@@ -165,10 +163,10 @@ final class ScopedCitationRepair {
     private static Window window(EvidenceSource source, EvidenceIndex.Citation citation, ReviewFinding finding) {
         var lines = source.text().lines().toList();
         if (lines.isEmpty()) return null;
-        String[] range = range(citation.excerptLines());
+        var range = EvidenceSource.LineRange.parse(citation.excerptLines());
         int anchor = source.path().equals(finding.path()) && !source.role(EvidenceSource.Role.DIFF)
                 ? finding.line() - source.firstLine() + 1 : 1;
-        if (range.length == 2) anchor = Integer.parseInt(range[0]);
+        if (range != null) anchor = range.first();
         else {
             String firstQuotedLine = EvidenceIndex.normalize(citation.quote().lines().findFirst().orElse(""));
             for (int i = 0; i < lines.size() && firstQuotedLine.length() >= 12; i++) {
@@ -182,7 +180,7 @@ final class ScopedCitationRepair {
         int bytes = 0;
         var numbered = new StringBuilder();
         for (int i = first; i <= Math.min(lines.size(), anchor + 20); i++) {
-            String line = i + " | " + lines.get(i - 1) + "\n";
+            String line = EvidenceText.numberedLine(i, lines.get(i - 1)) + "\n";
             bytes += EvidenceText.bytes(line);
             if (bytes > WINDOW_BYTES) break;
             numbered.append(line);
@@ -191,7 +189,4 @@ final class ScopedCitationRepair {
         return last < first ? null : new Window(source, first, last, numbered.toString());
     }
 
-    private static String[] range(String selector) {
-        return selector.matches("[1-9][0-9]{0,6}:[1-9][0-9]{0,6}") ? selector.split(":") : new String[0];
-    }
 }

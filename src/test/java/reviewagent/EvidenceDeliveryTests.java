@@ -182,15 +182,16 @@ final class EvidenceDeliveryTests {
                         && Files.readString(run.resolve("beta-calls")).equals("x"),
                         "a globally known source reaches its requester without rerunning an unrelated candidate or repeating already supplied coverage");
                 String followup = Files.readString(run.resolve("verification/round-2/R1-1-prompt.md"));
+                String numberedBody = EvidenceText.numberedLines(BODY.lines().toList());
                 if (missingFile) {
                     require(followup.contains("The earlier request-only reply has been processed")
-                            && !followup.contains(BODY)
+                            && !followup.contains(numberedBody)
                             && decisions.getFirst().verdict().status() == ReviewOutput.Status.INSUFFICIENT_EVIDENCE
                             && decisions.getFirst().verdict().validationFailed() == mode.equals("repeat-unavailable"),
                             "unavailable evidence gets one verdict-only follow-up, and request-only output cannot finish a review");
                     continue;
                 }
-                require(followup.contains(BODY) && followup.contains(source.id()) && !followup.contains("(lines 1–"),
+                require(followup.contains(numberedBody) && followup.contains(source.id()) && !followup.contains("(lines 1–"),
                         "follow-up uses the existing immutable source instead of a new presentation-only range identity");
                 require(session.catalog().sources().size() == sourcesBefore, "covered requests do not append duplicate global evidence");
                 require(session.coverage().contains("Fulfilled requests from verification/R1-1: queued for this candidate: " + source.id()),

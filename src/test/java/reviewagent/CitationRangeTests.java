@@ -11,6 +11,7 @@ final class CitationRangeTests {
     static void run() throws Exception {
         methodTranscription();
         boundsAndProvenance();
+        numberedPromptEvidence();
         overlappingLocationCoverage();
     }
 
@@ -99,7 +100,12 @@ final class CitationRangeTests {
                 "an explicit selector binds the chosen occurrence of repeated source text");
         require(index.bind(List.of(EvidenceIndex.Citation.lines(source.id(), "2:2"))).getFirst().quote().contains("\\n"),
                 "literal backslash-n in source remains literal");
-        for (String range : List.of("0:1", "2:1", "1:4", "500:502", "1:201", "-1:1", "1", "99999999999999:99999999999999")) {
+        require(index.bind(List.of(EvidenceIndex.Citation.lines(source.id(), "3"))).getFirst().equals(chosen),
+                "a single line and an explicit one-line range bind identically");
+        var dashed = index.bind(List.of(EvidenceIndex.Citation.lines(source.id(), "2 – 3"))).getFirst();
+        require(dashed.excerptLines().equals("2:3") && dashed.locations().getFirst().firstLine() == 501,
+                "unambiguous range formatting is normalized before binding to source");
+        for (String range : List.of("0:1", "2:1", "1:4", "500:502", "1:201", "-1:1", "1,3", "99999999999999:99999999999999")) {
             fails(() -> index.validate(List.of(EvidenceIndex.Citation.lines(source.id(), range))));
         }
         fails(() -> index.validate(List.of(EvidenceIndex.Citation.lines("EV-unknown", "1:2"))));
@@ -115,6 +121,47 @@ final class CitationRangeTests {
                 && added.getFirst().locations().getFirst().firstLine() == 20, "added selections keep target provenance");
         require(!diffIndex.hasTarget(diffIndex.bind(List.of(EvidenceIndex.Citation.lines(patch.id(), "1:2")))),
                 "patch metadata cannot become target code through selection");
+    }
+
+    private static void numberedPromptEvidence() throws Exception {
+        var scope = new ReviewScope(ReviewScope.Mode.BRANCH, "base", "target", "base", "target", "base..target");
+        var languages = LanguageRegistry.defaults();
+        var base = EvidenceSources.file("base", "logic/queue.py", 73, "logic/queue.py at base",
+                "keep_previous_claim()\n", scope, languages);
+        var target = EvidenceSources.file("target", "logic/queue.py", 156, "logic/queue.py at target (lines 156–157)",
+                "persist_current_claim()\n\n", scope, languages);
+        var diff = EvidenceSource.diff("logic/queue.py", null,
+                "@@ -73 +156 @@\n-keep_previous_claim()\n+persist_current_claim()\n", scope, true);
+        var catalog = new EvidenceCatalog(List.of(diff, base, target), true);
+        var index = new EvidenceIndex(catalog);
+        String markdown = "# Review scope\n\n" + diff.markdown() + base.markdown() + target.markdown();
+        var evidence = new EvidenceBundle(scope, List.of(target.path()), markdown, "", 0, null, catalog);
+        var finding = new ReviewFinding("R1-1", "Inspect claim", ReviewFinding.Severity.LOW, target.path(), 156, 156,
+                "An event arrives", "The claim is written", "Source evidence", "Target behavior");
+        for (String prompt : List.of(
+                AdaptiveReview.prompt(evidence, index, OutputLanguage.EN, "Inspect the supplied source."),
+                new PromptFactory().verifyFinding(evidence, finding, "", index),
+                new PromptFactory().assessRequirements(evidence, "", "", "", true, index))) {
+            require(prompt.contains("# Review scope") && prompt.contains("SRC-1 — logic/queue.py (Kind: DIFF")
+                    && prompt.contains("SRC-2 — logic/queue.py at base (Kind: BASE_SOURCE; revision: base")
+                    && prompt.contains("SRC-3 — logic/queue.py at target (lines 156–157) (Kind: TARGET_SOURCE; revision: target")
+                    && prompt.contains("3 | +persist_current_claim()") && prompt.contains("1 | persist_current_claim()")
+                    && prompt.contains("2 block lines"),
+                    "scoped review, independent verification and assessment share numbered evidence with pinned provenance");
+        }
+        require(evidence.markdown().equals(markdown) && !catalog.source("SRC-3").text().contains(" | "),
+                "display numbering does not alter raw evidence or the citation catalog");
+        var reference = index.bind(List.of(EvidenceIndex.Citation.lines("SRC-3", "1"))).getFirst();
+        require(reference.locations().getFirst().firstLine() == 156, "printed block line resolves to the actual file location");
+        fails(() -> index.bind(List.of(EvidenceIndex.Citation.lines("SRC-3", "1:156"))));
+        fails(() -> index.bind(List.of(EvidenceIndex.Citation.lines("SRC-3", "156"))));
+        var wholeFile = EvidenceSources.file("target", target.path(), 1, "logic/queue.py at target",
+                "another_source_line()\n".repeat(177), scope, languages);
+        var expanded = new EvidenceIndex(new EvidenceCatalog(List.of(diff, base, target, wholeFile), true));
+        require(expanded.bind(List.of(EvidenceIndex.Citation.lines("SRC-4", "177"))).getFirst()
+                        .locations().getFirst().firstLine() == 177,
+                "another block from the same file can cover this number");
+        fails(() -> expanded.bind(List.of(EvidenceIndex.Citation.lines("SRC-3", "1:177"))));
     }
 
     private static void overlappingLocationCoverage() throws Exception {

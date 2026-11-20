@@ -77,10 +77,34 @@ final class EvidenceCatalog {
         return indexed != null && indexed.role(EvidenceSource.Role.CONTRACT) == role.equals("contract") ? indexed : null;
     }
 
+    String numberedMarkdown(String markdown) {
+        var byTitle = sources.values().stream().collect(java.util.stream.Collectors.groupingBy(EvidenceSource::title));
+        var blocks = EvidenceText.SOURCE_BLOCK.matcher(markdown);
+        var rendered = new StringBuilder(markdown.length());
+        while (blocks.find()) {
+            String format = blocks.group(3).strip();
+            String body = blocks.group(4);
+            var matches = byTitle.getOrDefault(blocks.group(1), List.of()).stream()
+                    .filter(source -> source.format().equals(format)
+                            && (body.equals(source.text()) || body.equals(source.text() + "\n"))).limit(2).toList();
+            if (matches.size() == 1) {
+                var source = matches.getFirst();
+                blocks.appendReplacement(rendered, java.util.regex.Matcher.quoteReplacement(numberedBlock(source).stripTrailing() + "\n"));
+            }
+        }
+        return blocks.appendTail(rendered).toString();
+    }
+
+    private String numberedBlock(EvidenceSource source) {
+        var lines = source.text().lines().toList();
+        return EvidenceText.block(reference(source) + " — " + source.title() + " (" + provenance(source)
+                + "; " + lines.size() + " block lines)", source.format(), EvidenceText.numberedLines(lines));
+    }
+
     String inventory() {
         return sources.values().stream().map(source -> "- " + reference(source) + ": " + source.title() + " ["
                 + (source.role(EvidenceSource.Role.CONTRACT) ? "contract" : "source") + "]\n  " + provenance(source)
-                + "; evidence-id: " + source.id() + "\n")
+                + "; block lines: " + source.text().lines().count() + "; evidence-id: " + source.id() + "\n")
                 .collect(java.util.stream.Collectors.joining());
     }
 

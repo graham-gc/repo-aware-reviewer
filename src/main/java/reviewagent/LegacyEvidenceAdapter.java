@@ -6,10 +6,9 @@ import java.util.regex.Pattern;
 
 /** Compatibility boundary for existing provider Markdown and old internal fixtures. */
 final class LegacyEvidenceAdapter {
-    private static final Pattern BLOCK = Pattern.compile("(?m)^### ([^\\r\\n]+)\\R\\R(`{3,})([^\\r\\n]*)\\R([\\s\\S]*?)^\\2[ \\t]*(?:\\R|$)");
     static EvidenceCatalog read(String markdown, ReviewScope scope, LanguageRegistry languages) {
         var entries = new ArrayList<EvidenceSource>();
-        var blocks = BLOCK.matcher(markdown);
+        var blocks = EvidenceText.SOURCE_BLOCK.matcher(markdown);
         while (blocks.find()) {
             String title = blocks.group(1), format = blocks.group(3).strip(), text = blocks.group(4);
             var roles = EnumSet.noneOf(EvidenceSource.Role.class);

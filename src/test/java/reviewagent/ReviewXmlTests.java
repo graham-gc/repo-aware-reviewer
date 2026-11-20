@@ -17,6 +17,7 @@ final class ReviewXmlTests {
         protocolFenceBoundaries();
         missingOpeningBracket();
         rejectedStructures();
+        misplacedAdvisories();
         normalizationArtifacts();
     }
 
@@ -152,6 +153,45 @@ final class ReviewXmlTests {
                 + "<citation><source>rules</source><quote>Second literal text.</quote></citation>\n</citations></verification>";
         try { ReviewXml.xml(swallowed, "verification"); throw new AssertionError("Sibling swallowing must be detected"); }
         catch (AmbiguousTextFieldException expected) { require(expected.getMessage().contains("CDATA"), "ambiguous source markup needs explicit encoding"); }
+    }
+
+    private static void misplacedAdvisories() throws Exception {
+        String suggestion = "<nextCheck>Compare the pinned contract.</nextCheck>";
+        String candidate = "<local-decision><status>INSUFFICIENT_EVIDENCE</status>"
+                + "<reason>The policy is unspecified.</reason><finding><title>Review the contract</title></finding></local-decision>";
+        String heading = "<adaptive-review><route>LOCAL</route><summary>Reviewed the change.</summary>";
+        String end = "</adaptive-review>";
+        for (String response : List.of(
+                heading + "<decisions>" + candidate + "</decisions>" + suggestion + end,
+                heading + "<decisions>" + candidate + suggestion + "</decisions>" + end,
+                heading + "<decisions>" + candidate.replace("</finding>", suggestion + "</finding>") + "</decisions>" + end)) {
+            var xml = ReviewXml.xml(response, "adaptive-review");
+            var entries = xml.root().getElementsByTagName("local-decision");
+            var fields = ReviewXml.fields((org.w3c.dom.Element) entries.item(0), ReviewSchema.LOCAL_DECISION);
+            require(ReviewXml.text(fields, "nextCheck").equals("Compare the pinned contract.")
+                    && xml.normalizations().size() == 1 && xml.normalizations().getFirst().contains("Moved misplaced advisory"),
+                    "a plain optional suggestion with a unique owner is restored from each supported position");
+        }
+
+        String ambiguous = heading + "<decisions>" + candidate.repeat(2) + "</decisions>" + suggestion + end;
+        var parsed = ReviewXml.xml(ambiguous, "adaptive-review");
+        require(parsed.root().getElementsByTagName("local-decision").getLength() == 2
+                && parsed.root().getElementsByTagName("nextCheck").getLength() == 0
+                && parsed.normalizations().getFirst().contains("raw response retained"),
+                "an unassigned suggestion does not change any candidate in a multi-candidate response");
+        String own = candidate.replace("</local-decision>", "<nextCheck>Read the API policy.</nextCheck></local-decision>");
+        var assigned = ReviewXml.xml(heading + "<decisions>" + own + "</decisions>" + suggestion + end, "adaptive-review");
+        require(assigned.root().getElementsByTagName("nextCheck").getLength() == 1
+                && assigned.root().getElementsByTagName("nextCheck").item(0).getTextContent().equals("Read the API policy."),
+                "a misplaced suggestion cannot override the one assigned to the candidate");
+        var confirmed = ReviewXml.xml("<verification><status>CONFIRMED</status><reason>Proved by the code.</reason>"
+                + "<finding><title>One confirmed finding</title>" + suggestion + "</finding></verification>", "verification");
+        require(confirmed.root().getElementsByTagName("nextCheck").getLength() == 0 && confirmed.normalizations().size() == 1,
+                "a misplaced advisory cannot attach to a confirmed verdict");
+
+        fails(() -> ReviewXml.xml(ambiguous.replace(suggestion, "<status>CONFIRMED</status>"), "adaptive-review"));
+        fails(() -> ReviewXml.xml(ambiguous.replace(suggestion, "<requests>REQUEST_FILE|target|file|all|Read</requests>"), "adaptive-review"));
+        fails(() -> ReviewXml.xml(ambiguous.replace(suggestion, "<citations/>"), "adaptive-review"));
     }
 
     private static void normalizationArtifacts() throws Exception {

@@ -79,8 +79,11 @@ final class ReviewXml {
     }
 
     static XmlBlock xml(String response, String rootName) throws IOException {
-        try { return strict(response, rootName); }
-        catch (IOException original) {
+        try {
+            XmlBlock parsed = strict(response, rootName);
+            parsed.normalizations().forEach(ResponseDiagnostics::record);
+            return parsed;
+        } catch (IOException original) {
             if (original instanceof AmbiguousTextFieldException) throw original;
             var valid = new LinkedHashMap<String, XmlBlock>();
             var notes = new LinkedHashMap<String, String>();
@@ -94,9 +97,12 @@ final class ReviewXml {
             }
             if (valid.size() == 1) {
                 var entry = valid.entrySet().iterator().next();
-                String note = notes.get(entry.getKey());
-                ResponseDiagnostics.record(note);
-                return new XmlBlock(entry.getValue().root(), entry.getValue().remainder(), List.of(note));
+                XmlBlock parsed = entry.getValue();
+                var applied = new ArrayList<String>();
+                applied.add(notes.get(entry.getKey()));
+                applied.addAll(parsed.normalizations());
+                applied.forEach(ResponseDiagnostics::record);
+                return new XmlBlock(parsed.root(), parsed.remainder(), List.copyOf(applied));
             }
             if (!candidates.isEmpty()) throw new IOException(original.getMessage()
                     + "; delimiter repair was not applied: " + (valid.isEmpty() ? "no structurally valid candidate" : "ambiguous candidates"), original);
@@ -128,9 +134,10 @@ final class ReviewXml {
             if (!root.getTagName().equals(rootName)) {
                 throw new IOException("Unexpected review response root");
             }
+            var normalizations = ReviewSchema.normalizeAdvisories(root);
             ReviewSchema.validate(root);
             XmlStructureRepair.checkTextBoundaries(content);
-            return new XmlBlock(root, response.substring(0, envelope.start()) + response.substring(envelope.end()));
+            return new XmlBlock(root, response.substring(0, envelope.start()) + response.substring(envelope.end()), normalizations);
         } catch (SAXParseException invalid) {
             throw new IOException("Invalid " + rootName + " response structure at line " + invalid.getLineNumber()
                     + ", column " + invalid.getColumnNumber() + ": " + invalid.getMessage(), invalid);
