@@ -27,6 +27,8 @@ After shared evidence collection, a task whose complete prompt remains unchanged
 
 ## Deep review reporting
 
+Every independent discovery reviewer receives the available diffs, requirements and contracts. The contract and boundary reviewers can omit a standalone target block after verifying that a complete diff contains the same target lines. Context outside the diff stays in the prompt. Compare the saved `discovery/R1-prompt.md`, `R2-prompt.md` and `R3-prompt.md` to inspect the resulting views.
+
 When no external requirement or knowledge document is supplied, deep review renders the report locally from publication decisions, candidate groups and evidence coverage. Within a group, confirmed findings with matching locations, triggers and impacts share one entry. The first discovery task can include a short change summary. Existing results without a summary can be resumed, and the report can list the changed paths. Reviews with an external document still use the report consolidation call for the narrative and knowledge feedback.
 
 ## Timing report

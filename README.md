@@ -208,9 +208,15 @@ For other multi-file changes or detected risk signals, the CLI gives related fil
 
 When explicit Python sibling imports link changed durable state to a changed external-effect caller, the scoped request groups those implementations and their identified dependencies for the recovery check. Other changed code stays in scope. For verified additions in that request, the new-file diff header establishes attribution and complete target source supplies the added lines. Scopes without a recognized link use the regular file grouping.
 
-Diff hunks omitted from the first scoped requests share one bounded follow-up. If any hunks still do not fit, the report lists the unreviewed ranges and returns exit code 3. Risk checks can include a small amount of unchanged Python code linked by explicit sibling imports. Confirmed scoped candidates rated medium or higher, or supported by a premise in another target file, receive independent verification before publication.
+Durable-write checks cover inputs, caller guards, commit and error propagation. The request adds specific recovery questions when the relevant pinned implementation or diff shows retry, ambiguous-result handling, or replay behavior.
 
-Deep candidate verification uses relevant complete evidence blocks by default. To compare evidence modes, use `--review-mode deep` on both sides and add `--verification-evidence full` on the full-input side.
+Initial scoped verification can send up to three candidates together when they anchor to the same file, share a decisive outcome citation in another file, and use the same pinned evidence. Each candidate receives its own verdict. Missing or invalid verdicts are verified individually.
+
+The CLI packs omitted diff hunks into a single follow-up when they fit. It can add bounded follow-ups for the remaining hunks while evidence budget remains. The report lists any ranges still unreviewed and returns exit code 3. Risk checks can include unchanged Python siblings and direct Go or Java callers from the pinned revision. When a scope needs broader evidence for a candidate, the CLI can reuse related implementation collected elsewhere and recheck that candidate. Confirmed scoped candidates rated medium or higher, or supported by a premise in another target file, receive independent verification before publication.
+
+Use `--focused-json-schema` to pilot Claude Code's schema-constrained response for initial risk checks. Use the same flag when resuming that run. A custom agent command used with this flag must accept Claude Code's `--output-format json` and `--json-schema` flags and return its JSON envelope. [Structured output and failure handling](docs/structured-output.md#json-schema-pilot).
+
+Deep discovery keeps every available diff and contract in all three requests. The contract and boundary reviewers can omit a duplicate source block when its complete target body is already present in the diff. Deep candidate verification uses relevant complete evidence blocks by default. To compare verification evidence modes, use `--review-mode deep` on both sides and add `--verification-evidence full` on the full-input side.
 
 Review-required findings can include a suggested check for the maintainer, covering the missing premise, a concrete action, and the observation that would resolve it. The CLI performs static review.
 

@@ -39,7 +39,15 @@ final class AdaptiveReviewTests {
             Path agent = fixture.resolve("agent.sh");
             Files.writeString(agent, """
                     root=$1
+                    shift
                     prompt=$(cat)
+                    if [ "$#" -ne 0 ]; then
+                        [ "$#" -eq 4 ] && [ "$1" = --output-format ] && [ "$2" = json ] && [ "$3" = --json-schema ] || exit 90
+                        case "$4" in *'"decisions"'*'"requests"'*) ;; *) exit 90 ;; esac
+                        case "$prompt" in *'Follow the attached response schema'*) cat "$root/focused-json-response.json" ;; *) exit 90 ;; esac
+                        [ ! -f "$root/focused-json-fail" ]
+                        exit $?
+                    fi
                     case "$prompt" in
                       'Review this small change'*) cat "$root/local.xml" ;;
                       'Review these Markdown edits'*)
@@ -48,7 +56,7 @@ final class AdaptiveReviewTests {
                       'DOCUMENTATION RESPONSE RECOVERY'*) cat "$root/documentation.xml" ;;
                       'ADAPTIVE RESPONSE RECOVERY'*)
                         case "$prompt" in
-                          *'before the effect'*) printf '<adaptive-review><route>LOCAL</route><summary>Checked the recovered scope.</summary><decisions/></adaptive-review>' ;;
+                          *'Trace the changed durable write'*) printf '<adaptive-review><route>LOCAL</route><summary>Checked the recovered scope.</summary><decisions/></adaptive-review>' ;;
                           *) cat "$root/focused-first.txt" ;;
                         esac ;;
                       'Review the supplied scope'*)
@@ -58,10 +66,12 @@ final class AdaptiveReviewTests {
                           *'<basis>OUTCOME</basis>'*'queue.schedule(actor)'*) cat "$root/scoped.xml" ;;
                           *) printf '<adaptive-review><route>LOCAL</route><summary>Checked the supplied scope.</summary><decisions/></adaptive-review>' ;;
                         esac ;;
+                      'You are the independent verifier for these distinct code-review candidates'*) cat "$root/scoped-batch.xml" ;;
                       'You are the independent candidate verification'*)
                         case "$prompt" in
                           *'result = average([])'*'THE NEW EVIDENCE'*) cat "$root/verified.xml" ;;
                           *'Persisted claim blocks dispatch replay'*) cat "$root/persistence-verification.xml" ;;
+                          *'Repeated dispatch still skips the send'*) cat "$root/persistence-verification-2.xml" ;;
                           *'Attempts to queue a job after the initial check'*) cat "$root/queue-verification.xml" ;;
                           *'Rejects a permitted actor'*)
                             printf '<verification><status>REJECTED</status><reason>The permitted branch queues the job.</reason></verification>' ;;
@@ -257,7 +267,9 @@ final class AdaptiveReviewTests {
             check(firstRiskCall >= 0 && overviewCall > firstRiskCall,
                     "serial focused reviews start the targeted risk checks before the overview");
             check(Main.reviewExitCode(focused) == 0 && calls(focused, 2)
-                    && riskPrompt.contains("before the effect") && riskPrompt.contains("runtime/store.py")
+                    && riskPrompt.contains("Trace the changed durable write") && riskPrompt.contains("runtime/store.py")
+                    && !riskPrompt.contains("explicit temporary rejection") && !riskPrompt.contains("ambiguous response")
+                    && !riskPrompt.contains("interruption after the durable write")
                     && riskPrompt.contains("runtime/worker.py") && !riskPrompt.contains("notes.md")
                     && !riskPrompt.contains("## Linked durable-state and external-effect evidence")
                     && riskPrompt.contains("+    return service.trigger()")
@@ -266,6 +278,9 @@ final class AdaptiveReviewTests {
                     "multi-file risk checking retains the producer and side effect together while keeping unrelated scope separate");
             check(riskPrompt.contains("Do not call or request any tools."),
                     "focused requests ask for a complete review from the supplied evidence");
+            check(riskPrompt.contains("<decisions><local-decision><status>INSUFFICIENT_EVIDENCE</status>")
+                    && riskPrompt.contains("<requests>REQUEST_FILE|target|path|all|Specific question</requests></local-decision>"),
+                    "default risk prompts declare the evidence request's parent and eligible decision before invocation");
 
             Path malformedScope = fixture.resolve("focused-first.txt");
             Files.writeString(malformedScope, "<tool_call>No review content</tool_call>");
@@ -288,6 +303,9 @@ final class AdaptiveReviewTests {
                         if not reserve(db):
                             return "skipped"
                         return client.post()
+
+                    def recover_pending(db):
+                        return dispatch(db)
                     """);
             Files.writeString(outbound.resolve("repo.py"), """
                     def claim(db):
@@ -299,7 +317,7 @@ final class AdaptiveReviewTests {
                             return "sent"
                     client = Sender()
                     """);
-            Files.writeString(outbound.resolve("status.py"), "import subprocess\nsubprocess.run(['uptime'])\n");
+            Files.writeString(outbound.resolve("status.py"), "import subprocess\ndef retry_status():\n    subprocess.run(['uptime'])\n");
             Files.writeString(repository.resolve("notes.md"), "The operation is retried.\n");
             git(repository, "add", ".");
             git(repository, "commit", "-qm", "add a replayable dispatch and an independent status operation");
@@ -312,7 +330,8 @@ final class AdaptiveReviewTests {
                     <premise><statement>The claim is persisted before the send.</statement><basis>IMPLEMENTATION</basis>
                     <citations><citation><source>SRC-4</source><lines>2:2</lines></citation></citations></premise>
                     <premise><statement>The retried job is skipped.</statement><basis>OUTCOME</basis>
-                    <citations><citation><source>SRC-2</source><lines>4:5</lines></citation></citations></premise>
+                    <citations><citation><source>SRC-2</source><lines>4:5</lines></citation>
+                    <citation><source>SRC-4</source><lines>2:2</lines></citation></citations></premise>
                     </premises><citations><citation><source>SRC-1</source><lines>2:2</lines></citation></citations>
                     <finding><title>Persisted claim blocks dispatch replay</title><severity>MEDIUM</severity>
                     <path>outbound/driver.py</path><line>5</line><endLine>5</endLine>
@@ -334,7 +353,9 @@ final class AdaptiveReviewTests {
                     && linkedPrompt.substring(linkedStart, remainingStart).contains("outbound/sender.py")
                     && !linkedPrompt.substring(linkedStart, remainingStart).contains("outbound/status.py")
                     && linkedPrompt.substring(remainingStart).contains("outbound/status.py")
-                    && linkedPrompt.contains("For other external effects:")
+                    && linkedPrompt.contains("Trace the effect to its result")
+                    && linkedPrompt.contains("interruption after the durable write")
+                    && !linkedPrompt.contains("explicit temporary rejection") && !linkedPrompt.contains("ambiguous response")
                     && linkedPrompt.contains("new file mode 100644") && !linkedPrompt.contains("+        return \"skipped\"")
                     && linkedPrompt.contains("5 |         return \"skipped\"")
                     && Files.readString(linked.resolve("focused/O-prompt.md")).contains("notes.md"),
@@ -345,6 +366,60 @@ final class AdaptiveReviewTests {
                     && linkedReport.contains("`outbound/driver.py:5`"),
                     "compact diff headers and intact target sources still ground a published cross-file finding\n"
                             + linkedReport);
+
+            String repeated = persistence.replace("Persisted claim blocks dispatch replay", "Repeated dispatch still skips the send")
+                    .replace("Dispatch is interrupted after claiming the job.", "A second worker repeats the dispatch for an existing claim.");
+            Files.writeString(fixture.resolve("persistence.xml"), "<adaptive-review><route>LOCAL</route>"
+                    + "<summary>Two triggers reach the same persisted outcome.</summary><decisions>"
+                    + persistence + repeated + "</decisions></adaptive-review>");
+            String firstVerified = scopedVerification(persistence, "F1-1");
+            String secondVerified = scopedVerification(repeated, "F1-2");
+            Files.writeString(fixture.resolve("persistence-verification-2.xml"), secondVerified);
+            Path batchReply = fixture.resolve("scoped-batch.xml");
+            String firstBatched = firstVerified.replace("<verification>", "<verification id=\"F1-1\">");
+            String secondBatched = secondVerified.replace("<verification>", "<verification id=\"F1-2\">");
+            Files.writeString(batchReply, "<verifications>" + firstBatched + secondBatched + "</verifications>");
+            Path combined = pipeline.run(options(arguments));
+            Path combinedFolder = combined.resolve("focused/F1");
+            check(Main.reviewExitCode(combined) == 0 && calls(combined, 3)
+                    && report(combined).contains("Confirmed defects: 2")
+                    && Files.exists(combinedFolder.resolve("batch-F1-1-response.md"))
+                    && !Files.exists(combinedFolder.resolve("F1-1-prompt.md"))
+                    && !Files.exists(combinedFolder.resolve("F1-2-prompt.md")),
+                    "candidates sharing a decisive outcome citation and evidence view use a single verification call");
+            Files.writeString(batchReply, "<verifications>" + firstBatched
+                    + secondBatched.replace("</verification>", "<requests>Invalid extra field</requests></verification>")
+                    + "</verifications>");
+            Path partialBatch = pipeline.run(options(arguments));
+            Path partialFolder = partialBatch.resolve("focused/F1");
+            check(Main.reviewExitCode(partialBatch) == 0 && calls(partialBatch, 4)
+                    && report(partialBatch).contains("Confirmed defects: 2")
+                    && !Files.exists(partialFolder.resolve("F1-1-prompt.md"))
+                    && Files.exists(partialFolder.resolve("F1-2-response.md"))
+                    && !Files.exists(partialFolder.resolve("batch-F1-1-repair-prompt.md")),
+                    "a malformed peer only falls back for that candidate");
+            pipeline.run(options(arguments, "--resume", partialBatch.toString()));
+            check(calls(partialBatch, 0), "partial batches and their individual follow-ups can be resumed");
+
+            Files.writeString(batchReply, "<verifications>" + firstBatched
+                    + "<verification id=\"F1-2\"><status>REJECTED</status><reason>The cited caller already blocks this trigger.</reason>"
+                    + "<citations><citation><source>SRC-2</source><lines>4:5</lines></citation></citations></verification></verifications>");
+            Path mixed = pipeline.run(options(arguments));
+            check(Main.reviewExitCode(mixed) == 0 && calls(mixed, 3)
+                    && report(mixed).contains("Confirmed defects: 1")
+                    && report(mixed).contains("Persisted claim blocks dispatch replay")
+                    && !report(mixed).contains("Repeated dispatch still skips the send"),
+                    "a supported rejection in a batch leaves the other candidate independently confirmed");
+
+            Files.writeString(batchReply, "<verifications>" + firstBatched);
+            Path truncatedBatch = pipeline.run(options(arguments));
+            var truncatedFolder = truncatedBatch.resolve("focused/F1");
+            check(Main.reviewExitCode(truncatedBatch) == 0 && calls(truncatedBatch, 5)
+                    && report(truncatedBatch).contains("Confirmed defects: 2")
+                    && Files.exists(truncatedFolder.resolve("F1-1-response.md"))
+                    && Files.exists(truncatedFolder.resolve("F1-2-response.md"))
+                    && !Files.exists(truncatedFolder.resolve("batch-F1-1-repair-prompt.md")),
+                    "an incomplete batch envelope falls back to each individual verifier");
 
             Files.writeString(repository.resolve("entrypoint.py"), """
                     from .authorization import request_review
@@ -419,11 +494,129 @@ final class AdaptiveReviewTests {
             check(Main.reviewExitCode(clipped) == 3 && calls(clipped, 1)
                     && report(clipped).contains("## Unreviewed changes") && report(clipped).contains("ratios.py — @@ -1,108 +1,108 @@"),
                     "unshown diff hunks are explicit in an incomplete report at a low budget");
+
+            goCallerContext(repository, pipeline, arguments);
         } finally {
             try (var paths = Files.walk(fixture)) {
                 for (var path : paths.sorted(Comparator.reverseOrder()).toList()) Files.delete(path);
             }
         }
+    }
+
+    private static void goCallerContext(Path repository, ReviewPipeline pipeline, List<String> arguments) throws Exception {
+        Path module = Files.createDirectory(repository.resolve("service"));
+        Path policy = Files.createDirectory(module.resolve("policy"));
+        Path entry = Files.createDirectory(module.resolve("entry"));
+        Files.writeString(module.resolve("go.mod"), "module example.com/service\n\ngo 1.22\n");
+        String guarded = """
+                package policy
+
+                func Authorize(active bool) bool { return active }
+                func Status() bool { return true }
+                """;
+        Path authorization = policy.resolve("check.go");
+        Files.writeString(authorization, guarded);
+        Files.writeString(policy.resolve("local.go"), """
+                package policy
+                func Local(active bool) bool { return Authorize(active) }
+                """);
+        Path router = entry.resolve("router.go");
+        String direct = """
+                package entry
+                import gate "example.com/service/policy"
+                func Handle(active bool) bool {
+                    return gate.Authorize(active)
+                }
+                """;
+        Files.writeString(router, direct.replace("    return gate", "    if !active { return false } // caller guard\n    return gate"));
+        Files.writeString(entry.resolve("noise.go"), """
+                package entry
+                import gate "example.com/service/policy"
+                // gate.Authorize(false) appears only in a comment.
+                func Health() bool { return gate.Status() }
+                """);
+        Path nested = Files.createDirectory(module.resolve("nested"));
+        Files.writeString(nested.resolve("go.mod"), "module example.com/other\n\ngo 1.22\n");
+        Files.writeString(nested.resolve("caller.go"), """
+                package other
+                import gate "example.com/service/policy"
+                func CrossModule(active bool) bool { return gate.Authorize(active) }
+                """);
+        git(repository, "add", "service");
+        git(repository, "commit", "-qm", "add Go policy and callers");
+        Files.writeString(authorization, guarded.replace("return active", "return true"));
+        git(repository, "commit", "-qam", "remove the policy guard");
+        Path protectedRun = pipeline.run(options(arguments));
+        String protectedPrompt = Files.readString(protectedRun.resolve("focused/F1-prompt.md"));
+        check(Main.reviewExitCode(protectedRun) == 0 && calls(protectedRun, 1)
+                && protectedPrompt.contains("Related unchanged implementation: service/entry/router.go, service/policy/local.go.")
+                && protectedPrompt.contains("// caller guard") && !protectedPrompt.contains("service/entry/noise.go")
+                && !protectedPrompt.contains("service/nested/caller.go"),
+                "Go risk checks include direct callers within the pinned module and exclude unrelated imports and nested modules");
+
+        Files.writeString(router, direct);
+        Files.writeString(authorization, guarded);
+        git(repository, "commit", "-qam", "make the unchanged caller unguarded at the comparison base");
+        Files.writeString(authorization, guarded.replace("return active", "return true"));
+        git(repository, "commit", "-qam", "apply the same policy change outside the guarded entry point");
+        Files.writeString(router, direct.replace("    return gate", "    if !active { return false } // WORKTREE_ONLY\n    return gate"));
+        Path unprotectedRun = pipeline.run(options(arguments));
+        String unprotectedPrompt = Files.readString(unprotectedRun.resolve("focused/F1-prompt.md"));
+        check(Main.reviewExitCode(unprotectedRun) == 0 && calls(unprotectedRun, 1)
+                && unprotectedPrompt.contains("return gate.Authorize(active)")
+                && !unprotectedPrompt.contains("// caller guard") && !unprotectedPrompt.contains("WORKTREE_ONLY"),
+                "the same Go diff gets its actual pinned unchanged caller instead of a dirty checkout's guard");
+        Files.writeString(router, direct);
+
+        Path reply = repository.getParent().resolve("focused-json-response.json");
+        String json = """
+                {"type":"result","subtype":"success","is_error":false,"num_turns":2,"structured_output":{
+                  "route":"LOCAL","summary":"Inspect the Go policy changes","decisions":[
+                    {
+                      "status":"CONFIRMED","reason":"The base predicate respected activity.","relation":"INTRODUCED",
+                      "baseline":"Inactive actors received false.","contract":"Inactive actors must be blocked.",
+                      "support":"REACHABLE_FAILURE","premises":[
+                        {"statement":"The target function returns true for every input.","basis":"IMPLEMENTATION","citations":[{"source":"SRC-2","lines":"3:3"}]},
+                        {"statement":"The predicate returns true for inactive actors.","basis":"OUTCOME","citations":[{"source":"SRC-2","lines":"3:3"}]}
+                      ],"citations":[{"source":"SRC-3","lines":"3:3"}],
+                      "finding":{"title":"Go policy ignores activity","severity":"LOW","path":"service/policy/check.go","line":3,"endLine":3,
+                        "trigger":"An inactive actor calls Authorize.","impact":"The predicate returns true for inactive actors.",
+                        "evidence":"The target returns true rather than active.","diffRelation":"This patch removes the predicate's check."}
+                    },
+                    {
+                      "status":"INSUFFICIENT_EVIDENCE","reason":"An independent worker guard may block review execution.",
+                      "finding":{"title":"JSON candidate needs caller evidence","path":"service/policy/check.go","line":3,"endLine":3,
+                        "trigger":"Worker receives an inactive actor.","impact":"A review job runs.",
+                        "evidence":"Worker behavior has not been inspected.","diffRelation":"The predicate now returns true."},
+                      "requests":["REQUEST_FILE|target|review_worker.py|all|Check whether the worker rejects the actor"]
+                    }
+                  ]
+                }}
+                """;
+        Files.writeString(reply, json);
+        Path constrained = pipeline.run(options(arguments, "--focused-json-schema"));
+        check(Main.reviewExitCode(constrained) == 0 && calls(constrained, 2)
+                && report(constrained).contains("### [LOW] Go policy ignores activity")
+                && Files.readString(constrained.resolve("coverage.md")).contains("The worker checks authorization again."),
+                "schema-constrained findings and requests use the same grounding and evidence follow-up as XML");
+        pipeline.run(options(arguments, "--focused-json-schema", "--resume", constrained.toString()));
+        check(calls(constrained, 0), "schema-constrained tasks resume from an identical prompt and response");
+
+        Files.writeString(reply, json.replace("\"route\":\"LOCAL\"", "\"requests\":[],\"route\":\"LOCAL\""));
+        Path invalid = pipeline.run(options(arguments, "--focused-json-schema"));
+        check(Main.reviewExitCode(invalid) == 3 && calls(invalid, 1)
+                && !Files.exists(invalid.resolve("focused/F1-repair-prompt.md")),
+                "a response violating the structured envelope fails without a model format repair");
+
+        Files.writeString(reply, """
+                {"type":"result","subtype":"error_max_structured_output_retries","is_error":true,"num_turns":6}
+                """);
+        Files.createFile(repository.getParent().resolve("focused-json-fail"));
+        Path nativeFailure = pipeline.run(options(arguments, "--focused-json-schema"));
+        check(Main.reviewExitCode(nativeFailure) == 3 && calls(nativeFailure, 1)
+                && Files.readString(nativeFailure.resolve("focused/F1-state.properties")).contains("failureKind=STRUCTURED_OUTPUT")
+                && !Files.exists(nativeFailure.resolve("focused/F1-repair-prompt.md")),
+                "native schema failures retain their own status without another formatting request");
     }
 
     private static void scopedProof() throws Exception {

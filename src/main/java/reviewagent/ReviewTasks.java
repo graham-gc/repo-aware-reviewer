@@ -22,8 +22,9 @@ final class ReviewTasks {
         default boolean allowOutputCorrection() { return true; }
     }
 
-    record Task(String id, String prompt, Validator validator, String model) {
+    record Task(String id, String prompt, Validator validator, String model, String schema) {
         Task(String id, String prompt, Validator validator) { this(id, prompt, validator, null); }
+        Task(String id, String prompt, Validator validator, String model) { this(id, prompt, validator, model, null); }
     }
 
     record Outcome(String response, String error, String failureKind) {
@@ -69,7 +70,7 @@ final class ReviewTasks {
                             return new Reply(task.id(), new Outcome(null, "Blocked by a global failure", "GLOBAL_FAILURE"));
                         }
                         state(directory, task, "RUNNING", "");
-                        try (var budget = agent.task(task.model())) {
+                        try (var budget = agent.task(task.model(), task.schema())) {
                             String response = invoke(task, agent, directory, resume);
                             Files.deleteIfExists(directory.resolve(task.id() + "-error.txt"));
                             state(directory, task, "SUCCEEDED", "");
@@ -196,7 +197,7 @@ final class ReviewTasks {
                 boolean quotation = invalid instanceof SourceQuotationException;
                 boolean decision = invalid instanceof ReviewDecisionException;
                 String kind = quotation ? "quote-repair" : decision ? "decision-repair" : "repair";
-                boolean correct = task.validator().allowOutputCorrection();
+                boolean correct = task.validator().allowOutputCorrection() && (task.schema() == null || quotation || decision);
                 if (!correct || !attempted.add(kind)) {
                     throw new InvalidReviewResponseException("Task " + task.id() + " returned invalid structured output"
                             + (correct ? " after bounded output correction" : "") + ": "

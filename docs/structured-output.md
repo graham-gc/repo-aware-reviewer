@@ -1,6 +1,12 @@
 # Structured response handling
 
-The CLI treats model output as untrusted serialization. A readable XML tree does not establish source accuracy or review correctness.
+Each model task declares its response format in the request. Default risk prompts show where evidence requests belong and which verdict and proof values apply. The CLI validates the result against the review protocol and the pinned evidence.
+
+## JSON Schema pilot
+
+Structured review tasks can attach a schema to the model invocation. With `--focused-json-schema`, the initial risk checks send `--output-format json` and the packaged `focused-response.schema.json` to Claude Code. The schema puts evidence requests inside an insufficient-evidence decision. The CLI reads a successful `structured_output` envelope and applies the existing review, citation, and publication rules. If Claude Code exhausts its own structured output attempts, the reviewer records the task failure without launching another format repair.
+
+This opt-in covers the initial risk scopes. The overview, local and documentation reviews, and independent verification use the existing XML protocol. Keep the flag on resume. For a matched comparison, review the same pinned change with and without the flag. Compare completion, citation-backed findings, CLI invocations, and Claude Code's reported `num_turns` across initial review, corrections, and verification. A CLI invocation can span multiple turns.
 
 ## Boundaries
 

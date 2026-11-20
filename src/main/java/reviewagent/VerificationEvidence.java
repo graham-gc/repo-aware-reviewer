@@ -79,7 +79,7 @@ record VerificationEvidence(EvidenceBundle bundle, EvidenceIndex index, int tota
         return own.length() >= 4 && (lower.contains("test") || lower.contains("spec"))
                 && name.toLowerCase(java.util.Locale.ROOT).contains(own.toLowerCase(java.util.Locale.ROOT));
     }
-    private static boolean mentioned(String text, String token) {
+    static boolean mentioned(String text, String token) {
         if (token.isEmpty()) return false;
         int offset = 0;
         while ((offset = text.indexOf(token, offset)) >= 0) {

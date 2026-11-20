@@ -99,9 +99,15 @@ REQUEST_LANGUAGE|target|language-id|tracked/context/file|resource|selector|Why t
 
 `base` and `target` are resolved by the framework. The provider defines its resource and selector syntax. All file and language requests share `--max-supplemental-requests` and the supplemental byte budget across stages and rounds. Repeated requests are not retried merely because their reason changes. Unavailable material remains a recorded gap. Java retains `REQUEST_MAVEN` as a legacy alias.
 
+## Java caller evidence
+
+A scoped risk check can include unchanged Java callers of edited top-level methods when the baseline and target source identify the changed declaration. The resolver recognizes explicit static imports, class-qualified calls and receivers with a directly declared type. A JDK parses Java syntax without compiling the reviewed project. The review checks the actual type, overload, module and reachability before treating a caller as proof.
+
 ## Go behavior
 
 Go support is implemented in Java and does not require an installed Go toolchain. It provides lexical declaration extraction, package/file indexes, import-consumer lookup, and offline dependency source evidence. It does not provide compiler type checking, automatic call-graph construction, cgo expansion, or standard-library source resolution.
+
+A scoped risk check can include unchanged callers of an edited package function when pinned baseline and target source identify the edit. It recognizes direct calls in the same package and qualified calls through the exact import path in the same tracked module. These are navigation hints. The review still checks build constraints, name binding, and reachable behavior before relying on a caller.
 
 Examples:
 

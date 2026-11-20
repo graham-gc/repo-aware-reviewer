@@ -26,14 +26,14 @@ final class ReviewSchema {
     static final Set<String> LOCAL_DECISION = Set.of(
             "status", "reason", "nextCheck", "relation", "baseline", "contract", "support", "premises", "citations", "finding", "requests");
     private static final Set<String> LISTS = Set.of("findings", "premises", "citations", "assessment", "candidate-groups",
-            "finding-groups", "group", "decisions", "doc-findings");
+            "finding-groups", "group", "decisions", "doc-findings", "verifications");
     private static final Map<String, Set<String>> CHILDREN = Map.ofEntries(
             Map.entry("findings", Set.of("finding")), Map.entry("finding", findingChildren()),
             Map.entry("adaptive-review", ADAPTIVE_REVIEW), Map.entry("decisions", Set.of("local-decision")),
             Map.entry("documentation-review", DOCUMENTATION_REVIEW), Map.entry("doc-findings", Set.of("doc-finding")),
             Map.entry("doc-finding", DOCUMENTATION_FINDING),
             Map.entry("local-decision", LOCAL_DECISION),
-            Map.entry("verification", VERIFICATION), Map.entry("premises", Set.of("premise")),
+            Map.entry("verification", VERIFICATION), Map.entry("verifications", Set.of("verification")), Map.entry("premises", Set.of("premise")),
             Map.entry("premise", Set.of("statement", "basis", "citations")), Map.entry("citations", Set.of("citation")),
             Map.entry("citation", Set.of("source", "quote", "lines")), Map.entry("assessment", Set.of("item")),
             Map.entry("item", ASSESSMENT_ITEM), Map.entry("candidate-groups", Set.of("group")),

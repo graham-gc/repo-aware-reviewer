@@ -38,14 +38,19 @@ final class AgentRunner {
     }
 
     final class TaskScope implements AutoCloseable {
-        private TaskScope(String model) {
+        private TaskScope(String model, String schema) {
             if (taskBudget.get() != null) throw new IllegalStateException("Nested agent task");
-            taskBudget.set(new Budget(commandForModel(model)));
+            var selected = commandForModel(model);
+            if (schema != null) {
+                selected = new ArrayList<>(selected);
+                selected.addAll(List.of("--output-format", "json", "--json-schema", schema));
+            }
+            taskBudget.set(new Budget(selected));
         }
         @Override public void close() { taskBudget.remove(); }
         int calls() { return taskBudget.get().calls; }
     }
-    TaskScope task(String model) { return new TaskScope(model); }
+    TaskScope task(String model, String schema) { return new TaskScope(model, schema); }
 
     private List<String> commandForModel(String model) {
         if (model == null) return command;
@@ -125,7 +130,7 @@ final class AgentRunner {
         try {
             CommandResult result = executor.run(command, workingDirectory, prompt, allowed, stdout, stderr);
             exit = result.exitCode();
-            if (exit != 0) throw commandFailure(exit, result.stderr());
+            if (exit != 0) throw commandFailure(result, command.contains("--json-schema"));
             String response;
             try { response = result.strictUtf8Stdout(); }
             catch (CharacterCodingException invalid) {
@@ -201,8 +206,19 @@ final class AgentRunner {
         }
     }
 
-    private static AgentCallException commandFailure(int exit, String stderr) {
-        String text = stderr.toLowerCase(java.util.Locale.ROOT);
+    private static AgentCallException commandFailure(CommandResult result, boolean structured) {
+        if (structured) {
+            try {
+                var envelope = JsonReader.object(result.strictUtf8Stdout());
+                if ("result".equals(envelope.get("type")) && Boolean.TRUE.equals(envelope.get("is_error"))
+                        && "error_max_structured_output_retries".equals(envelope.get("subtype")))
+                    return new AgentCallException(AgentCallException.Kind.STRUCTURED_OUTPUT,
+                            "The model command exhausted its structured output attempts; see stdout log");
+            } catch (IOException unreadable) {
+                // Preserve normal command diagnostics when there is no recognized failure envelope.
+            }
+        }
+        String text = result.stderr().toLowerCase(java.util.Locale.ROOT);
         AgentCallException.Kind kind;
         if (text.matches("(?s).*(?:\\bhttp(?: status)?[ :]+(?:401|403)\\b|invalid[_ ]api[_ ]key|authentication failed|not authenticated).*"))
             kind = AgentCallException.Kind.CONFIGURATION;
@@ -211,7 +227,7 @@ final class AgentRunner {
         else if (text.matches("(?s).*(?:\\b(?:http(?: status)?|status(?: code)?)[ :=]+(?:429|502|503|504)\\b|econnreset|eai_again|connection reset by peer|temporarily unavailable).*"))
             kind = AgentCallException.Kind.TRANSIENT;
         else kind = AgentCallException.Kind.COMMAND_EXIT;
-        return new AgentCallException(kind, "Agent command failed with exit code " + exit + " (" + kind + "); see stderr log");
+        return new AgentCallException(kind, "Agent command failed with exit code " + result.exitCode() + " (" + kind + "); see stderr log");
     }
 
     static String validateResponse(String response) throws IOException {

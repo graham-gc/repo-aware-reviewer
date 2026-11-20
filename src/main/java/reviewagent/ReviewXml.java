@@ -111,6 +111,14 @@ final class ReviewXml {
     }
 
     private static XmlBlock strict(String response, String rootName) throws IOException {
+        return parseEnvelope(response, rootName, true);
+    }
+
+    static XmlBlock xmlEnvelope(String response, String rootName) throws IOException {
+        return parseEnvelope(response, rootName, false);
+    }
+
+    private static XmlBlock parseEnvelope(String response, String rootName, boolean validateTree) throws IOException {
         Span span = rootSpan(response, rootName);
         String content = response.substring(span.start(), span.end());
         Span envelope = envelope(response, span);
@@ -134,8 +142,8 @@ final class ReviewXml {
             if (!root.getTagName().equals(rootName)) {
                 throw new IOException("Unexpected review response root");
             }
-            var normalizations = ReviewSchema.normalizeAdvisories(root);
-            ReviewSchema.validate(root);
+            var normalizations = validateTree ? ReviewSchema.normalizeAdvisories(root) : List.<String>of();
+            if (validateTree) ReviewSchema.validate(root);
             XmlStructureRepair.checkTextBoundaries(content);
             return new XmlBlock(root, response.substring(0, envelope.start()) + response.substring(envelope.end()), normalizations);
         } catch (SAXParseException invalid) {

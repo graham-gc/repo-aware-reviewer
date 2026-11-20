@@ -1,6 +1,8 @@
 package reviewagent;
 
+import java.util.ArrayList;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.Map;
 import java.util.LinkedHashMap;
@@ -123,6 +125,42 @@ final class EvidenceSession {
     }
 
     String markdown() { return markdown.toString(); }
+
+    Set<String> supplyCollected(String requester, List<EvidenceSource> sources, int maxBytes) {
+        int remaining = evidence.supplementBudget() - EvidenceText.bytes(markdown.toString());
+        var known = catalog();
+        var added = new ArrayList<EvidenceSource>();
+        var supplied = new ArrayList<EvidenceSource>();
+        var ids = new LinkedHashSet<String>();
+        for (var source : sources) {
+            String block = source.markdown();
+            int bytes = EvidenceText.bytes(block);
+            boolean fresh = known.source(source.id()) == null;
+            if (bytes > maxBytes || fresh && bytes > remaining || !ids.add(source.id())) continue;
+            if (fresh) {
+                markdown.append(block);
+                remaining -= bytes;
+                added.add(source);
+            }
+            maxBytes -= bytes;
+            supplied.add(source);
+        }
+        if (!added.isEmpty()) catalog = catalog.plus(new EvidenceCatalog(added, true));
+        if (!supplied.isEmpty()) {
+            coverage.append("- Expanded ").append(requester).append(" with collected implementation: ")
+                    .append(supplied.stream().map(source -> EvidenceText.oneLine(source.path())).distinct()
+                            .collect(java.util.stream.Collectors.joining(", "))).append(".\n");
+        }
+        return java.util.Collections.unmodifiableSet(ids);
+    }
+
+    void recordVerificationBatch(String task, List<String> candidates, Set<String> accepted) {
+        coverage.append("- Shared verification [").append(task).append("](").append(task)
+                .append("-state.properties): ").append(String.join(", ", candidates)).append(". Validated in batch: ")
+                .append(accepted.isEmpty() ? "none" : String.join(", ", accepted))
+                .append(". Remaining candidates go to individual verification.\n");
+    }
+
     String coverage() { return coverage.toString(); }
     String lastCoverage() { return lastCoverage; }
     EvidenceIndex index() { return new EvidenceIndex(catalog()); }

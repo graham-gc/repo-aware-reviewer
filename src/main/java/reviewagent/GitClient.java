@@ -124,11 +124,14 @@ final class GitClient {
 
     List<String> filesContaining(String revision, String directory, List<String> literals)
             throws IOException, InterruptedException {
+        return filesMatching(revision, literals, directory.equals(".") ? ":(top,glob)*" : ":(top,literal)" + directory + "/");
+    }
+
+    List<String> filesMatching(String revision, List<String> literals, String pathspec) throws IOException, InterruptedException {
         var command = new ArrayList<>(List.of("git", "grep", "-l", "-z", "-F", "--full-name", "--no-textconv",
                 "--no-recurse-submodules"));
         for (String literal : literals) command.addAll(List.of("-e", literal));
-        command.addAll(List.of(revision, "--", directory.equals(".") ? ":(top,glob)*"
-                : ":(top,literal)" + directory + "/"));
+        command.addAll(List.of(revision, "--", pathspec));
         var result = execute(command);
         if (result.exitCode() != 0) return List.of();
         String prefix = revision + ":";

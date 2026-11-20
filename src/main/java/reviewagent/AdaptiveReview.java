@@ -10,6 +10,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
+import org.w3c.dom.Element;
 
 /** Runs one grounded review for a bounded change and follows up only on candidates with newly available evidence. */
 final class AdaptiveReview {
@@ -126,7 +127,7 @@ final class AdaptiveReview {
         var quality = new ReviewQuality(options, evidence, session, prompts, agent, directory, progress, stages);
         var refined = delivered.isEmpty() ? List.<ReviewOutput.Decision>of() : quality.verifyScoped(
                 preliminary.stream().filter(decision -> delivered.containsKey(decision.verdict().candidate().id())).toList(), delivered,
-                "adaptive/verification", "");
+                "adaptive/verification", "", false);
         if (refined.stream().anyMatch(AdaptiveReview::requiresDeep)) return "Follow-up evidence identified broader impact";
         var latest = ReviewQuality.latest(preliminary, refined);
         var language = OutputLanguage.parse(options.language());
@@ -169,7 +170,11 @@ final class AdaptiveReview {
     static Response parse(String reply, EvidenceBundle evidence, EvidenceIndex index, String prefix, boolean scoped) throws IOException {
         var block = xml(reply, "adaptive-review");
         if (!block.remainder().isBlank()) throw new IOException("Return only the adaptive-review document");
-        var fields = fields(block.root(), ReviewSchema.ADAPTIVE_REVIEW);
+        return parseFields(block.root(), evidence, index, prefix, scoped);
+    }
+
+    static Response parseFields(Element root, EvidenceBundle evidence, EvidenceIndex index, String prefix, boolean scoped) throws IOException {
+        var fields = fields(root, ReviewSchema.ADAPTIVE_REVIEW);
         String route = text(fields, "route");
         if (!Set.of("LOCAL", "DEEP").contains(route)) throw new IOException("Use route LOCAL or DEEP");
         String summary = text(fields, "summary");
@@ -308,11 +313,11 @@ final class AdaptiveReview {
                 REQUEST_FILE|target|path|all|Question this source can answer (base is also allowed).
                 Omit disproved candidates. For DEEP, supply a summary and <decisions/>.
 
-                %sEVIDENCE INVENTORY
-                %s
-                PINNED EVIDENCE
-                %s
-                """.formatted(language.code(), EvidenceIndex.LINE_CITATION_GUIDANCE, index.inventory(),
-                index.numberedMarkdown(evidence.markdown()));
+                %s""".formatted(language.code(), EvidenceIndex.LINE_CITATION_GUIDANCE + promptEvidence(evidence, index));
+    }
+
+    static String promptEvidence(EvidenceBundle evidence, EvidenceIndex index) {
+        return "EVIDENCE INVENTORY\n" + index.inventory() + "\nPINNED EVIDENCE\n"
+                + index.numberedMarkdown(evidence.markdown()) + "\n";
     }
 }

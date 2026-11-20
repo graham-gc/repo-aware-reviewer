@@ -92,17 +92,20 @@ final class ReviewPipeline {
         write(runDirectory.resolve("discover-prompt.md"), discoveryPrompt);
         boolean renderLocally = requirement == null && knowledge == null;
         List<ReviewTasks.Task> discoveries = new ArrayList<>();
-        for (int i = 0; i < PromptFactory.REVIEW_FOCUSES.size(); i++) {
+        var focuses = DiscoveryEvidence.Focus.values();
+        for (int i = 0; i < focuses.length; i++) {
             String reviewer = "R" + (i + 1);
             String model = options.discoveryModels().isEmpty() ? null : options.discoveryModels().get(i);
-            String focus = PromptFactory.REVIEW_FOCUSES.get(i);
+            var focus = focuses[i];
             boolean requestSummary = renderLocally && i == 0;
-            String prompt = prompts.independentDiscovery(evidence, focus, requestSummary);
-            Path savedPrompt = runDirectory.resolve("discovery/R1-prompt.md");
-            if (requestSummary && resume && Files.isRegularFile(savedPrompt)) {
-                // A checkpoint created before the optional summary can still supply valid findings.
+            var view = DiscoveryEvidence.forFocus(evidence, focus);
+            String prompt = prompts.independentDiscovery(view, focus.instructions, requestSummary);
+            Path savedPrompt = runDirectory.resolve("discovery").resolve(reviewer + "-prompt.md");
+            if (resume && Files.isRegularFile(savedPrompt)) {
+                // Preserve checkpoints with the former shared view or before the optional summary.
                 String saved = Files.readString(savedPrompt, StandardCharsets.UTF_8);
-                if (!saved.equals(prompt) && saved.equals(prompts.independentDiscovery(evidence, focus))) prompt = saved;
+                if (!saved.equals(prompt) && (view != evidence && saved.equals(prompts.independentDiscovery(evidence, focus.instructions,
+                        requestSummary)) || requestSummary && saved.equals(prompts.independentDiscovery(evidence, focus.instructions)))) prompt = saved;
             }
             discoveries.add(new ReviewTasks.Task(reviewer, prompt,
                     reply -> ReviewOutput.discovery(reply, reviewer, evidence.changedFiles()), model));
@@ -400,6 +403,7 @@ final class ReviewPipeline {
                     + "- Baseline remote branch: `" + RemoteBaseline.branchRef(options.base()) + "`\n")
                 + (options.discoveryModels().isEmpty() ? "" : "- Discovery models (R1, R2, R3): "
                     + String.join(", ", options.discoveryModels()) + "\n")
+                + (options.focusedJsonSchema() ? "- Focused risk response: JSON Schema\n" : "")
                 + "- Language modules: " + LanguageRegistry.defaults().modules().stream().map(LanguageModule::id)
                         .collect(java.util.stream.Collectors.joining(", ")) + "\n"
                 + "- Language capabilities: " + LanguageRegistry.defaults().capabilitySummary() + "\n"

@@ -10,7 +10,8 @@ record CliOptions(Path repo, String commit, String branch, String base, String b
                   String agentCommand, List<String> agentArgs, List<String> discoveryModels,
                   boolean prepareOnly, int maxEvidenceBytes, int maxSupplementalRequests, int maxKnowledgeQueries,
                   int reviewParallelism, Duration agentTimeout, String language, java.util.Map<String, Path> languageCaches,
-                  AgentPolicy agentPolicy, VerificationEvidenceMode verificationEvidence, ReviewMode reviewMode) {
+                  AgentPolicy agentPolicy, VerificationEvidenceMode verificationEvidence, ReviewMode reviewMode,
+                  boolean focusedJsonSchema) {
     enum ReviewMode {
         AUTO, DEEP;
 
@@ -71,6 +72,7 @@ record CliOptions(Path repo, String commit, String branch, String base, String b
         int maxKnowledgeQueries = 0;
         int reviewParallelism = 3;
         ReviewMode reviewMode = ReviewMode.AUTO;
+        boolean focusedJsonSchema = false;
         VerificationEvidenceMode verificationEvidence = VerificationEvidenceMode.SCOPED;
         Duration timeout = Duration.ofMinutes(15);
         Duration taskTimeout = null;
@@ -110,6 +112,7 @@ record CliOptions(Path repo, String commit, String branch, String base, String b
                 case "--verification-evidence" -> verificationEvidence = VerificationEvidenceMode.parse(value(args, ++i, "--verification-evidence"));
                 case "--review-parallelism" -> reviewParallelism = Integer.parseInt(value(args, ++i, "--review-parallelism"));
                 case "--review-mode" -> reviewMode = ReviewMode.parse(value(args, ++i, "--review-mode"));
+                case "--focused-json-schema" -> focusedJsonSchema = true;
                 case "--agent-timeout-seconds" -> timeout = Duration.ofSeconds(Long.parseLong(value(args, ++i, "--agent-timeout-seconds")));
                 case "--agent-retries" -> agentRetries = Integer.parseInt(value(args, ++i, "--agent-retries"));
                 case "--agent-max-calls-per-task" -> agentMaxCalls = Integer.parseInt(value(args, ++i, "--agent-max-calls-per-task"));
@@ -152,9 +155,13 @@ record CliOptions(Path repo, String commit, String branch, String base, String b
         if (fetchTimeout.isZero() || fetchTimeout.isNegative()) {
             throw new IllegalArgumentException("--fetch-timeout-seconds must be positive");
         }
-        if (!discoveryModels.isEmpty() && discoveryModels.size() != PromptFactory.REVIEW_FOCUSES.size())
+        int discoveryCount = DiscoveryEvidence.Focus.values().length;
+        if (!discoveryModels.isEmpty() && discoveryModels.size() != discoveryCount)
             throw new IllegalArgumentException("Specify --discovery-model once for each of the "
-                    + PromptFactory.REVIEW_FOCUSES.size() + " initial reviewers, in order");
+                    + discoveryCount + " initial reviewers, in order");
+        if (focusedJsonSchema && agentArgs.stream().anyMatch(arg -> arg.equals("--output-format") || arg.equals("--json-schema")
+                || arg.startsWith("--output-format=") || arg.startsWith("--json-schema=")))
+            throw new IllegalArgumentException("--focused-json-schema supplies --output-format and --json-schema to the agent command");
         if (!prepareOnly && agentCommand == null) {
             agentCommand = "claude";
             agentArgs.addAll(AgentRunner.defaultArguments());
@@ -177,7 +184,7 @@ record CliOptions(Path repo, String commit, String branch, String base, String b
                 maxSupplementalRequests, maxKnowledgeQueries, reviewParallelism, timeout, language,
                 java.util.Collections.unmodifiableMap(languageCaches),
                 new AgentPolicy(agentRetries, agentMaxCalls, taskTimeout == null ? timeout.multipliedBy(2) : taskTimeout, Duration.ofSeconds(1)),
-                verificationEvidence, reviewMode);
+                verificationEvidence, reviewMode, focusedJsonSchema);
     }
 
     private static Path absolute(Path path) {
