@@ -122,6 +122,20 @@ final class GitClient {
         return run("cat-file", "blob", objectId);
     }
 
+    List<String> filesContaining(String revision, String directory, List<String> literals)
+            throws IOException, InterruptedException {
+        var command = new ArrayList<>(List.of("git", "grep", "-l", "-z", "-F", "--full-name", "--no-textconv",
+                "--no-recurse-submodules"));
+        for (String literal : literals) command.addAll(List.of("-e", literal));
+        command.addAll(List.of(revision, "--", directory.equals(".") ? ":(top,glob)*"
+                : ":(top,literal)" + directory + "/"));
+        var result = execute(command);
+        if (result.exitCode() != 0) return List.of();
+        String prefix = revision + ":";
+        return Arrays.stream(result.stdout().split("\0")).filter(path -> path.startsWith(prefix))
+                .map(path -> path.substring(prefix.length())).toList();
+    }
+
     boolean existsAt(String commit, String path) throws IOException, InterruptedException {
         return execute(List.of("git", "cat-file", "-e", commit + ":" + path)).exitCode() == 0;
     }

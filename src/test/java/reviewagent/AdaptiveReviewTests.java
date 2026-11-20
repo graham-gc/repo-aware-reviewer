@@ -54,12 +54,17 @@ final class AdaptiveReviewTests {
                       'Review the supplied scope'*)
                         if [ -f "$root/focused-first.txt" ]; then cat "$root/focused-first.txt"; exit; fi
                         case "$prompt" in
+                          *'## Linked durable-state and external-effect evidence'*) cat "$root/persistence.xml" ;;
                           *'<basis>OUTCOME</basis>'*'queue.schedule(actor)'*) cat "$root/scoped.xml" ;;
                           *) printf '<adaptive-review><route>LOCAL</route><summary>Checked the supplied scope.</summary><decisions/></adaptive-review>' ;;
                         esac ;;
                       'You are the independent candidate verification'*)
                         case "$prompt" in
                           *'result = average([])'*'THE NEW EVIDENCE'*) cat "$root/verified.xml" ;;
+                          *'Persisted claim blocks dispatch replay'*) cat "$root/persistence-verification.xml" ;;
+                          *'Attempts to queue a job after the initial check'*) cat "$root/queue-verification.xml" ;;
+                          *'Rejects a permitted actor'*)
+                            printf '<verification><status>REJECTED</status><reason>The permitted branch queues the job.</reason></verification>' ;;
                           *'return "skipped"'*'<basis>OUTCOME</basis>'*'THE NEW EVIDENCE'*)
                             printf '<verification><status>REJECTED</status><reason>The worker checks authorization again.</reason></verification>' ;;
                           *) exit 92 ;;
@@ -254,6 +259,8 @@ final class AdaptiveReviewTests {
             check(Main.reviewExitCode(focused) == 0 && calls(focused, 2)
                     && riskPrompt.contains("before the effect") && riskPrompt.contains("runtime/store.py")
                     && riskPrompt.contains("runtime/worker.py") && !riskPrompt.contains("notes.md")
+                    && !riskPrompt.contains("## Linked durable-state and external-effect evidence")
+                    && riskPrompt.contains("+    return service.trigger()")
                     && overview.contains("notes.md") && overview.contains("ops/deploy.yaml") && !overview.contains("runtime/worker.py")
                     && !Files.exists(focused.resolve("discovery")),
                     "multi-file risk checking retains the producer and side effect together while keeping unrelated scope separate");
@@ -273,6 +280,81 @@ final class AdaptiveReviewTests {
                     "a tool-only reply retries the review from its evidence and an unrecovered scope counts as unfinished");
             Files.delete(malformedScope);
 
+            Path outbound = Files.createDirectory(repository.resolve("outbound"));
+            Files.writeString(outbound.resolve("driver.py"), """
+                    from .repo import claim as reserve
+                    from .sender import client
+                    def dispatch(db):
+                        if not reserve(db):
+                            return "skipped"
+                        return client.post()
+                    """);
+            Files.writeString(outbound.resolve("repo.py"), """
+                    def claim(db):
+                        return db.execute("INSERT INTO jobs VALUES (1) ON CONFLICT DO NOTHING").rowcount
+                    """);
+            Files.writeString(outbound.resolve("sender.py"), """
+                    class Sender:
+                        def post(self):
+                            return "sent"
+                    client = Sender()
+                    """);
+            Files.writeString(outbound.resolve("status.py"), "import subprocess\nsubprocess.run(['uptime'])\n");
+            Files.writeString(repository.resolve("notes.md"), "The operation is retried.\n");
+            git(repository, "add", ".");
+            git(repository, "commit", "-qm", "add a replayable dispatch and an independent status operation");
+            String persistence = """
+                    <local-decision>
+                    <status>CONFIRMED</status><reason>The persisted claim blocks replay.</reason>
+                    <relation>INTRODUCED</relation><baseline>This entry point is new.</baseline>
+                    <contract>Retry must dispatch a job whose initial dispatch was interrupted.</contract>
+                    <support>REACHABLE_FAILURE</support><premises>
+                    <premise><statement>The claim is persisted before the send.</statement><basis>IMPLEMENTATION</basis>
+                    <citations><citation><source>SRC-4</source><lines>2:2</lines></citation></citations></premise>
+                    <premise><statement>The retried job is skipped.</statement><basis>OUTCOME</basis>
+                    <citations><citation><source>SRC-2</source><lines>4:5</lines></citation></citations></premise>
+                    </premises><citations><citation><source>SRC-1</source><lines>2:2</lines></citation></citations>
+                    <finding><title>Persisted claim blocks dispatch replay</title><severity>MEDIUM</severity>
+                    <path>outbound/driver.py</path><line>5</line><endLine>5</endLine>
+                    <trigger>Dispatch is interrupted after claiming the job.</trigger>
+                    <impact>The retried job is skipped.</impact><evidence>Duplicate claims return zero.</evidence>
+                    <diffRelation>The patch introduces the dispatch entry point.</diffRelation></finding>
+                    </local-decision>
+                    """;
+            Files.writeString(fixture.resolve("persistence.xml"), "<adaptive-review><route>LOCAL</route>"
+                    + "<summary>Checked retry behavior.</summary><decisions>" + persistence + "</decisions></adaptive-review>");
+            Files.writeString(fixture.resolve("persistence-verification.xml"), scopedVerification(persistence, "F1-1"));
+            Path linked = pipeline.run(options(arguments));
+            String linkedPrompt = Files.readString(linked.resolve("focused/F1-prompt.md"));
+            int linkedStart = linkedPrompt.indexOf("## Linked durable-state and external-effect evidence");
+            int remainingStart = linkedPrompt.indexOf("## Other changed implementation in this scope");
+            check(linkedStart >= 0 && remainingStart > linkedStart
+                    && linkedPrompt.substring(linkedStart, remainingStart).contains("outbound/driver.py")
+                    && linkedPrompt.substring(linkedStart, remainingStart).contains("outbound/repo.py")
+                    && linkedPrompt.substring(linkedStart, remainingStart).contains("outbound/sender.py")
+                    && !linkedPrompt.substring(linkedStart, remainingStart).contains("outbound/status.py")
+                    && linkedPrompt.substring(remainingStart).contains("outbound/status.py")
+                    && linkedPrompt.contains("For other external effects:")
+                    && linkedPrompt.contains("new file mode 100644") && !linkedPrompt.contains("+        return \"skipped\"")
+                    && linkedPrompt.contains("5 |         return \"skipped\"")
+                    && Files.readString(linked.resolve("focused/O-prompt.md")).contains("notes.md"),
+                    "the behavior, its linked sources and independent changed code are covered without copying new file bodies");
+            String linkedReport = report(linked);
+            check(Main.reviewExitCode(linked) == 0 && calls(linked, 3)
+                    && linkedReport.contains("Persisted claim blocks dispatch replay")
+                    && linkedReport.contains("`outbound/driver.py:5`"),
+                    "compact diff headers and intact target sources still ground a published cross-file finding\n"
+                            + linkedReport);
+
+            Files.writeString(repository.resolve("entrypoint.py"), """
+                    from .authorization import request_review
+                    def route(actor, queue):
+                        if not actor.can_review:
+                            return "blocked by caller"
+                        return request_review(actor, queue)
+                    """);
+            git(repository, "add", "entrypoint.py");
+            git(repository, "commit", "-qm", "record the existing calling context");
             Files.writeString(repository.resolve("authorization.py"), """
                     def request_review(actor, queue):
                         if authorize(actor):
@@ -285,29 +367,58 @@ final class AdaptiveReviewTests {
             String queue = scopedFinding("CONFIRMED", "Attempts to queue a job after the initial check", "The scheduling call is made.", outcome);
             String publication = scopedFinding("CONFIRMED", "Publishes a review after revocation",
                     "A review comment is published.", outcome);
+            String opposite = scopedFinding("CONFIRMED", "Rejects a permitted actor", "A permitted actor is rejected.",
+                    outcome.replace("The scheduling call is made.", "A permitted actor is rejected."));
             String execution = scopedFinding("INSUFFICIENT_EVIDENCE", "Runs a review after revocation",
                     "A review job runs.", "").replace("<severity>HIGH</severity>", "").replace("</local-decision>",
                     "<requests>REQUEST_FILE|target|review_worker.py|all|Check whether the worker authorizes again</requests></local-decision>");
+            Files.writeString(fixture.resolve("queue-verification.xml"), scopedVerification(queue, "F1-1")
+                    .replace("<finding", "<citations><citation><source>SRC-1</source><lines>2:2</lines></citation></citations><finding"));
             Files.writeString(fixture.resolve("scoped.xml"), "<adaptive-review><route>LOCAL</route>"
                     + "<summary>The worker stops before the claim is written and the report is published after revocation.</summary>"
-                    + "<decisions>" + queue + publication + execution
+                    + "<decisions>" + queue + publication + execution + opposite
                     + "</decisions><nextCheck>Root advice without a candidate.</nextCheck></adaptive-review>");
             Path limited = pipeline.run(options(arguments));
             String finalReport = report(limited);
             String summary = finalReport.substring(0, finalReport.indexOf("# Findings"));
             String published = Files.readString(limited.resolve("verified-findings.md"));
             String coverage = Files.readString(limited.resolve("coverage.md"));
-            check(Main.reviewExitCode(limited) == 0 && calls(limited, 2)
+            check(Main.reviewExitCode(limited) == 0 && calls(limited, 4)
                     && summary.contains("Confirmed defects: 1; review-required items: 1; unfinished checks: 0")
                     && summary.contains("Attempts to queue a job after the initial check") && !summary.contains("published after revocation")
                     && !summary.contains("before the claim")
                     && published.contains("### [MEDIUM] Attempts to queue a job after the initial check")
                     && !published.contains("Publishes a review") && finalReport.contains("stated impact has no explicit supporting outcome citation")
                     && coverage.contains("Severity limited to MEDIUM") && coverage.contains("The worker checks authorization again.")
+                    && coverage.contains("The permitted branch queues the job.") && !published.contains("Rejects a permitted actor")
+                    && Files.readString(limited.resolve("focused/F1-prompt.md")).contains("return \"blocked by caller\"")
                     && Files.readString(limited.resolve("focused/F1-normalization.log")).contains("without a model severity")
                     && Files.readString(limited.resolve("focused/F1-normalization.log")).contains("Omitted misplaced advisory")
                     && !finalReport.contains("Root advice without a candidate."),
                     "scoped decisions remain grounded with an unrated candidate or an unassigned advisory");
+
+            String comments = ("# original text for an early hunk large enough to exceed a small review budget\n").repeat(100);
+            String separator = "# unchanged context\n".repeat(24);
+            Path ratios = repository.resolve("ratios.py");
+            Path labels = repository.resolve("labels.py");
+            Files.writeString(ratios, comments + separator + BEFORE);
+            Files.writeString(labels, "LABEL = 'old'\n");
+            git(repository, "add", ".");
+            git(repository, "commit", "-qm", "add two independent implementations");
+            Files.writeString(ratios, comments.replace("original", "modified") + separator
+                    + AFTER.replace("len(values)", "len(values)  # late guard removal"));
+            Files.writeString(labels, "LABEL = 'new'\n");
+            git(repository, "commit", "-qam", "large early diff and small late regression");
+            Path complete = pipeline.run(options(arguments));
+            Path clipped = pipeline.run(options(arguments, "--max-evidence-bytes", "10000"));
+            check(Main.reviewExitCode(complete) == 0 && calls(complete, 2)
+                    && Files.readString(complete.resolve("focused/O-prompt.md")).contains("# late guard removal")
+                    && Files.readString(complete.resolve("focused/T-prompt.md")).contains("modified text for an early hunk")
+                    && !Files.readString(complete.resolve("focused/T-prompt.md")).contains("# late guard removal"),
+                    "separate diff hunks reach one of the two model requests without overlap");
+            check(Main.reviewExitCode(clipped) == 3 && calls(clipped, 1)
+                    && report(clipped).contains("## Unreviewed changes") && report(clipped).contains("ratios.py — @@ -1,108 +1,108 @@"),
+                    "unshown diff hunks are explicit in an incomplete report at a low budget");
         } finally {
             try (var paths = Files.walk(fixture)) {
                 for (var path : paths.sorted(Comparator.reverseOrder()).toList()) Files.delete(path);
@@ -397,6 +508,11 @@ final class AdaptiveReviewTests {
                   <evidence>The queue call follows the permission check.</evidence><diffRelation>A new scheduling entry point.</diffRelation></finding>
                 </local-decision>
                 """.formatted(status, extraPremises, title, impact);
+    }
+
+    private static String scopedVerification(String decision, String id) {
+        return decision.replace("<local-decision>", "<verification>").replace("</local-decision>", "</verification>")
+                .replace("<finding>", "<finding id=\"" + id + "\">");
     }
 
     private static String decision(String status, String requests, String severity) {

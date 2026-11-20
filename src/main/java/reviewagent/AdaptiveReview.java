@@ -124,7 +124,7 @@ final class AdaptiveReview {
         var delivered = deliver(response.candidates(), evidence, session, "adaptive");
         AtomicFiles.write(directory.resolve("evidence-index.md"), session.catalog().manifest());
         var quality = new ReviewQuality(options, evidence, session, prompts, agent, directory, progress, stages);
-        var refined = delivered.isEmpty() ? List.<ReviewOutput.Decision>of() : quality.verifyAfterEvidence(
+        var refined = delivered.isEmpty() ? List.<ReviewOutput.Decision>of() : quality.verifyScoped(
                 preliminary.stream().filter(decision -> delivered.containsKey(decision.verdict().candidate().id())).toList(), delivered,
                 "adaptive/verification", "");
         if (refined.stream().anyMatch(AdaptiveReview::requiresDeep)) return "Follow-up evidence identified broader impact";

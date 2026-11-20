@@ -18,6 +18,10 @@ final class FocusedReview {
     private static final int AREA_BYTES = 96_000;
     private static final int OVERVIEW_BYTES = 100_000;
     private static final int SOURCE_BYTES = 28_000;
+    private static final int CONTEXT_BYTES = 12_000;
+    private static final String OVERVIEW_QUESTION = "Find actionable local regressions and boundary errors. "
+            + "Use the file inventory to identify specific missing evidence. "
+            + "Distinguish a verified issue from a possible consequence of clipped source.";
 
     private enum Risk {
         DURABLE_STATE("Trace the changed durable state and external effect through commit, failure handling, and recovery. "
@@ -45,12 +49,17 @@ final class FocusedReview {
         return java.util.Arrays.stream(Risk.values()).anyMatch(risk -> risk.signal.matcher(code).find());
     }
 
-    private record Area(String id, String name, String question, EvidenceBundle evidence, String coverage) { }
+    private record Area(String id, String name, String question, EvidenceBundle evidence, String coverage,
+                        List<GitClient.Change> remaining) { }
+    private record Plan(List<Area> areas, List<String> unreviewed) { }
 
     static void run(EvidenceBundle original, CliOptions options, GitClient git, ProcessExecutor executor, PromptFactory prompts,
                     AgentRunner agent, Path directory, CommandProgress progress, int stages) throws IOException, InterruptedException {
         var language = OutputLanguage.parse(options.language());
-        var areas = plan(original, git, options.maxEvidenceBytes());
+        var plan = plan(original, git, options.maxEvidenceBytes());
+        var areas = plan.areas();
+        String unreviewed = plan.unreviewed().isEmpty() ? "" : "\n## " + language.text("Unreviewed changes", "未审改动")
+                + "\n\n" + plan.unreviewed().stream().map(gap -> "- " + gap + "\n").collect(Collectors.joining());
         var tasks = new ArrayList<ReviewTasks.Task>();
         var coverage = new StringBuilder(original.coverage()).append("\n## Review route\n\n- focused — bounded overview and identified risk areas.\n");
         Path focused = directory.resolve("focused");
@@ -85,11 +94,13 @@ final class FocusedReview {
             coverage.append("\n### ").append(area.id()).append(" — ").append(area.name()).append("\n\n")
                     .append("- Question: ").append(area.question()).append("\n").append(area.coverage());
         }
+        coverage.append(unreviewed);
         AtomicFiles.write(directory.resolve("coverage.md"), coverage.toString());
         var replies = ReviewTasks.runIsolated(tasks, agent, focused, options.reviewParallelism(), progress, 2, stages,
                 "Reviewing the overview and selected risk areas", resume);
 
         List<String> issues = new ArrayList<>();
+        for (String gap : plan.unreviewed()) issues.add(language.text("Unreviewed change: ", "未审改动：") + gap);
         List<ReviewOutput.Decision> preliminary = new ArrayList<>(), refined = new ArrayList<>();
         var catalog = EvidenceCatalog.empty();
         for (var area : areas) {
@@ -113,11 +124,12 @@ final class FocusedReview {
             if (response.requestedDeep() && candidates.stream().noneMatch(
                     decision -> decision.verdict().status() == ReviewOutput.Status.INSUFFICIENT_EVIDENCE))
                 issues.add(folder + " reported an unassessed scope without an evidence question.");
-            if (!delivered.isEmpty()) {
+            var selected = ReviewQuality.latest(candidates, corrected).stream()
+                    .filter(decision -> delivered.containsKey(decision.verdict().candidate().id())
+                            || needsIndependentVerification(decision, language, evidence.scope())).toList();
+            if (!selected.isEmpty()) {
                 var quality = new ReviewQuality(options, evidence, session, prompts, agent, directory, progress, stages);
-                refined.addAll(quality.verifyAfterEvidence(candidates.stream()
-                        .filter(candidate -> delivered.containsKey(candidate.verdict().candidate().id())).toList(), delivered,
-                        folder, "\n\n" + PromptFactory.SCOPED_OUTCOME_RULES));
+                refined.addAll(quality.verifyScoped(selected, delivered, folder, "\n\n" + PromptFactory.SCOPED_OUTCOME_RULES));
             }
             catalog = catalog.plus(session.catalog());
             coverage.append(session.coverage());
@@ -141,23 +153,37 @@ final class FocusedReview {
         AtomicFiles.write(directory.resolve("verified-findings.md"), confirmed.stream().map(finding -> finding.markdown(language))
                 .collect(Collectors.joining()));
         AtomicFiles.write(directory.resolve("report.md"), completion.notice()
-                + ReviewReport.focusedReport(original, confirmed, concerns, completion.failedTasks(), language));
+                + ReviewReport.focusedReport(original, confirmed, concerns, completion.failedTasks(), language) + unreviewed);
         AtomicFiles.write(directory.resolve("review-status.md"), completion.markdown());
         progress.finish(stages, completion.complete() ? "Wrote report.md" : "Wrote incomplete report.md");
     }
 
-    private static List<Area> plan(EvidenceBundle original, GitClient git, int budget) throws IOException, InterruptedException {
+    private static boolean needsIndependentVerification(ReviewOutput.Decision decision, OutputLanguage language, ReviewScope scope) {
+        var checked = ReviewGrounding.scopedPublication(decision, language).verdict();
+        var finding = checked.confirmed();
+        if (finding == null) return false;
+        if (finding.severity().compareTo(ReviewFinding.Severity.MEDIUM) <= 0) return true;
+        return decision.support().premises().stream().flatMap(premise -> premise.citations().stream())
+                .flatMap(citation -> citation.locations().stream()).anyMatch(location ->
+                        location.revision().equals(scope.targetCommit()) && !location.path().equals(finding.path()));
+    }
+
+    private static Plan plan(EvidenceBundle original, GitClient git, int budget) throws IOException, InterruptedException {
         var changes = git.changes(original.scope());
         var languages = LanguageRegistry.defaults();
         Map<String, Set<Risk>> directories = new LinkedHashMap<>();
+        Map<String, Set<Risk>> fileRisks = new LinkedHashMap<>();
         for (var change : changes) {
             if (!productionSource(change.path(), languages)) continue;
             String nearbyCode = change.path() + "\n" + change.patch();
-            for (var risk : Risk.values()) if (risk.signal.matcher(nearbyCode).find())
+            for (var risk : Risk.values()) if (risk.signal.matcher(nearbyCode).find()) {
+                fileRisks.computeIfAbsent(change.path(), unused -> new LinkedHashSet<>()).add(risk);
                 directories.computeIfAbsent(folder(change.path()), unused -> new LinkedHashSet<>()).add(risk);
+            }
         }
         var covered = new LinkedHashSet<String>();
         var areas = new ArrayList<Area>();
+        var remaining = new ArrayList<GitClient.Change>();
         int areaBudget = Math.min(AREA_BYTES, budget / Math.max(1, directories.size() + 1));
         int followupBudget = original.supplementBudget() / Math.max(1, directories.size() + 1);
         for (var entry : directories.entrySet()) {
@@ -168,71 +194,189 @@ final class FocusedReview {
             String question = risks.stream().filter(risk -> risk != Risk.SIDE_EFFECT || !risks.contains(Risk.DURABLE_STATE))
                     .map(risk -> risk.question).collect(Collectors.joining(" "));
             var area = scope("F" + (areas.size() + 1), entry.getKey(), question,
-                    original, git, members, areaBudget, followupBudget, true, languages);
-            if (!area.evidence().changedFiles().isEmpty()) {
-                areas.add(area);
-                covered.addAll(area.evidence().changedFiles());
-            }
+                    original, git, members, areaBudget, followupBudget, true, false, languages, fileRisks);
+            if (!area.evidence().catalog().sources().isEmpty()) areas.add(area);
+            remaining.addAll(area.remaining());
+            members.forEach(change -> covered.add(change.path()));
         }
         var rest = changes.stream().filter(change -> !covered.contains(change.path())).toList();
         // Queue the targeted risk checks before the overview when concurrency is limited.
-        if (!rest.isEmpty()) areas.add(scope("O", "Overview of remaining changed files",
-                "Find actionable local regressions and boundary errors. Use the file inventory to identify specific missing evidence. "
-                        + "Distinguish a verified issue from a possible consequence of clipped source.",
-                original, git, rest, Math.min(OVERVIEW_BYTES, areaBudget), followupBudget, false, languages));
-        return areas;
+        if (!rest.isEmpty()) {
+            var overview = scope("O", "Overview of remaining changed files", OVERVIEW_QUESTION,
+                    original, git, rest, Math.min(OVERVIEW_BYTES, areaBudget), followupBudget, false, false, languages, fileRisks);
+            if (!overview.evidence().catalog().sources().isEmpty()) areas.add(overview);
+            remaining.addAll(overview.remaining());
+        }
+        if (remaining.isEmpty()) return new Plan(areas, List.of());
+
+        int used = areas.stream().mapToInt(area -> EvidenceText.bytes(area.evidence().markdown())).sum();
+        int room = Math.min(AREA_BYTES, Math.max(0, budget - used));
+        String questions = remaining.stream().flatMap(change -> fileRisks.getOrDefault(change.path(), Set.of()).stream())
+                .distinct().map(risk -> risk.question).collect(Collectors.joining(" "));
+        var followup = scope("T", "Changes omitted from earlier diff excerpts", OVERVIEW_QUESTION + " " + questions,
+                original, git, remaining, room, followupBudget, false, true, languages, fileRisks);
+        if (!followup.evidence().catalog().sources().isEmpty()) areas.add(followup);
+        return new Plan(areas, followup.remaining().stream().map(change -> EvidenceText.oneLine(change.path())
+                + " — " + FocusedPatch.ranges(change.patch())).toList());
     }
 
     private static Area scope(String id, String name, String question, EvidenceBundle original, GitClient git,
-                              List<GitClient.Change> changes, int budget, int followupBudget, boolean risk,
-                              LanguageRegistry languages) throws InterruptedException {
+                              List<GitClient.Change> changes, int budget, int followupBudget, boolean risk, boolean followup,
+                              LanguageRegistry languages, Map<String, Set<Risk>> fileRisks) throws InterruptedException {
         var sources = new ArrayList<EvidenceSource>();
+        var targets = new LinkedHashMap<String, EvidenceSource>();
+        var baselines = new LinkedHashMap<String, EvidenceSource>();
+        var patches = new LinkedHashMap<String, String>();
+        var remaining = new LinkedHashMap<String, GitClient.Change>();
         var anchors = new ArrayList<String>();
-        var detail = new StringBuilder();
+        var materialByPath = new LinkedHashMap<String, String>();
         var scope = original.scope();
         for (int i = 0; i < changes.size(); i++) {
             var change = changes.get(i);
             int quota = Math.max(0, (budget - 160) / (changes.size() - i));
-            int patchBudget = risk ? Math.min(4_000, quota / 3) : Math.min(4_000, quota);
-            String excerpt = EvidenceText.linePrefix(change.patch(), patchBudget);
+            int patchBudget = followup ? quota : Math.min(4_000, risk ? quota / 3 : quota);
+            var selection = FocusedPatch.select(change.patch(), patchBudget, risk);
+            String excerpt = selection.shown();
             String path = change.path();
-            detail.append("- ").append(EvidenceText.oneLine(path)).append(" — ");
-            if (excerpt.isBlank() || !excerpt.contains("\n@@ ")) {
-                detail.append("inventory only\n");
+            if (!selection.remaining().isEmpty())
+                remaining.put(path, new GitClient.Change(path, change.previousPath(), change.deleted(), selection.remaining()));
+            if (excerpt.isBlank()) {
+                materialByPath.put(path, "inventory only");
                 continue;
             }
             var diff = EvidenceSource.diff(path, change.previousPath(), excerpt, scope, EvidenceCatalog.implementation(languages, path));
-            sources.add(excerpt.equals(change.patch()) ? diff.throughEndOfFile() : diff);
-            if (!change.deleted()) anchors.add(path);
+            boolean complete = excerpt.equals(change.patch());
             int used = EvidenceText.bytes(diff.markdown());
-            detail.append(excerpt.equals(change.patch()) ? "complete diff" : "diff excerpt");
+            String material = followup ? "diff follow-up"
+                    : !excerpt.contains("\n@@ ") ? "Git change metadata" : complete ? "complete diff" : "diff excerpt";
+            EvidenceSource target = null;
             if (risk) {
                 int room = Math.min(SOURCE_BYTES, Math.max(0, quota - used));
-                var target = read(git, scope.targetCommit(), path, room, original, languages);
+                target = read(git, scope.targetCommit(), path, room, original, languages);
+                // An addition header without its body is useful only alongside complete target source.
+                if (target == null && selection.remaining().equals(change.patch())) {
+                    materialByPath.put(path, "inventory only");
+                    continue;
+                }
+            }
+            sources.add(complete && !followup ? diff.throughEndOfFile() : diff);
+            if (!change.deleted()) anchors.add(path);
+            if (risk) {
                 if (target != null) {
                     sources.add(target);
+                    targets.put(path, target);
                     used += EvidenceText.bytes(target.markdown());
-                    detail.append(", complete target source");
+                    material += ", complete target source";
                 }
                 String before = change.previousPath() == null ? path : change.previousPath();
                 boolean added = change.patch().lines().limit(6).anyMatch(line -> line.matches("new file mode [0-7]{6}"));
+                if (added && change.previousPath() == null) patches.put(path, change.patch());
                 var base = added ? null : read(git, scope.baseCommit(), before,
                         Math.min(SOURCE_BYTES, Math.max(0, quota - used)), original, languages);
                 if (base != null) {
                     sources.add(base);
+                    baselines.put(path, base);
                     used += EvidenceText.bytes(base.markdown());
-                    detail.append(", complete baseline source");
+                    material += ", complete baseline source";
                 }
             }
-            detail.append('\n');
+            materialByPath.put(path, material);
             budget -= used;
         }
-        var catalog = new EvidenceCatalog(sources, true);
+        Set<String> chain = Set.of();
+        if (risk && changes.stream().noneMatch(change -> change.deleted() || change.previousPath() != null)) {
+            var durable = pathsWithRisk(changes, fileRisks, Risk.DURABLE_STATE);
+            var effects = pathsWithRisk(changes, fileRisks, Risk.SIDE_EFFECT);
+            effects.removeIf(path -> !targets.containsKey(path) || !Risk.SIDE_EFFECT.signal.matcher(targets.get(path).text()).find());
+            if (!durable.isEmpty() && !effects.isEmpty()) chain = FocusedBehavior.durableEffect(durable, effects, targets, baselines);
+        }
+        for (int i = 0; i < sources.size(); i++) {
+            var source = sources.get(i);
+            String patch = patches.get(source.path());
+            if (!source.role(EvidenceSource.Role.DIFF) || patch == null
+                    || chain.isEmpty() && !remaining.containsKey(source.path())) continue;
+            var compact = FocusedBehavior.compactAddition(source, patch, targets.get(source.path()), scope);
+            if (compact != source) {
+                budget += EvidenceText.bytes(source.markdown()) - EvidenceText.bytes(compact.markdown());
+                sources.set(i, compact);
+                remaining.remove(source.path());
+                materialByPath.put(source.path(), "new-file diff header and hunk range, complete target source (all lines added)");
+            }
+        }
+        String blocks;
+        if (chain.isEmpty()) {
+            blocks = sources.stream().map(EvidenceSource::markdown).collect(Collectors.joining());
+        } else {
+            Set<String> related = chain;
+            question += " Use the linked evidence first for the state and effect check. Check the remaining changed "
+                    + "implementation for independent regressions and use shared dependencies where relevant.";
+            boolean remainingEffect = changes.stream().anyMatch(change -> !related.contains(change.path())
+                    && fileRisks.getOrDefault(change.path(), Set.of()).contains(Risk.SIDE_EFFECT));
+            if (remainingEffect) question += " For other external effects: " + Risk.SIDE_EFFECT.question;
+            blocks = "## Linked durable-state and external-effect evidence\n\n"
+                    + sources.stream().filter(source -> related.contains(source.path())).map(EvidenceSource::markdown).collect(Collectors.joining());
+            if (sources.stream().anyMatch(source -> !related.contains(source.path()))) {
+                blocks += "## Other changed implementation in this scope\n\n"
+                        + sources.stream().filter(source -> !related.contains(source.path())).map(EvidenceSource::markdown)
+                        .collect(Collectors.joining());
+            }
+        }
+        var context = !risk || !remaining.isEmpty() ? List.<EvidenceSource>of()
+                : relatedContext(name, original, git, targets, fileRisks, Math.min(CONTEXT_BYTES, budget), languages);
+        if (!context.isEmpty()) {
+            sources.addAll(context);
+            blocks += "## Related unchanged implementation\n\n"
+                    + context.stream().map(EvidenceSource::markdown).collect(Collectors.joining());
+        }
+        String detail = materialByPath.entrySet().stream()
+                .map(entry -> "- " + EvidenceText.oneLine(entry.getKey()) + " — " + entry.getValue()
+                        + (remaining.containsKey(entry.getKey())
+                           ? "; hunks still pending: " + FocusedPatch.ranges(remaining.get(entry.getKey()).patch()) : "") + "\n")
+                .collect(Collectors.joining());
+        if (!chain.isEmpty()) detail += "- Linked durable-state and external-effect evidence: "
+                + chain.stream().map(EvidenceText::oneLine).collect(Collectors.joining(", ")) + ".\n";
+        if (!context.isEmpty()) detail += "- Related unchanged implementation: "
+                + context.stream().map(source -> EvidenceText.oneLine(source.path())).collect(Collectors.joining(", ")) + ".\n";
         String markdown = "Pinned base " + scope.baseCommit() + ", target " + scope.targetCommit() + ".\n\n"
-                + "Changed files in this scope and supplied material\n" + detail + "\n"
-                + sources.stream().map(EvidenceSource::markdown).collect(Collectors.joining());
+                + "Changed files in this scope and supplied material\n" + detail + "\n" + blocks;
+        var catalog = new EvidenceCatalog(sources, true);
         return new Area(id, EvidenceText.oneLine(name), question, new EvidenceBundle(scope, List.copyOf(anchors), markdown,
-                "", followupBudget, null, catalog), detail.toString());
+                "", followupBudget, null, catalog), detail, List.copyOf(remaining.values()));
+    }
+
+    private static Set<String> pathsWithRisk(List<GitClient.Change> changes, Map<String, Set<Risk>> fileRisks, Risk risk) {
+        return changes.stream().map(GitClient.Change::path)
+                .filter(path -> fileRisks.getOrDefault(path, Set.of()).contains(risk))
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+    }
+
+    private static List<EvidenceSource> relatedContext(String directory, EvidenceBundle original, GitClient git,
+                                                       Map<String, EvidenceSource> targets, Map<String, Set<Risk>> fileRisks,
+                                                       int room, LanguageRegistry languages) throws InterruptedException {
+        if (room < 256) return List.of();
+        var seeds = targets.keySet().stream().filter(path -> path.endsWith(".py") && fileRisks.containsKey(path)).limit(4).toList();
+        if (seeds.isEmpty()) return List.of();
+        var dependencies = seeds.stream().flatMap(path -> FocusedBehavior.dependencies(targets.get(path)).stream())
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+        String revision = original.scope().targetCommit();
+        var neighbors = new LinkedHashSet<>(dependencies);
+        try {
+            neighbors.addAll(git.filesContaining(revision, directory, seeds.stream().map(FocusedBehavior::importerLiteral).toList()));
+        } catch (IOException unavailable) {
+            // Explicit imports remain usable when Git search is unavailable.
+        }
+        var candidates = neighbors.stream().filter(path -> path.endsWith(".py") && folder(path).equals(directory)
+                && !original.changedFiles().contains(path) && productionSource(path, languages)).limit(4).toList();
+        var context = new ArrayList<EvidenceSource>();
+        for (String path : candidates) {
+            var source = read(git, revision, path, room, original, languages);
+            if (source == null || !dependencies.contains(path)
+                    && FocusedBehavior.dependencies(source).stream().noneMatch(seeds::contains)) continue;
+            context.add(source);
+            room -= EvidenceText.bytes(source.markdown());
+            if (context.size() == 2) break;
+        }
+        return context;
     }
 
     private static EvidenceSource read(GitClient git, String revision, String path, int room, EvidenceBundle original,

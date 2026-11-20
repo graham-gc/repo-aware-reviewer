@@ -49,21 +49,21 @@ final class ReviewQuality {
                 candidate -> Set.of(), "verification", 5, "Verifying candidate issues");
     }
 
-    List<ReviewOutput.Decision> verifyAfterEvidence(List<ReviewOutput.Decision> candidates, Map<String, Set<String>> delivered,
-                                                  String folder, String outcomeRules)
+    List<ReviewOutput.Decision> verifyScoped(List<ReviewOutput.Decision> candidates, Map<String, Set<String>> delivered,
+                                            String folder, String outcomeRules)
             throws IOException, InterruptedException {
         var previous = candidates.stream().collect(java.util.stream.Collectors.toMap(
                 decision -> decision.verdict().candidate().id(), Function.identity()));
         return verifyRounds(candidates.stream().map(decision -> decision.verdict().candidate()).toList(),
                 (candidate, view) -> prompts.verifyFinding(view.bundle(), candidate, "", view.index())
                         + outcomeRules
-                        + "\nPREVIOUS DECISION — RECHECK WITH THE NEW EVIDENCE\n"
-                        + PromptFactory.decisionSummary(previous.get(candidate.id()), view.index()),
+                        + (delivered.containsKey(candidate.id()) ? "\nPREVIOUS DECISION — RECHECK WITH THE NEW EVIDENCE\n"
+                           + PromptFactory.decisionSummary(previous.get(candidate.id()), view.index()) : ""),
                 candidate -> {
-                    var sources = new LinkedHashSet<>(delivered.get(candidate.id()));
+                    var sources = new LinkedHashSet<>(delivered.getOrDefault(candidate.id(), Set.of()));
                     sources.addAll(citationIds(previous.get(candidate.id()).citations()));
                     return sources;
-                }, folder, 5, "Verifying candidates with new evidence", true);
+                }, folder, 5, "Independently verifying selected candidates", true);
     }
 
     Adjudication adjudicate(List<ReviewOutput.Decision> preliminary, String assessment, Set<String> requirementCandidates)
