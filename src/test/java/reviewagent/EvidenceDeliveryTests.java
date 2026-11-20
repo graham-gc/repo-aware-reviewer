@@ -46,6 +46,11 @@ final class EvidenceDeliveryTests {
                 "continuous native intervals can satisfy a request without inventing a merged quote");
         require(lookup("target", "all", List.of(first, gap)).isEmpty()
                 && lookup("target", "2:4", List.of(first, gap)).isEmpty(), "a missing line cannot count as collected evidence");
+        var firstLine = file("head", 1, "first line of source", false);
+        require(FileEvidenceCache.alreadySupplied(firstLine, new EvidenceCatalog(List.of(first), true))
+                && !FileEvidenceCache.alreadySupplied(first, new EvidenceCatalog(List.of(firstLine), true))
+                && !FileEvidenceCache.alreadySupplied(adjacent, new EvidenceCatalog(List.of(first, gap), true)),
+                "a renamed excerpt is neither new evidence nor a substitute for newly supplied lines");
         var contract = EvidenceSources.contract("Approved rules", PATH, "head", 1, BODY).throughEndOfFile();
         var index = EvidenceSource.create("File names", "index", BODY, "head", PATH, 1,
                 Set.of(EvidenceSource.Role.INDEX, EvidenceSource.Role.TARGET), true).throughEndOfFile();

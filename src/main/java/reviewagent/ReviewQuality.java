@@ -64,6 +64,9 @@ final class ReviewQuality {
         return verifyRounds(candidates.stream().map(decision -> decision.verdict().candidate()).toList(),
                 (candidate, view) -> prompts.verifyFinding(view.bundle(), candidate, "", view.index())
                         + outcomeRules
+                        + "\nFor another evidence request, cite what the newly supplied material actually proves "
+                        + "and identify the remaining premise that determines the outcome. Ask for the smallest "
+                        + "source excerpt that can resolve that premise. Use an insufficient verdict when the gap cannot be resolved.\n"
                         + (delivered.containsKey(candidate.id()) ? "\nPREVIOUS DECISION — RECHECK WITH THE NEW EVIDENCE\n"
                            + PromptFactory.decisionSummary(previous.get(candidate.id()), view.index()) : ""),
                 candidate -> {
@@ -194,6 +197,7 @@ final class ReviewQuality {
         var priorPrompts = new LinkedHashMap<String, String>();
         var continuations = new LinkedHashMap<String, VerificationContinuation>();
         var awaitingVerdicts = new LinkedHashSet<String>();
+        Map<String, Set<String>> lastDelivery = Map.of();
         OutputLanguage language = OutputLanguage.parse(options.language());
         List<ReviewFinding> pending = findings;
         int round = 1;
@@ -275,6 +279,16 @@ final class ReviewQuality {
                             "回复仅请求了证据，尚无经过校验的复核结论。"))
                         : ReviewGrounding.verification(response, candidate, view.bundle(), view.index()));
                 String requests = requestOnly ? response : ReviewOutput.requestText(response, "verification");
+                if (newEvidenceOnly && !requests.isBlank()) {
+                    var decision = results.get(candidate.id());
+                    if (decision.verdict().status() != ReviewOutput.Status.INSUFFICIENT_EVIDENCE) continue;
+                    var supplied = lastDelivery.getOrDefault(candidate.id(), Set.of());
+                    if (round > 1 && decision.citations().stream().noneMatch(citation -> supplied.contains(citation.sourceId()))) {
+                        session.recordFollowup(path + "/" + candidate.id(), requests, Set.of(),
+                                "Stopped; the verdict cites no newly supplied evidence for the remaining premise.");
+                        continue;
+                    }
+                }
                 candidateRequests.put(candidate.id(), EvidenceRequest.parse(requests).stream().map(EvidenceRequest::text)
                         .collect(java.util.stream.Collectors.joining("\n")));
                 evidenceRequests.append(requests).append('\n');
@@ -284,11 +298,15 @@ final class ReviewQuality {
                     candidateRequests.getOrDefault(id, ""), session.lastCoverage(),
                     views.get(id).bundle().catalog().sources().stream().map(EvidenceSource::id).collect(java.util.stream.Collectors.toSet())));
             var delivered = new LinkedHashSet<String>();
+            var nextDelivery = new LinkedHashMap<String, Set<String>>();
             for (var entry : candidateRequests.entrySet()) {
                 Set<String> needed = session.delivery(entry.getValue(), views.get(entry.getKey()).bundle().catalog());
                 retainedEvidence.computeIfAbsent(entry.getKey(), unused -> new LinkedHashSet<>()).addAll(needed);
                 if (results.get(entry.getKey()).verdict().status() == ReviewOutput.Status.INSUFFICIENT_EVIDENCE) {
-                    if (!needed.isEmpty()) delivered.add(entry.getKey());
+                    if (!needed.isEmpty()) {
+                        delivered.add(entry.getKey());
+                        nextDelivery.put(entry.getKey(), needed);
+                    }
                     if (newEvidenceOnly && !entry.getValue().isBlank())
                         session.recordFollowup(path + "/" + entry.getKey(), entry.getValue(), needed);
                     else session.recordDelivery(path + "/" + entry.getKey(), needed);
@@ -296,6 +314,7 @@ final class ReviewQuality {
             }
             saveEvidence();
             if (newEvidenceOnly ? delivered.isEmpty() : !material && delivered.isEmpty() && awaitingVerdicts.isEmpty()) break;
+            lastDelivery = nextDelivery;
             pending = findings.stream().filter(candidate -> results.get(candidate.id()).verdict().status()
                     == ReviewOutput.Status.INSUFFICIENT_EVIDENCE)
                     .filter(candidate -> !newEvidenceOnly || delivered.contains(candidate.id())).toList();

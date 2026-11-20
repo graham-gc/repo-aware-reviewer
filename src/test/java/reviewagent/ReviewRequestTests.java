@@ -30,11 +30,27 @@ final class ReviewRequestTests {
                     case "$prompt" in
                       *'Question: Trace who can trigger'*)
                         if [ -f "$fixture/expand.xml" ]; then cat "$fixture/expand.xml"; exit; fi
+                        if [ -f "$fixture/stalled-xml" ]; then cat "$fixture/stalled-xml"; exit; fi
                         if [ -f "$fixture/location-first.xml" ]; then cat "$fixture/location-first.xml"; exit; fi ;;
                     esac
                     printf '<adaptive-review><route>LOCAL</route><summary>Reviewed fixture.</summary><decisions/></adaptive-review>' ;;
                   'Correct the finding location for only the supplied candidate'*) cat "$fixture/location-reply.xml" ;;
                   'You are the independent candidate verification'*)
+                    if [ -f "$fixture/stalled-xml" ]; then
+                        case "$prompt" in
+                          *'CONSUMER_BLOCKS_UNAPPROVED'*)
+                            printf '<verification><status>REJECTED</status><reason>The consumer rejects the work.</reason></verification>' ;;
+                          *'PRODUCER_DELEGATES_TO_CONSUMER'*)
+                            printf '<verification><status>INSUFFICIENT_EVIDENCE</status><reason>Need the consumer guard.</reason>'
+                            if [ -f "$fixture/cite-producer" ]; then
+                                ref=$(printf '%s\\n' "$prompt" | sed -n 's/^- \\(SRC-[0-9]*\\): queue\\/producer.py at .*/\\1/p' | head -n 1)
+                                printf '<citations><citation><source>%s</source><lines>1:1</lines></citation></citations>' "$ref"
+                            fi
+                            printf '</verification>\\nREQUEST_FILE|target|queue/consumer.py|all|Does the consumer block unapproved work?\\n' ;;
+                          *) printf '<verification><status>INSUFFICIENT_EVIDENCE</status><reason>Need the producer contract.</reason></verification>\\nREQUEST_FILE|target|queue/producer.py|all|Where does the producer send this work?\\n' ;;
+                        esac
+                        exit
+                    fi
                     case "$prompt" in
                       *'The scheduler may still block'*'APPROVED_ONLY'*)
                         printf '<verification><status>REJECTED</status><reason>The supplied scheduler only accepts approved work.</reason></verification>' ;;
@@ -52,6 +68,7 @@ final class ReviewRequestTests {
             new ReviewRequestTests(Files.createDirectory(fixture.resolve("discovery"))).discovery();
             new ReviewRequestTests(Files.createDirectory(fixture.resolve("java"))).javaCaller();
             new ReviewRequestTests(Files.createDirectory(fixture.resolve("expansion"))).expansion();
+            new ReviewRequestTests(Files.createDirectory(fixture.resolve("stalled"))).stalledEvidence();
             new ReviewRequestTests(Files.createDirectory(fixture.resolve("locations"))).locations();
         } finally {
             try (var paths = Files.walk(fixture)) {
@@ -268,6 +285,40 @@ final class ReviewRequestTests {
         var file = repository.resolve(relative);
         Files.createDirectories(file.getParent());
         Files.writeString(file, content);
+    }
+
+    private void stalledEvidence() throws Exception {
+        write("auth/check.py", "def authorize(approved):\n    return approved\n");
+        write("queue/schedule.py", "LIMIT = 1\n");
+        write("queue/producer.py", "PRODUCER_DELEGATES_TO_CONSUMER = True\n");
+        write("queue/consumer.py", "CONSUMER_BLOCKS_UNAPPROVED = True\n");
+        commit("base");
+        write("auth/check.py", "def authorize(approved):\n    return True\n");
+        write("queue/schedule.py", "LIMIT = 2\n");
+        commit("changed authorization and scheduling");
+        Files.writeString(root.resolve("stalled-xml"), """
+                <adaptive-review><route>DEEP</route><summary>Review the downstream guard.</summary><decisions>
+                  <local-decision><status>INSUFFICIENT_EVIDENCE</status>
+                    <reason>Check the caller in queue/schedule.py.</reason>
+                    <finding><title>Unapproved work may pass the guard</title><path>auth/check.py</path>
+                    <line>2</line><endLine>2</endLine><trigger>Unapproved request reaches authorize</trigger>
+                    <impact>Unapproved work runs</impact><evidence>The target returns true.</evidence>
+                    <diffRelation>The predicate changed.</diffRelation></finding>
+                  </local-decision>
+                </decisions></adaptive-review>
+                """);
+        var stopped = review();
+        check(Main.reviewExitCode(stopped) == 0 && calls(stopped, 4)
+                && Files.readString(stopped.resolve("coverage.md")).contains("Stopped; the verdict cites no newly supplied evidence")
+                && Files.readString(stopped.resolve("report.md")).contains("Unapproved work may pass the guard"),
+                "a speculative third check preserves the known gap without launching another call");
+
+        Files.createFile(root.resolve("cite-producer"));
+        var continued = review();
+        check(Main.reviewExitCode(continued) == 0 && calls(continued, 5)
+                && Files.readString(continued.resolve("focused/F1/round-3/F1-1-prompt.md")).contains("CONSUMER_BLOCKS_UNAPPROVED")
+                && !Files.readString(continued.resolve("report.md")).contains("Unapproved work may pass the guard"),
+                "a new pinned producer citation justifies continuing to the decisive consumer evidence");
     }
 
     private void commit(String message) throws Exception {

@@ -97,9 +97,12 @@ final class EvidenceSession {
     Set<String> delivery(String requests, EvidenceCatalog supplied) {
         var result = new LinkedHashSet<String>();
         var visible = supplied.sources().stream().map(EvidenceSource::id).collect(java.util.stream.Collectors.toSet());
+        var available = catalog();
         for (EvidenceRequest request : EvidenceRequest.parse(requests)) {
             if (!collector.reusable(bundle(supplied, 0), request.text()).isEmpty()) continue;
-            for (String id : fulfilled.getOrDefault(request.key(), Set.of())) if (!visible.contains(id)) result.add(id);
+            for (String id : fulfilled.getOrDefault(request.key(), Set.of())) {
+                if (!visible.contains(id) && !FileEvidenceCache.alreadySupplied(available.source(id), supplied)) result.add(id);
+            }
         }
         return java.util.Collections.unmodifiableSet(result);
     }
@@ -112,8 +115,13 @@ final class EvidenceSession {
     }
 
     void recordFollowup(String requester, String requests, Set<String> ids) {
+        recordFollowup(requester, requests, ids, ids.isEmpty() ? "Stopped; no new evidence for this question."
+                : "Follow-up on newly supplied evidence.");
+    }
+
+    void recordFollowup(String requester, String requests, Set<String> ids, String outcome) {
         coverage.append("- ").append(requester).append(": ")
-                .append(ids.isEmpty() ? "Stopped; no new evidence for this question." : "Follow-up on newly supplied evidence.").append("\n");
+                .append(outcome).append("\n");
         for (var request : EvidenceRequest.parse(requests))
             coverage.append("  - Question and requested evidence: ").append(EvidenceText.oneLine(request.text())).append('\n');
         recordDelivery(requester, ids);

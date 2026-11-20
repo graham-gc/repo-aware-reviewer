@@ -487,11 +487,14 @@ final class AdaptiveReviewTests {
             git(repository, "commit", "-qam", "large early diff and small late regression");
             Path complete = pipeline.run(options(arguments));
             Path clipped = pipeline.run(options(arguments, "--max-evidence-bytes", "10000"));
-            check(Main.reviewExitCode(complete) == 0 && calls(complete, 2)
-                    && Files.readString(complete.resolve("focused/O-prompt.md")).contains("# late guard removal")
-                    && Files.readString(complete.resolve("focused/T-prompt.md")).contains("modified text for an early hunk")
-                    && !Files.readString(complete.resolve("focused/T-prompt.md")).contains("# late guard removal"),
-                    "separate diff hunks reach one of the two model requests without overlap");
+            String completePrompt = Files.readString(complete.resolve("focused/FULL-prompt.md"));
+            check(Main.reviewExitCode(complete) == 0 && calls(complete, 1)
+                    && completePrompt.contains("# late guard removal")
+                    && completePrompt.contains("modified text for an early hunk")
+                    && completePrompt.contains("labels.py"),
+                    "complete diff packing keeps early and late hunks and peer changes in one model request");
+            pipeline.run(options(arguments, "--resume", complete.toString()));
+            check(calls(complete, 0), "the complete diff scope resumes without repeating a validated request");
             check(Main.reviewExitCode(clipped) == 3 && calls(clipped, 1)
                     && report(clipped).contains("## Unreviewed changes") && report(clipped).contains("ratios.py — @@ -1,108 +1,108 @@"),
                     "unshown diff hunks are explicit in an incomplete report at a low budget");
