@@ -151,7 +151,7 @@ final class ReviewPipeline {
         write(runDirectory.resolve("report.md"), outputLanguage.text("Review running. Previous reports do not describe this execution.\n",
                 "审查进行中。此前的报告不代表本次执行结果。\n"));
         AgentRunner agent = new AgentRunner(executor, options.agentCommand(), options.agentArgs(),
-                options.repo(), options.agentTimeout(), options.agentPolicy());
+                options.repo(), options.agentTimeout(), options.agentPolicy(), options.reviewParallelism());
         Throwable executionFailure = null;
         try {
             var selection = resume && Files.isDirectory(runDirectory.resolve("discovery"))

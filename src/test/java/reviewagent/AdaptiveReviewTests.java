@@ -558,18 +558,19 @@ final class AdaptiveReviewTests {
                 && !protectedPrompt.contains("service/nested/caller.go"),
                 "Go risk checks include direct callers within the pinned module and exclude unrelated imports and nested modules");
 
-        Files.writeString(router, direct);
+        String dotImport = direct.replace("import gate ", "import . ").replace("gate.Authorize", "Authorize");
+        Files.writeString(router, dotImport);
         Files.writeString(authorization, guarded);
-        git(repository, "commit", "-qam", "make the unchanged caller unguarded at the comparison base");
+        git(repository, "commit", "-qam", "use a dot import in the unchanged caller");
         Files.writeString(authorization, guarded.replace("return active", "return true"));
         git(repository, "commit", "-qam", "apply the same policy change outside the guarded entry point");
         Files.writeString(router, direct.replace("    return gate", "    if !active { return false } // WORKTREE_ONLY\n    return gate"));
         Path unprotectedRun = pipeline.run(options(arguments));
         String unprotectedPrompt = Files.readString(unprotectedRun.resolve("focused/F1-prompt.md"));
         check(Main.reviewExitCode(unprotectedRun) == 0 && calls(unprotectedRun, 1)
-                && unprotectedPrompt.contains("return gate.Authorize(active)")
+                && unprotectedPrompt.contains("return Authorize(active)")
                 && !unprotectedPrompt.contains("// caller guard") && !unprotectedPrompt.contains("WORKTREE_ONLY"),
-                "the same Go diff gets its actual pinned unchanged caller instead of a dirty checkout's guard");
+                "the same Go diff gets its pinned dot-import caller instead of a dirty checkout's guard");
         Files.writeString(router, direct);
 
         Path reply = repository.getParent().resolve("focused-json-response.json");

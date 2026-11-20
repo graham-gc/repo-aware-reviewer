@@ -65,12 +65,12 @@ final class ReviewTasks {
             try {
                 for (Task task : tasks) {
                     futures.add(completions.submit(() -> {
-                        if (globalFailure.get()) {
-                            state(directory, task, "BLOCKED", "GLOBAL_FAILURE");
-                            return new Reply(task.id(), new Outcome(null, "Blocked by a global failure", "GLOBAL_FAILURE"));
-                        }
-                        state(directory, task, "RUNNING", "");
                         try (var budget = agent.task(task.model(), task.schema())) {
+                            if (globalFailure.get()) {
+                                state(directory, task, "BLOCKED", "GLOBAL_FAILURE");
+                                return new Reply(task.id(), new Outcome(null, "Blocked by a global failure", "GLOBAL_FAILURE"));
+                            }
+                            state(directory, task, "RUNNING", "");
                             String response = invoke(task, agent, directory, resume);
                             Files.deleteIfExists(directory.resolve(task.id() + "-error.txt"));
                             state(directory, task, "SUCCEEDED", "");

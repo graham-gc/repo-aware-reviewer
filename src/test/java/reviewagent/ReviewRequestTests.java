@@ -180,6 +180,21 @@ final class ReviewRequestTests {
                 && !Files.exists(failed.resolve("focused/F1-repair-prompt.md"))
                 && !Files.exists(failed.resolve("focused/F1/locations/F1-1-repair-prompt.md")),
                 "a failed location correction leaves one unfinished candidate and preserves the valid peer");
+
+        Files.writeString(root.resolve("location-first.xml"), "<adaptive-review><route>DEEP</route>"
+                + "<summary>Review the guard.</summary><decisions>"
+                + confirmed.replace("auth/check.py", "queue/schedule.py") + "</decisions></adaptive-review>");
+        var unresolved = review();
+        check(Main.reviewExitCode(unresolved) == 3 && calls(unresolved, 3)
+                && Files.readString(unresolved.resolve("review-status.md")).contains("F1-1 — finding location outside"),
+                "failed DEEP location correction still leaves an unfinished candidate");
+
+        Files.writeString(correction, confirmed);
+        var correctedDeep = review();
+        check(Main.reviewExitCode(correctedDeep) == 0 && calls(correctedDeep, 3)
+                && Files.readString(correctedDeep.resolve("verified-findings.md")).contains("Unapproved input passes the predicate")
+                && Files.readString(correctedDeep.resolve("coverage.md")).contains("F1-1: corrected the candidate location"),
+                "a resolved DEEP candidate is reported without an unfinished-scope diagnostic");
     }
 
     private void discovery() throws Exception {

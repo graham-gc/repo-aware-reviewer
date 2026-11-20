@@ -148,6 +148,10 @@ final class GitClient {
         return execute(List.of("git", "cat-file", "-e", commit + ":" + path)).exitCode() == 0;
     }
 
+    static final class BlobTooLargeException extends IOException {
+        BlobTooLargeException() { super("File exceeds the available byte budget"); }
+    }
+
     String regularBlobAt(String commit, String path, int maxBytes) throws IOException, InterruptedException {
         String entry = run("--literal-pathspecs", "ls-tree", "--full-tree", "-z", commit, "--", path);
         int tab = entry.indexOf('\t');
@@ -157,7 +161,7 @@ final class GitClient {
         }
         String oid = entry.substring("100644 blob ".length(), tab);
         if (Long.parseLong(oneLine("cat-file", "-s", oid)) > maxBytes) {
-            throw new IOException("File exceeds the available byte budget");
+            throw new BlobTooLargeException();
         }
         String content = blob(oid);
         if (content.indexOf('\0') >= 0) {

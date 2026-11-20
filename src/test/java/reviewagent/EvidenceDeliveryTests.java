@@ -16,6 +16,7 @@ final class EvidenceDeliveryTests {
     static void run() throws Exception {
         fileCoverage();
         cachedRecipientDelivery();
+        sharedBatchBudget();
         pipelineDeliveryAndResume();
     }
 
@@ -102,6 +103,54 @@ final class EvidenceDeliveryTests {
                         "", "", 0, rules, oneSection), matched).isEmpty(),
                 "one visible rule section cannot satisfy a lookup whose matched sections have not all reached the recipient");
         Files.delete(root);
+    }
+
+    private static void sharedBatchBudget() throws Exception {
+        Path repo = Files.createTempDirectory("evidence-batch-budget-");
+        try {
+            git(repo, "init", "-q");
+            Files.writeString(repo.resolve("worker.py"), "# original implementation\n".repeat(35));
+            Files.writeString(repo.resolve("caller.py"), "result = worker.submit(payload)\n");
+            git(repo, "add", "--all");
+            git(repo, "commit", "-qm", "base");
+            String target = "# expanded implementation\n".repeat(105) + "result = record_delivery()\n";
+            Files.writeString(repo.resolve("worker.py"), target);
+            git(repo, "commit", "-qam", "target");
+            var executor = new ProcessExecutor();
+            var git = new GitClient(repo, executor);
+            var scope = git.resolve(CliOptions.parse(new String[]{"review", "--repo", repo.toString()}));
+            var collector = new SupplementalEvidence(git, executor, java.util.Map.of());
+            String requested = """
+                    REQUEST_FILE|base|worker.py|all|Inspect baseline behavior
+                    REQUEST_FILE|target|worker.py|all|Inspect target behavior
+                    REQUEST_FILE|target|caller.py|1:1|Inspect the call site
+                    """;
+            var evidence = new EvidenceBundle(scope, List.of("worker.py"), "", "", 4_800, null, EvidenceCatalog.empty());
+            var result = collector.collect(evidence, requested, 3, 0);
+            var supplied = result.catalog().sources();
+            require(result.coverage().contains("Supplemental requests included: 3/3")
+                    && result.coverage().contains("used remaining batch budget")
+                    && supplied.stream().anyMatch(source -> source.path().equals("caller.py"))
+                    && supplied.stream().anyMatch(source -> source.role(EvidenceSource.Role.BASELINE) && source.endOfFile())
+                    && supplied.stream().anyMatch(source -> source.role(EvidenceSource.Role.TARGET)
+                            && source.path().equals("worker.py") && source.endOfFile() && source.text().equals(target))
+                    && EvidenceText.bytes(result.markdown()) <= evidence.supplementBudget(),
+                    "the small caller and both pinned revisions fit a single batch without clipping a deferred file");
+
+            var tight = new EvidenceBundle(scope, evidence.changedFiles(), "", "", 3_200, null, EvidenceCatalog.empty());
+            var partial = collector.collect(tight, requested, 3, 0);
+            require(partial.coverage().contains("Supplemental requests included: 2/3")
+                    && partial.coverage().contains("target worker.py all: UNAVAILABLE")
+                    && partial.catalog().sources().stream().anyMatch(source -> source.path().equals("caller.py"))
+                    && partial.catalog().sources().stream().noneMatch(source -> source.path().equals("worker.py")
+                            && source.role(EvidenceSource.Role.TARGET))
+                    && EvidenceText.bytes(partial.markdown()) <= tight.supplementBudget(),
+                    "a whole file that genuinely cannot fit leaves a gap and preserves other evidence");
+        } finally {
+            try (var paths = Files.walk(repo)) {
+                for (Path path : paths.sorted(java.util.Comparator.reverseOrder()).toList()) Files.delete(path);
+            }
+        }
     }
 
     private static void pipelineDeliveryAndResume() throws Exception {

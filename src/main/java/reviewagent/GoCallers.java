@@ -55,9 +55,15 @@ record GoCallers(List<String> paths, String directory, String packageName, Strin
         try {
             var parsed = GoSource.parse(source.text());
             var qualifiers = new LinkedHashSet<String>();
+            boolean dotImport = false;
             for (var imported : parsed.imports()) {
-                if (imported.path().equals(importPath) && !Set.of(".", "_").contains(imported.alias()))
-                    qualifiers.add(imported.alias().isEmpty() ? packageName : imported.alias());
+                if (!imported.path().equals(importPath)) continue;
+                switch (imported.alias()) {
+                    case "." -> dotImport = true;
+                    case "_" -> { }
+                    case "" -> qualifiers.add(packageName);
+                    default -> qualifiers.add(imported.alias());
+                }
             }
             boolean samePackage = GoModuleFile.directory(source.path()).equals(directory) && parsed.packageName().equals(packageName);
             var tokens = GoSource.tokens(source.text());
@@ -67,7 +73,7 @@ record GoCallers(List<String> paths, String directory, String packageName, Strin
                 String previous = i == 0 ? "" : tokens.get(i - 1).text();
                 if (previous.equals(".")) {
                     if (i >= 2 && exported(name) && qualifiers.contains(tokens.get(i - 2).text())) return true;
-                } else if (samePackage && !previous.equals("func")) return true;
+                } else if (!previous.equals("func") && (samePackage || dotImport && exported(name))) return true;
             }
         } catch (IOException unavailable) {
             // Navigation hints cannot establish calls in source we could not parse.

@@ -96,8 +96,8 @@ final class SupplementalEvidence {
         StringBuilder coverage = new StringBuilder(heading);
         StringBuilder prompt = new StringBuilder(heading);
         int remaining = evidence.supplementBudget() - EvidenceText.bytes(heading + knowledge.markdown()) - 220;
-        int processed = 0;
         int total = maxRequests == 0 ? requests.size() : Math.min(requests.size(), maxRequests);
+        var pending = new ArrayList<>(requests.values().stream().limit(total).toList());
         int included = 0;
         boolean material = knowledge.suppliedSections() > 0;
         EvidenceCatalog catalog = knowledge.catalog();
@@ -106,11 +106,12 @@ final class SupplementalEvidence {
             resolved.put(request.key(), evidence.scopedKnowledge() == null ? Set.of()
                     : evidence.scopedKnowledge().knownSources(request.text(), evidence.catalog().plus(knowledge.catalog()), false));
         }
-        for (EvidenceQuery query : requests.values()) {
-            if (processed == total) {
-                break;
-            }
-            int quota = Math.min(remaining, Math.max(256, remaining / (total - processed++)));
+        for (int i = 0; i < pending.size(); i++) {
+            var query = pending.get(i);
+            boolean deferred = i >= total;
+            int quota = deferred ? remaining : Math.min(remaining, Math.max(256, remaining / (total - i)));
+            boolean canDefer = !deferred && quota < remaining && query.operation() == EvidenceQuery.Operation.READ_FILE
+                    && query.selector().equals("all");
             String revision = query.side().equals("base") ? evidence.scope().baseCommit() : evidence.scope().targetCommit();
             String label = EvidenceText.oneLine(query.label());
             String status;
@@ -155,6 +156,10 @@ final class SupplementalEvidence {
                 if (excerpt.markdown().isBlank() || excerpt.status().isBlank()) throw new IOException("Language module returned empty evidence or coverage status");
                 int bytes = EvidenceText.bytes(excerpt.markdown());
                 if (bytes > quota) {
+                    if (canDefer) {
+                        pending.add(query);
+                        continue;
+                    }
                     throw new IOException("Requested material exceeds the supplemental evidence budget");
                 }
                 prompt.append(excerpt.markdown());
@@ -164,8 +169,13 @@ final class SupplementalEvidence {
                 material = true;
                 remaining -= bytes;
                 included++;
-                status = excerpt.status();
+                status = excerpt.status() + (deferred ? " (used remaining batch budget)" : "");
             } catch (IOException unavailable) {
+                // Give every admitted request its initial share before spending unclaimed room on whole files.
+                if (canDefer && unavailable instanceof GitClient.BlobTooLargeException) {
+                    pending.add(query);
+                    continue;
+                }
                 status = "UNAVAILABLE (" + EvidenceText.oneLine(unavailable.getMessage()) + ")";
                 String note = "- " + label + ": " + status + "\n";
                 if (EvidenceText.bytes(note) <= quota) {
@@ -179,8 +189,8 @@ final class SupplementalEvidence {
         for (int line : invalidLines) {
             coverage.append("- Invalid file or language request on reviewer output line ").append(line).append(".\n");
         }
-        String summary = "\nSupplemental requests included: " + included + "/" + processed + ". Invalid: " + invalidLines.size()
-                + ". Skipped by request limit: " + (requests.size() - processed) + ". See `coverage.md` for details.\n";
+        String summary = "\nSupplemental requests included: " + included + "/" + total + ". Invalid: " + invalidLines.size()
+                + ". Skipped by request limit: " + (requests.size() - total) + ". See `coverage.md` for details.\n";
         return new Result(prompt.append(summary).append(knowledge.markdown()).toString(),
                 coverage.append(summary).append(knowledge.coverage()).toString(), material, catalog, java.util.Map.copyOf(resolved));
     }

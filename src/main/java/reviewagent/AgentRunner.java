@@ -9,6 +9,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicInteger;
 
 final class AgentRunner {
@@ -17,6 +18,7 @@ final class AgentRunner {
     private final Path workingDirectory;
     private final Duration timeout;
     private final AgentPolicy policy;
+    private final Semaphore taskSlots;
     private final ThreadLocal<Budget> taskBudget = new ThreadLocal<>();
     private final AtomicInteger active = new AtomicInteger();
     private final ReviewTimings timings = new ReviewTimings();
@@ -28,6 +30,11 @@ final class AgentRunner {
 
     AgentRunner(ProcessExecutor executor, String executable, List<String> args, Path workingDirectory,
                 Duration timeout, AgentPolicy policy) {
+        this(executor, executable, args, workingDirectory, timeout, policy, Integer.MAX_VALUE);
+    }
+
+    AgentRunner(ProcessExecutor executor, String executable, List<String> args, Path workingDirectory,
+                Duration timeout, AgentPolicy policy, int taskParallelism) {
         this.executor = executor;
         this.command = new ArrayList<>();
         this.command.add(executable);
@@ -35,22 +42,27 @@ final class AgentRunner {
         this.workingDirectory = workingDirectory;
         this.timeout = timeout;
         this.policy = policy;
+        taskSlots = new Semaphore(taskParallelism, true);
     }
 
     final class TaskScope implements AutoCloseable {
-        private TaskScope(String model, String schema) {
+        private TaskScope(String model, String schema) throws InterruptedException {
             if (taskBudget.get() != null) throw new IllegalStateException("Nested agent task");
             var selected = commandForModel(model);
             if (schema != null) {
                 selected = new ArrayList<>(selected);
                 selected.addAll(List.of("--output-format", "json", "--json-schema", schema));
             }
+            taskSlots.acquire();
             taskBudget.set(new Budget(selected));
         }
-        @Override public void close() { taskBudget.remove(); }
+        @Override public void close() {
+            taskBudget.remove();
+            taskSlots.release();
+        }
         int calls() { return taskBudget.get().calls; }
     }
-    TaskScope task(String model, String schema) { return new TaskScope(model, schema); }
+    TaskScope task(String model, String schema) throws InterruptedException { return new TaskScope(model, schema); }
 
     private List<String> commandForModel(String model) {
         if (model == null) return command;

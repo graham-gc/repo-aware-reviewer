@@ -21,6 +21,10 @@ Every candidate task writes `TASK-evidence.md` beside its prompt. It records ful
 
 A candidate's selected evidence is retained across its verification rounds and subsequent publication adjudication. Requested new material is pinned into the requester's next task even if it has no lexical match in the original allegation. This prevents a smaller publication prompt from accidentally losing a producer guard discovered during verification.
 
+Each evidence request gets an initial share of its batch budget. A whole-file read that exceeds its share can use the remaining space after the other requests run. Coverage records whether the remaining space was sufficient. The same total byte budget and request limits still apply.
+
+Focused areas can verify candidates concurrently after discovery. They share the execution's review parallelism limit and keep each candidate's evidence rounds ordered. The final coverage and report follow the original scope order.
+
 For a scoped follow-up, a file index records navigation and does not schedule another model call on its own. The reviewer can request `REQUEST_FILE|target|src/main/**/*.java|references:Service.write|Find the caller and its guard` to locate bounded excerpts directly in tracked source at the pinned revision. A literal hit helps locate code; type binding, execution, and impact still require evidence. Narrow the path or supply a file and line range when a reference search cannot resolve a premise.
 
 After individual verification, a group of confirmed local regressions with the same code anchor and shared pinned baseline and target sources can receive one publication verdict. The adjudicator resolves provisional severity differences using the proved impact and preconditions. Sharing requires explicit coverage of every candidate ID in the independent publication response and revalidation of the common evidence. The remaining candidates run separately when the response leaves applicability uncertain. Coverage retains the individual verification records and lists which candidates shared a publication verdict.

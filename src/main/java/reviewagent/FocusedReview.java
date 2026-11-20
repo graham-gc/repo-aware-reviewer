@@ -10,6 +10,9 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorCompletionService;
+import java.util.concurrent.Executors;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
@@ -100,6 +103,8 @@ final class FocusedReview {
     private record Area(String id, String name, String question, EvidenceBundle evidence, String coverage,
                         List<GitClient.Change> remaining) { }
     private record Plan(List<Area> areas, List<String> unreviewed) { }
+    private record Followup(String id, List<ReviewOutput.Decision> preliminary, List<ReviewOutput.Decision> refined,
+                            EvidenceCatalog catalog, List<String> issues, String coverage) { }
 
     static void run(EvidenceBundle original, CliOptions options, GitClient git, ProcessExecutor executor, PromptFactory prompts,
                     AgentRunner agent, Path directory, CommandProgress progress, int stages) throws IOException, InterruptedException {
@@ -158,54 +163,39 @@ final class FocusedReview {
         List<ReviewOutput.Decision> preliminary = new ArrayList<>(), refined = new ArrayList<>();
         var catalog = EvidenceCatalog.empty();
         var changedPaths = Set.copyOf(original.changedFiles());
-        EvidenceCatalog collected = null;
-        for (var area : areas) {
-            var outcome = replies.get(area.id());
-            if (!outcome.valid()) {
-                issues.add("focused/" + area.id() + " [" + outcome.failureKind() + "]; see focused/" + area.id() + "-state.properties");
-                continue;
-            }
-            var evidence = area.evidence();
-            var index = new EvidenceIndex(evidence.catalog());
-            var response = parse(area, outcome.response(), index, schema != null && area.id().startsWith("F"));
-            String folder = "focused/" + area.id();
-            coverage.append("\n### ").append(area.id()).append(" follow-up\n\n");
-            var accepted = new ArrayList<>(response.candidates());
-            accepted.addAll(correctLocations(response.misplaced(), evidence, index, options, agent, directory,
-                    folder, progress, stages, coverage, issues, language));
-            var candidates = accepted.stream().map(AdaptiveReview.Candidate::decision).toList();
-            preliminary.addAll(candidates);
-            var session = new EvidenceSession(evidence, new SupplementalEvidence(git, executor, options.languageCaches()),
-                    options.maxSupplementalRequests(), options.maxKnowledgeQueries());
-            var corrected = ScopedCitationRepair.run(accepted, evidence, options, agent,
-                    directory.resolve(folder).resolve("citations"), progress, stages, coverage);
-            refined.addAll(corrected);
-            var delivered = AdaptiveReview.deliver(accepted, evidence, session, folder);
-            var latest = ReviewQuality.latest(candidates, corrected);
-            if (response.requestedDeep()) {
-                var pending = latest.stream().filter(decision -> decision.verdict().status() == ReviewOutput.Status.INSUFFICIENT_EVIDENCE).toList();
-                if (pending.isEmpty()) issues.add(folder + " reported an unassessed scope without an evidence question.");
-                if (collected == null && !pending.isEmpty()) {
-                    var sources = new ArrayList<>(original.catalog().sources());
-                    areas.forEach(part -> sources.addAll(part.evidence().catalog().sources()));
-                    collected = new EvidenceCatalog(sources, true);
+        var sources = new ArrayList<>(original.catalog().sources());
+        areas.forEach(area -> sources.addAll(area.evidence().catalog().sources()));
+        var collected = new EvidenceCatalog(sources, true);
+        var followups = new LinkedHashMap<String, Followup>();
+        int activeAreas = Math.max(1, Math.min(areas.size(), options.reviewParallelism()));
+        try (var workers = Executors.newFixedThreadPool(activeAreas, Thread.ofVirtual().factory())) {
+            var completed = new ExecutorCompletionService<Followup>(workers);
+            try {
+                for (var area : areas) {
+                    boolean structured = schema != null && area.id().startsWith("F");
+                    completed.submit(() -> followUp(area, replies.get(area.id()), structured, collected, changedPaths,
+                            options, git, executor, prompts, agent, directory, progress, stages, language));
                 }
-                for (var decision : pending) expand(decision, evidence, session, folder, collected, delivered);
+                for (int i = 0; i < areas.size(); i++) {
+                    var result = completed.take().get();
+                    followups.put(result.id(), result);
+                }
+            } catch (ExecutionException failed) {
+                if (failed.getCause() instanceof IOException error) throw error;
+                if (failed.getCause() instanceof InterruptedException interrupted) throw interrupted;
+                throw new IOException("Focused follow-up failed", failed.getCause());
+            } finally {
+                workers.shutdownNow();
             }
-            var selected = latest.stream()
-                    .filter(decision -> delivered.containsKey(decision.verdict().candidate().id())
-                            || needsIndependentVerification(decision, language, evidence.scope())).toList();
-            if (!selected.isEmpty()) {
-                var quality = new ReviewQuality(options, evidence, session, prompts, agent, directory, progress, stages);
-                boolean hasCallerContext = evidence.catalog().sources().stream().anyMatch(source -> source.role(EvidenceSource.Role.TARGET)
-                        && source.role(EvidenceSource.Role.IMPLEMENTATION) && !changedPaths.contains(source.path()));
-                String rules = "\n\n" + PromptFactory.SCOPED_OUTCOME_RULES;
-                if (hasCallerContext || response.requestedDeep()) rules += PromptFactory.SCOPED_IMPLEMENTATION_RULES;
-                refined.addAll(quality.verifyScoped(selected, delivered, folder, rules, true));
-            }
-            catalog = catalog.plus(session.catalog());
-            coverage.append(session.coverage());
-            if (delivered.isEmpty()) coverage.append("- No additional evidence was delivered after this scope.\n");
+        }
+        // Assemble in plan order even when independent areas finish out of order.
+        for (var area : areas) {
+            var result = followups.get(area.id());
+            preliminary.addAll(result.preliminary());
+            refined.addAll(result.refined());
+            catalog = catalog.plus(result.catalog());
+            issues.addAll(result.issues());
+            coverage.append(result.coverage());
         }
         var publication = new ArrayList<ReviewOutput.Decision>();
         var adjusted = new ArrayList<ReviewOutput.Decision>();
@@ -228,6 +218,56 @@ final class FocusedReview {
                 + ReviewReport.focusedReport(original, confirmed, concerns, completion.failedTasks(), language) + unreviewed);
         AtomicFiles.write(directory.resolve("review-status.md"), completion.markdown());
         progress.finish(stages, completion.complete() ? "Wrote report.md" : "Wrote incomplete report.md");
+    }
+
+    private static Followup followUp(Area area, ReviewTasks.Outcome outcome, boolean structured, EvidenceCatalog collected,
+                                     Set<String> changedPaths, CliOptions options, GitClient git, ProcessExecutor executor,
+                                     PromptFactory prompts, AgentRunner agent, Path directory, CommandProgress progress,
+                                     int stages, OutputLanguage language) throws IOException, InterruptedException {
+        if (!outcome.valid()) {
+            String issue = "focused/" + area.id() + " [" + outcome.failureKind() + "]; see focused/"
+                    + area.id() + "-state.properties";
+            return new Followup(area.id(), List.of(), List.of(), EvidenceCatalog.empty(), List.of(issue), "");
+        }
+        var issues = new ArrayList<String>();
+        var refined = new ArrayList<ReviewOutput.Decision>();
+        var coverage = new StringBuilder();
+        var evidence = area.evidence();
+        var index = new EvidenceIndex(evidence.catalog());
+        var response = parse(area, outcome.response(), index, structured);
+        String folder = "focused/" + area.id();
+        coverage.append("\n### ").append(area.id()).append(" follow-up\n\n");
+        var accepted = new ArrayList<>(response.candidates());
+        accepted.addAll(correctLocations(response.misplaced(), evidence, index, options, agent, directory,
+                folder, progress, stages, coverage, issues, language));
+        var candidates = accepted.stream().map(AdaptiveReview.Candidate::decision).toList();
+        var session = new EvidenceSession(evidence, new SupplementalEvidence(git, executor, options.languageCaches()),
+                options.maxSupplementalRequests(), options.maxKnowledgeQueries());
+        var corrected = ScopedCitationRepair.run(accepted, evidence, options, agent,
+                directory.resolve(folder).resolve("citations"), progress, stages, coverage);
+        refined.addAll(corrected);
+        var delivered = AdaptiveReview.deliver(accepted, evidence, session, folder);
+        var latest = ReviewQuality.latest(candidates, corrected);
+        if (response.requestedDeep()) {
+            var pending = latest.stream().filter(decision -> decision.verdict().status() == ReviewOutput.Status.INSUFFICIENT_EVIDENCE).toList();
+            if (response.candidates().isEmpty() && response.misplaced().isEmpty())
+                issues.add(folder + " reported an unassessed scope without an evidence question.");
+            for (var decision : pending) expand(decision, evidence, session, folder, collected, delivered);
+        }
+        var selected = latest.stream()
+                .filter(decision -> delivered.containsKey(decision.verdict().candidate().id())
+                        || needsIndependentVerification(decision, language, evidence.scope())).toList();
+        if (!selected.isEmpty()) {
+            var quality = new ReviewQuality(options, evidence, session, prompts, agent, directory, progress, stages);
+            boolean hasCallerContext = evidence.catalog().sources().stream().anyMatch(source -> source.role(EvidenceSource.Role.TARGET)
+                    && source.role(EvidenceSource.Role.IMPLEMENTATION) && !changedPaths.contains(source.path()));
+            String rules = "\n\n" + PromptFactory.SCOPED_OUTCOME_RULES;
+            if (hasCallerContext || response.requestedDeep()) rules += PromptFactory.SCOPED_IMPLEMENTATION_RULES;
+            refined.addAll(quality.verifyScoped(selected, delivered, folder, rules, true));
+        }
+        coverage.append(session.coverage());
+        if (delivered.isEmpty()) coverage.append("- No additional evidence was delivered after this scope.\n");
+        return new Followup(area.id(), candidates, refined, session.catalog(), issues, coverage.toString());
     }
 
     private static String allowedLocations(EvidenceBundle evidence) {
@@ -349,6 +389,9 @@ final class FocusedReview {
     private static String scopeInstructions(Area area, boolean structured) {
         return "Question: " + area.question() + "\n" + allowedLocations(area.evidence()) + """
                 Trace each concrete behavior to its actual code.
+                When code matches names, references or inputs, check distinct valid forms at the affected call site.
+                For a claimed omission, trace what the consumer loses after accounting for its scope, other paths
+                and fallbacks. A matcher's local result alone does not establish that impact.
                 Keep distinct triggers visible. If a premise is unproved, give the specific question and request only the
                 tracked evidence that can answer it. If no repository evidence can answer it, leave a maintainer question.
                 """ + ROUTE_RULES + (structured ? PromptFactory.SCOPED_JSON_OUTCOME_RULES : PromptFactory.SCOPED_OUTCOME_RULES);
