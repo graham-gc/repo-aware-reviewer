@@ -8,6 +8,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Pattern;
 import org.w3c.dom.Element;
@@ -37,7 +38,9 @@ final class AdaptiveReview {
     record Candidate(ReviewOutput.Decision decision, String requests, ReviewOutput.Decision citationRepair) {
         Candidate(ReviewOutput.Decision decision, String requests) { this(decision, requests, null); }
     }
-    record Response(String summary, boolean deep, boolean requestedDeep, List<Candidate> candidates) { }
+    record MisplacedCandidate(String id, Element decision) { }
+    record Response(String summary, boolean deep, boolean requestedDeep, List<Candidate> candidates,
+                    List<MisplacedCandidate> misplaced) { }
 
     static Selection select(CliOptions options, GitClient git, EvidenceBundle evidence, boolean allowNewRoutes)
             throws InterruptedException {
@@ -180,47 +183,70 @@ final class AdaptiveReview {
         String summary = text(fields, "summary");
         if (!fields.containsKey("decisions")) throw new IOException("Missing decisions");
         var candidates = new ArrayList<Candidate>();
+        var misplaced = new ArrayList<MisplacedCandidate>();
         var triggers = new LinkedHashMap<List<String>, ReviewOutput.Status>();
         boolean deep = route.equals("DEEP");
+        int ordinal = 0;
         for (var entry : children(fields.get("decisions"), "local-decision")) {
-            var values = fields(entry, ReviewSchema.LOCAL_DECISION);
-            var element = values.get("finding");
-            if (element == null) throw new IOException("Every local candidate requires a finding");
-            String id = prefix + "-" + (candidates.size() + 1);
-            String status = text(values, "status");
-            var candidate = ReviewOutput.finding(element, id, evidence.changedFiles(), false,
-                    scoped && status.equals("INSUFFICIENT_EVIDENCE"));
-            var completeTarget = evidence.catalog().sources().stream().filter(source -> source.path().equals(candidate.path())
-                    && source.role(EvidenceSource.Role.TARGET) && !source.role(EvidenceSource.Role.DIFF)
-                    && source.endOfFile() && source.firstLine() == 1).findFirst();
-            if (completeTarget.isPresent() && candidate.endLine() > completeTarget.get().text().lines().count())
-                throw new IOException("Local candidate location is outside the target file");
-            if (!status.equals("CONFIRMED")) values.remove("finding");
-            if (status.equals("INSUFFICIENT_EVIDENCE") && values.containsKey("support")
-                    && java.util.Arrays.stream(ReviewSupport.Kind.values()).noneMatch(kind -> kind.name().equals(values.get("support").getTextContent().strip()))) {
-                // An unresolved verdict can retain its checked citations without claiming a support classification.
-                values.remove("support");
-                values.remove("premises");
-                ResponseDiagnostics.record("Omitted the unrecognized optional support classification from an unresolved scoped verdict.");
+            String id = prefix + "-" + ++ordinal;
+            Candidate result;
+            try {
+                result = parseCandidate(entry, evidence, index, id, scoped);
+            } catch (ReviewOutput.FindingOutsideScopeException outside) {
+                if (!scoped) throw outside;
+                misplaced.add(new MisplacedCandidate(id, entry));
+                ResponseDiagnostics.record("Isolated candidate " + id + " with a finding location outside this scope.");
+                continue;
             }
-            String requests = values.containsKey("requests") ? values.get("requests").getTextContent().strip() : "";
-            if (!requests.isEmpty() && !status.equals("INSUFFICIENT_EVIDENCE"))
-                throw new IOException("Only an insufficient decision can request more evidence");
-            if (!requests.isEmpty() && EvidenceRequest.parse(requests).isEmpty()) {
-                ResponseDiagnostics.record("The unresolved scoped verdict did not specify an actionable evidence request.");
-                requests = "";
-            }
-            if (status.equals("CONFIRMED")) element.setAttribute("id", id);
-            var parsed = ReviewOutput.decision(values, candidate, evidence.changedFiles());
-            var result = scoped ? groundScoped(parsed, evidence, index, requests)
-                    : new Candidate(ReviewGrounding.verification(parsed, index, !requests.isEmpty()), requests);
             var decision = result.decision();
+            var candidate = decision.verdict().candidate();
             var key = List.of(candidate.path(), Integer.toString(candidate.line()), candidate.trigger().strip());
             var previous = triggers.putIfAbsent(key, decision.verdict().status());
             deep |= requiresDeep(decision) || previous != null && previous != decision.verdict().status();
             candidates.add(result);
         }
-        return new Response(summary, deep, route.equals("DEEP"), List.copyOf(candidates));
+        return new Response(summary, deep, route.equals("DEEP"), List.copyOf(candidates), List.copyOf(misplaced));
+    }
+
+    static Optional<Candidate> parseScopedCandidate(String reply, EvidenceBundle evidence, EvidenceIndex index, String id) throws IOException {
+        var block = xml(reply, "local-decision");
+        if (!block.remainder().isBlank()) throw new IOException("Return only one local-decision document");
+        return children(block.root(), null).isEmpty() ? Optional.empty()
+                : Optional.of(parseCandidate(block.root(), evidence, index, id, true));
+    }
+
+    private static Candidate parseCandidate(Element entry, EvidenceBundle evidence, EvidenceIndex index, String id, boolean scoped)
+            throws IOException {
+        var values = fields(entry, ReviewSchema.LOCAL_DECISION);
+        var element = values.get("finding");
+        if (element == null) throw new IOException("Every local candidate requires a finding");
+        String status = text(values, "status");
+        var candidate = ReviewOutput.finding(element, id, evidence.changedFiles(), false,
+                scoped && status.equals("INSUFFICIENT_EVIDENCE"));
+        var completeTarget = evidence.catalog().sources().stream().filter(source -> source.path().equals(candidate.path())
+                && source.role(EvidenceSource.Role.TARGET) && !source.role(EvidenceSource.Role.DIFF)
+                && source.endOfFile() && source.firstLine() == 1).findFirst();
+        if (completeTarget.isPresent() && candidate.endLine() > completeTarget.get().text().lines().count())
+            throw new IOException("Local candidate location is outside the target file");
+        if (!status.equals("CONFIRMED")) values.remove("finding");
+        if (status.equals("INSUFFICIENT_EVIDENCE") && values.containsKey("support")
+                && java.util.Arrays.stream(ReviewSupport.Kind.values()).noneMatch(kind -> kind.name().equals(values.get("support").getTextContent().strip()))) {
+            // An unresolved verdict can retain its checked citations without claiming a support classification.
+            values.remove("support");
+            values.remove("premises");
+            ResponseDiagnostics.record("Omitted the unrecognized optional support classification from an unresolved scoped verdict.");
+        }
+        String requests = values.containsKey("requests") ? values.get("requests").getTextContent().strip() : "";
+        if (!requests.isEmpty() && !status.equals("INSUFFICIENT_EVIDENCE"))
+            throw new IOException("Only an insufficient decision can request more evidence");
+        if (!requests.isEmpty() && EvidenceRequest.parse(requests).isEmpty()) {
+            ResponseDiagnostics.record("The unresolved scoped verdict did not specify an actionable evidence request.");
+            requests = "";
+        }
+        if (status.equals("CONFIRMED")) element.setAttribute("id", id);
+        var parsed = ReviewOutput.decision(values, candidate, evidence.changedFiles());
+        return scoped ? groundScoped(parsed, evidence, index, requests)
+                : new Candidate(ReviewGrounding.verification(parsed, index, !requests.isEmpty()), requests);
     }
 
     private static Candidate groundScoped(ReviewOutput.Decision parsed, EvidenceBundle evidence,
@@ -285,10 +311,14 @@ final class AdaptiveReview {
     }
 
     static String prompt(EvidenceBundle evidence, EvidenceIndex index, OutputLanguage language, String instructions) {
+        return prompt(evidence, index, language, instructions, false);
+    }
+
+    static String prompt(EvidenceBundle evidence, EvidenceIndex index, OutputLanguage language, String instructions, boolean scoped) {
         return instructions + "\n" + """
                 Put descriptive text in %s and escape XML or use CDATA.
 
-                Return only one <adaptive-review> document. Use <decisions/> for no findings. Repeat <local-decision>
+                Return only one <adaptive-review> document. Use <decisions/> %s. Repeat <local-decision>
                 for distinct candidates. Copy source IDs and cite actual block-relative lines, not repository line
                 numbers inside <lines>. The finding line/endLine use actual target-file coordinates. Cite the
                 baseline or the diff for attribution. A new-file diff header establishes that file's absence at base.
@@ -311,9 +341,11 @@ final class AdaptiveReview {
                 Optionally add a direct <nextCheck> naming the decision a maintainer can make. Omit <requests>
                 unless a tracked source can resolve the gap. In that case use one line per request in the format
                 REQUEST_FILE|target|path|all|Question this source can answer (base is also allowed).
-                Omit disproved candidates. For DEEP, supply a summary and <decisions/>.
+                Omit disproved candidates.%s
 
-                %s""".formatted(language.code(), EvidenceIndex.LINE_CITATION_GUIDANCE + promptEvidence(evidence, index));
+                %s""".formatted(language.code(), scoped ? "when there are no candidates" : "for no findings",
+                scoped ? "" : " For DEEP, supply a summary and <decisions/>.",
+                EvidenceIndex.LINE_CITATION_GUIDANCE + promptEvidence(evidence, index));
     }
 
     static String promptEvidence(EvidenceBundle evidence, EvidenceIndex index) {

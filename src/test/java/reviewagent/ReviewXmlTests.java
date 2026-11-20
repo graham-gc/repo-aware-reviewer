@@ -13,6 +13,7 @@ final class ReviewXmlTests {
     static void run() throws Exception {
         damagedQuoteDoesNotBecomeEvidence();
         missingContainerClosers();
+        repeatedContainerClosers();
         opaqueTextAndEnvelope();
         protocolFenceBoundaries();
         missingOpeningBracket();
@@ -112,6 +113,42 @@ final class ReviewXmlTests {
                 "grouping shares the same structural parser");
         String duplicate = premise.replace("</reason>", "</reason><status>CONFIRMED</status>");
         fails(() -> ReviewXml.xml(duplicate, "verification"));
+    }
+
+    private static void repeatedContainerClosers() throws Exception {
+        String xml = """
+                <verification>
+                  <status>INSUFFICIENT_EVIDENCE</status>
+                  <reason>Trace the check a < b && c > d.</reason>
+                  <premises>
+                    <premise><statement>First premise.</statement><basis>ASSUMPTION</basis></premise>
+                    <premise><statement>Second premise.</statement><basis>IMPLEMENTATION</basis></premise>
+                  </premises>
+                  <citations><citation><source>SRC-1</source><lines>1:2</lines></citation></citations>
+                </verification>
+                """;
+        String request = "REQUEST_FILE|target|runner.py|all|Check the guard\n";
+        String broken = xml.replace("</premises>", "</premise>") + request;
+        var repairs = XmlStructureRepair.candidates(broken, "verification");
+        require(repairs.size() == 1 && repairs.getFirst().response().equals(xml + request),
+                "replace only the repeated closing tag name and preserve the original response text");
+        var parsed = ReviewXml.xml(broken, "verification");
+        var fields = ReviewXml.fields(parsed.root(), ReviewSchema.VERIFICATION);
+        require(parsed.normalizations().size() == 1
+                && parsed.normalizations().getFirst().contains("Replaced repeated </premise> with </premises>")
+                && ReviewXml.children(fields.get("citations"), "citation").size() == 1
+                && parsed.root().getElementsByTagName("premise").getLength() == 2
+                && ReviewXml.text(fields, "status").equals("INSUFFICIENT_EVIDENCE")
+                && parsed.remainder().equals("\n" + request),
+                "preserve the verdict, two premises, root citations and adjacent file request");
+
+        var citations = ReviewXml.xml(xml.replace("</citations>", "</citation>"), "verification");
+        require(citations.normalizations().getFirst().contains("Replaced repeated </citation> with </citations>"),
+                "the rule applies to other structurally equivalent containers");
+        fails(() -> ReviewXml.xml(xml.replace("</premises>", "</premisse>"), "verification"));
+        fails(() -> ReviewXml.xml(xml.replace("</premises>", "</premise></premises>"), "verification"));
+        fails(() -> ReviewXml.xml(xml.replace("</premises>", "</premise>").replace("</verification>", ""), "verification"));
+        fails(() -> ReviewXml.xml(xml.replace("</premises>", "</premise><unknown/>"), "verification"));
     }
 
     private static void opaqueTextAndEnvelope() throws Exception {

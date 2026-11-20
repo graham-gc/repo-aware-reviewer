@@ -5,15 +5,16 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.regex.Pattern;
 
-/** Bounded delimiter insertion candidates. Never deletes text, creates values, or closes a truncated root. */
+/** Bounded delimiter repairs that preserve response values and require an explicit root closer. */
 final class XmlStructureRepair {
     record Candidate(String response, String note) { }
+    private enum ScanMode { TEXT_BOUNDARIES, RAW_RESPONSE, PROTECTED_FIELDS }
     private static final Pattern TAG = Pattern.compile("<(/?)([A-Za-z][A-Za-z0-9-]*)(?:\\s[^<>]*?)?\\s*(/?)>");
     private static final int MAX_CANDIDATES = 12;
 
     static void checkTextBoundaries(String content) throws AmbiguousTextFieldException {
         var possible = new ArrayList<Candidate>();
-        scan(content, content, 0, content.length(), false, possible);
+        scan(content, content, 0, content.length(), ScanMode.TEXT_BOUNDARIES, possible);
         if (!possible.isEmpty()) throw new AmbiguousTextFieldException("Ambiguous review text-field boundary: "
                 + possible.getFirst().note().replace("Inserted missing", "Possible missing")
                 + " No repair applied: close the text field explicitly, or use CDATA for literal protocol tags.");
@@ -34,17 +35,19 @@ final class XmlStructureRepair {
         end += root.length() + 3;
         String content = response.substring(start, end);
         var result = new ArrayList<Candidate>();
-        scan(response, content, start, end, false, result);
+        scan(response, content, start, end, ScanMode.RAW_RESPONSE, result);
         try {
             // Complete scalar fields are opaque before considering missing container delimiters.
-            scan(response, XmlTextFields.protect(content), start, end, true, result);
+            scan(response, XmlTextFields.protect(content), start, end, ScanMode.PROTECTED_FIELDS, result);
         } catch (IOException incompleteScalar) { /* Scalar candidates remain available; no guessing at EOF. */ }
         return List.copyOf(result);
     }
 
-    private static void scan(String response, String content, int start, int end, boolean protectedText, List<Candidate> result) {
+    private static void scan(String response, String content, int start, int end, ScanMode mode, List<Candidate> result) {
         var stack = new ArrayList<String>();
         var tokens = XmlTextFields.TOKEN.matcher(content);
+        String previousCloser = "";
+        int previousCloserEnd = 0;
         while (tokens.find() && result.size() < MAX_CANDIDATES) {
             var tag = TAG.matcher(tokens.group());
             if (!tag.matches()) continue;
@@ -54,7 +57,7 @@ final class XmlStructureRepair {
                 XmlTextFields.End fieldEnd = null;
                 try { fieldEnd = XmlTextFields.end(content, tokens.end(), name); }
                 catch (IOException missingEnd) { /* Search only for an explicit closing parent. */ }
-                if (!protectedText && !stack.isEmpty()) {
+                if (mode != ScanMode.PROTECTED_FIELDS && !stack.isEmpty()) {
                     int boundary = parentBoundary(content, tokens.end(), fieldEnd == null ? content.length() : fieldEnd.contentEnd(), stack.getLast());
                     if (boundary >= 0) add(result, response, content, start, end, boundary, "</" + name + ">",
                             "Inserted missing </" + name + "> before </" + stack.getLast() + ">", name);
@@ -68,8 +71,27 @@ final class XmlStructureRepair {
                 if (!selfClosing) stack.add(name);
             } else {
                 int ancestor = stack.lastIndexOf(name);
-                if (ancestor < 0) return;
-                if (protectedText && ancestor < stack.size() - 1 && stack.size() - ancestor <= 4) {
+                if (ancestor < 0) {
+                    // An immediately repeated child closer can be a typo for the current container's closer.
+                    if (mode == ScanMode.RAW_RESPONSE && stack.size() > 1 && name.equals(previousCloser)
+                            && ReviewSchema.allows(stack.getLast(), name)
+                            && content.substring(previousCloserEnd, tokens.start()).isBlank()
+                            && tokens.group().substring(tag.end(2), tokens.group().length() - 1).isBlank()) {
+                        String expected = stack.getLast();
+                        int from = start + tokens.start() + tag.start(2);
+                        int to = start + tokens.start() + tag.end(2);
+                        long line = content.substring(0, tokens.start()).chars().filter(c -> c == '\n').count() + 1;
+                        result.add(new Candidate(response.substring(0, from) + expected + response.substring(to),
+                                "Replaced repeated </" + name + "> with </" + expected + "> at response-block line " + line
+                                        + "; only the closing tag name changed; raw response retained."));
+                    }
+                    return;
+                }
+                if (ancestor == stack.size() - 1) {
+                    previousCloser = name;
+                    previousCloserEnd = tokens.end();
+                }
+                if (mode == ScanMode.PROTECTED_FIELDS && ancestor < stack.size() - 1 && stack.size() - ancestor <= 4) {
                     StringBuilder missing = new StringBuilder();
                     for (int i = stack.size() - 1; i > ancestor; i--) missing.append("</").append(stack.get(i)).append('>');
                     add(result, response, content, start, end, tokens.start(), missing.toString(),

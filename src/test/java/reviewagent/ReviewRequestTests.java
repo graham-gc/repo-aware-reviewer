@@ -29,9 +29,11 @@ final class ReviewRequestTests {
                   'Review the supplied scope'*)
                     case "$prompt" in
                       *'Question: Trace who can trigger'*)
-                        if [ -f "$fixture/expand.xml" ]; then cat "$fixture/expand.xml"; exit; fi ;;
+                        if [ -f "$fixture/expand.xml" ]; then cat "$fixture/expand.xml"; exit; fi
+                        if [ -f "$fixture/location-first.xml" ]; then cat "$fixture/location-first.xml"; exit; fi ;;
                     esac
                     printf '<adaptive-review><route>LOCAL</route><summary>Reviewed fixture.</summary><decisions/></adaptive-review>' ;;
+                  'Correct the finding location for only the supplied candidate'*) cat "$fixture/location-reply.xml" ;;
                   'You are the independent candidate verification'*)
                     case "$prompt" in
                       *'The scheduler may still block'*'APPROVED_ONLY'*)
@@ -50,6 +52,7 @@ final class ReviewRequestTests {
             new ReviewRequestTests(Files.createDirectory(fixture.resolve("discovery"))).discovery();
             new ReviewRequestTests(Files.createDirectory(fixture.resolve("java"))).javaCaller();
             new ReviewRequestTests(Files.createDirectory(fixture.resolve("expansion"))).expansion();
+            new ReviewRequestTests(Files.createDirectory(fixture.resolve("locations"))).locations();
         } finally {
             try (var paths = Files.walk(fixture)) {
                 for (var path : paths.sorted(Comparator.reverseOrder()).toList()) Files.delete(path);
@@ -80,6 +83,76 @@ final class ReviewRequestTests {
         check(Main.reviewExitCode(oversized) == 3
                 && Files.readString(oversized.resolve("review-status.md")).contains("Unreviewed change"),
                 "a hunk larger than a single request is still disclosed");
+        String first = Files.readString(oversized.resolve("focused/T-prompt.md"));
+        String next = Files.readString(oversized.resolve("focused/T2-prompt.md"));
+        String firstPath = first.contains("- b.txt\n") ? "b.txt" : "c.txt";
+        String nextPath = firstPath.equals("b.txt") ? "c.txt" : "b.txt";
+        check(first.contains("- " + firstPath + "\n") && next.contains("- " + nextPath + "\n")
+                && !first.contains(nextPath) && !next.contains(firstPath)
+                && !first.contains("a.txt") && !next.contains("a.txt"),
+                "each follow-up gives the model only the eligible paths for that scope");
+    }
+
+    private void locations() throws Exception {
+        write("auth/check.py", "def authorize(approved):\n    return approved\n");
+        write("queue/schedule.py", "limit = 1\n");
+        commit("base");
+        write("auth/check.py", "def authorize(approved):\n    return True\n");
+        write("queue/schedule.py", "limit = 2\n");
+        commit("focus and overview each get different files");
+        String misplaced = """
+                <local-decision><status>INSUFFICIENT_EVIDENCE</status>
+                  <reason>Whether downstream processing preserves the eligibility decision is unclear.</reason>
+                  <finding><title>Check downstream eligibility</title><path>queue/schedule.py</path>
+                  <line>1</line><endLine>1</endLine><trigger>Unapproved work is submitted</trigger>
+                  <impact>Work may continue</impact><evidence>The previous guard returned the input</evidence>
+                  <diffRelation>The eligibility result changes</diffRelation></finding>
+                </local-decision>
+                """;
+        String confirmed = """
+                <local-decision><status>CONFIRMED</status><reason>The guard now returns true for every input.</reason>
+                  <relation>INTRODUCED</relation><baseline>Before the guard returned the approved input.</baseline>
+                  <contract>The predicate tests whether the input is approved.</contract><support>REACHABLE_FAILURE</support>
+                  <premises>
+                    <premise><statement>The target returns true for any input.</statement><basis>IMPLEMENTATION</basis>
+                      <citations><citation><source>SRC-2</source><lines>1:2</lines></citation></citations></premise>
+                    <premise><statement>The predicate returns true for an unapproved request.</statement><basis>OUTCOME</basis>
+                      <citations><citation><source>SRC-2</source><lines>1:2</lines></citation></citations></premise>
+                  </premises>
+                  <citations><citation><source>SRC-3</source><lines>2:2</lines></citation>
+                    <citation><source>SRC-2</source><lines>1:2</lines></citation></citations>
+                  <finding><title>Unapproved input passes the predicate</title><severity>LOW</severity><path>auth/check.py</path>
+                  <line>2</line><endLine>2</endLine><trigger>The predicate receives false.</trigger>
+                  <impact>The predicate returns true for an unapproved request.</impact><evidence>The target returns true.</evidence>
+                  <diffRelation>The changed line replaces the approval input.</diffRelation></finding>
+                </local-decision>
+                """;
+        Files.writeString(root.resolve("location-first.xml"), "<adaptive-review><route>LOCAL</route>"
+                + "<summary>Reviewed the guard.</summary><decisions>" + misplaced + confirmed + "</decisions></adaptive-review>");
+        Path correction = root.resolve("location-reply.xml");
+        Files.writeString(correction, misplaced.replace("queue/schedule.py", "auth/check.py"));
+        var resolved = review();
+        String report = Files.readString(resolved.resolve("report.md"));
+        String scope = Files.readString(resolved.resolve("focused/F1-prompt.md"));
+        String repair = Files.readString(resolved.resolve("focused/F1/locations/F1-1-prompt.md"));
+        check(Main.reviewExitCode(resolved) == 0 && calls(resolved, 3) && scope.contains("- auth/check.py\n")
+                && !scope.contains("queue/schedule.py") && repair.contains("Check downstream eligibility")
+                && !repair.contains("Unapproved input passes the predicate")
+                && report.contains("Confirmed defects: 1") && report.contains("F1-1")
+                && Files.readString(resolved.resolve("verified-findings.md")).contains("Unapproved input passes the predicate")
+                && Files.readString(resolved.resolve("coverage.md")).contains("F1-2 — CONFIRMED"),
+                "only the misplaced candidate is corrected and its confirmed peer keeps its ID and proof");
+        pipeline.run(options("--resume", resolved.toString()));
+        check(calls(resolved, 0), "a corrected candidate can reuse its validated checkpoint");
+
+        Files.writeString(correction, misplaced);
+        var failed = review();
+        check(Main.reviewExitCode(failed) == 3 && calls(failed, 3)
+                && Files.readString(failed.resolve("review-status.md")).contains("F1-1 — finding location outside")
+                && Files.readString(failed.resolve("report.md")).contains("Confirmed defects: 1")
+                && !Files.exists(failed.resolve("focused/F1-repair-prompt.md"))
+                && !Files.exists(failed.resolve("focused/F1/locations/F1-1-repair-prompt.md")),
+                "a failed location correction leaves one unfinished candidate and preserves the valid peer");
     }
 
     private void discovery() throws Exception {
@@ -163,7 +236,10 @@ final class ReviewRequestTests {
                 """);
         var run = review();
         var verify = Files.readString(run.resolve("focused/F1/F1-1-prompt.md"));
+        var focusedPrompt = Files.readString(run.resolve("focused/F1-prompt.md"));
         check(Main.reviewExitCode(run) == 0 && calls(run, 3) && verify.contains("APPROVED_ONLY")
+                && focusedPrompt.contains("Use DEEP with an INSUFFICIENT_EVIDENCE decision")
+                && !focusedPrompt.contains("For DEEP, supply a summary and <decisions/>.")
                 && verify.contains("A method's comment or a guard in a caller is IMPLEMENTATION evidence")
                 && !verify.contains("EXTRANEOUS_CONTEXT") && !Files.exists(run.resolve("discovery"))
                 && Files.readString(run.resolve("coverage.md")).contains("Expanded focused/F1/F1-1 with collected implementation: queue/schedule.py.")
@@ -179,6 +255,13 @@ final class ReviewRequestTests {
                 && Files.readString(unavailable.resolve("coverage.md")).contains("scope expansion: Stopped; no new evidence")
                 && Files.readString(unavailable.resolve("report.md")).contains("The scheduler may still block this request"),
                 "an expansion without relevant new evidence retains the gap and does not launch a model call");
+
+        Files.writeString(response, "<adaptive-review><route>DEEP</route>"
+                + "<summary>No concrete candidate can be anchored.</summary><decisions/></adaptive-review>");
+        var unassessed = review();
+        check(Main.reviewExitCode(unassessed) == 3 && calls(unassessed, 2)
+                && Files.readString(unassessed.resolve("review-status.md")).contains("focused/F1 reported an unassessed scope"),
+                "DEEP without a concrete candidate reports unfinished coverage without extra model calls");
     }
 
     private void write(String relative, String content) throws Exception {

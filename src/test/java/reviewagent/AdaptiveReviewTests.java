@@ -97,6 +97,7 @@ final class AdaptiveReviewTests {
             check(Main.reviewExitCode(local) == 0 && calls(local, 1) && report(local).contains("ZeroDivisionError")
                     && report(local).contains("calculator.py:2 @"), "one call publishes a grounded local finding");
             check(Files.readString(local.resolve("coverage.md")).contains("- adaptive")
+                    && Files.readString(local.resolve("adaptive/local-prompt.md")).contains("For DEEP, supply a summary and <decisions/>.")
                     && !Files.exists(local.resolve("adjudication")), "local route and no publication round");
 
             pipeline.run(options(arguments, "--resume", local.toString()));
@@ -597,6 +598,7 @@ final class AdaptiveReviewTests {
         Path constrained = pipeline.run(options(arguments, "--focused-json-schema"));
         check(Main.reviewExitCode(constrained) == 0 && calls(constrained, 2)
                 && report(constrained).contains("### [LOW] Go policy ignores activity")
+                && Files.readString(constrained.resolve("focused/F1-prompt.md")).contains("Use DEEP with an INSUFFICIENT_EVIDENCE decision")
                 && Files.readString(constrained.resolve("coverage.md")).contains("The worker checks authorization again."),
                 "schema-constrained findings and requests use the same grounding and evidence follow-up as XML");
         pipeline.run(options(arguments, "--focused-json-schema", "--resume", constrained.toString()));

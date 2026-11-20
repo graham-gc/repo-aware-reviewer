@@ -237,6 +237,12 @@ final class ReviewOutput {
         return finding(element, id, changedFiles, checkCandidateId, false);
     }
 
+    static final class FindingOutsideScopeException extends IOException {
+        FindingOutsideScopeException(String path) {
+            super("Finding location is outside the changed files: " + EvidenceText.oneLine(path));
+        }
+    }
+
     static ReviewFinding finding(Element element, String id, List<String> changedFiles, boolean checkCandidateId,
                                  boolean allowUnrated) throws IOException {
         List<Element> contents = children(element, null);
@@ -259,7 +265,7 @@ final class ReviewOutput {
         }
         String path = text(fields, "path");
         if (!changedFiles.contains(path)) {
-            throw new IOException("Finding location is outside the changed files: " + EvidenceText.oneLine(path));
+            throw new FindingOutsideScopeException(path);
         }
         try {
             int first = Integer.parseInt(text(fields, "line"));

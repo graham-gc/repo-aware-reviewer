@@ -203,6 +203,10 @@ final class ReviewXml {
 
     static String replaceRoot(String response, String rootName, Element root) throws IOException {
         Span span = rootSpan(response, rootName);
+        return response.substring(0, span.start()) + markup(root) + response.substring(span.end());
+    }
+
+    static String markup(Element root) throws IOException {
         try {
             var factory = javax.xml.transform.TransformerFactory.newInstance();
             factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "");
@@ -211,9 +215,9 @@ final class ReviewXml {
             transformer.setOutputProperty(javax.xml.transform.OutputKeys.OMIT_XML_DECLARATION, "yes");
             var output = new java.io.StringWriter();
             transformer.transform(new javax.xml.transform.dom.DOMSource(root), new javax.xml.transform.stream.StreamResult(output));
-            return response.substring(0, span.start()) + output + response.substring(span.end());
+            return output.toString();
         } catch (javax.xml.transform.TransformerException | IllegalArgumentException invalid) {
-            throw new IOException("Cannot serialize the corrected assessment without changing its envelope", invalid);
+            throw new IOException("Cannot serialize the review XML element", invalid);
         }
     }
 

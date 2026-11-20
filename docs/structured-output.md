@@ -8,12 +8,16 @@ Structured review tasks can attach a schema to the model invocation. With `--foc
 
 This opt-in covers the initial risk scopes. The overview, local and documentation reviews, and independent verification use the existing XML protocol. Keep the flag on resume. For a matched comparison, review the same pinned change with and without the flag. Compare completion, citation-backed findings, CLI invocations, and Claude Code's reported `num_turns` across initial review, corrections, and verification. A CLI invocation can span multiple turns.
 
+Each focused request lists the exact finding paths accepted by its scope validator. Deferred files stay visible in `coverage.md` and are sent with the request that reviews them. Other supplied source can support a finding at an allowed path. A candidate with an out-of-scope location gets a separate correction using the same pinned evidence. If the location remains unresolved, the report marks that check unfinished and preserves the other validated candidates.
+
+For a focused scope, `DEEP` with an `INSUFFICIENT_EVIDENCE` decision identifies a concrete candidate that needs broader evidence. `DEEP` with empty decisions marks an unassessed scope as unfinished. An assessed scope with no candidates uses `LOCAL` and empty decisions.
+
 ## Boundaries
 
 - `ReviewSchema` owns the scalar/container vocabulary and permitted children. It rejects unknown children and repeated single-value fields.
 - `XmlTextFields` keeps prose and source code opaque, preserving CDATA, operators and literal XML-like text.
 - `ReviewXml` finds one response envelope, handles XML fences and trivia, disables external XML access, and validates the parsed tree.
-- `XmlStructureRepair` proposes bounded closing-delimiter insertions after strict parsing fails. Only one structurally valid candidate may be adopted. It never creates a status, finding, requirement, source quote or closing root at EOF.
+- `XmlStructureRepair` proposes bounded delimiter insertions or a single closing-tag name replacement after strict parsing fails. Only one structurally valid candidate may be adopted. It never creates a status, finding, requirement, source quote or closing root at EOF.
 - `ReviewGrounding` independently validates identities, exact quotations, selected source ranges, provenance, finding locations and publication prerequisites.
 
 ## Recovery policy
@@ -25,14 +29,15 @@ This opt-in covers the initial risk scopes. The overview, local and documentatio
 | Backtick/tilde protocol fences, longer closing fences, or a Markdown fence closed by EOF | Recognize the wrapper only around an existing complete XML root. An XML root inside a different-language code block is rejected. Unrelated empty fences are preserved. |
 | XML-like source inside CDATA | Preserve the text, including literal protocol delimiters. |
 | Missing scalar closer with one valid closing-parent boundary | Insert the delimiter only when strict parsing and the full structural schema yield one candidate. Preserve all scalar text. |
-| Missing adjacent container closers before an existing ancestor close | Consider a bounded insertion; require unique structural validity. |
+| Missing adjacent container closers before an existing ancestor close | Consider a bounded insertion and require unique structural validity. |
+| A child container closer is immediately repeated where its parent container should close | Try replacing the second closer's name when the parent is still open and the root already has an explicit closer. Require unique structural validity and keep the original text. |
 | Two valid structural interpretations | Reject rather than choose one. |
 | A text field appears to swallow sibling citations | Require an explicit closer or CDATA; do not silently accept the merged field. |
 | A root is truncated or absent | Reject; do not infer the missing response. |
-| Unknown/mismatched closers, unknown fields, duplicate scalar fields | Reject; do not rename or discard them. |
+| Other mismatched closers, unknown fields, duplicate scalar fields | Reject. |
 | Source text is corrupted inside an otherwise recovered tree | Exact-source validation still rejects it. A separate source-correction attempt may select the actual included excerpt. |
 
-Recovery is deliberately narrow. It examines at most 12 insertion candidates and does not combine arbitrary edits at different positions. Source XML containing protocol delimiters should use CDATA when it would otherwise be structurally ambiguous.
+Recovery examines at most 12 candidates, each with an edit at one position. Source XML containing protocol delimiters should use CDATA when it would otherwise be structurally ambiguous.
 
 ## Citation protocol
 
