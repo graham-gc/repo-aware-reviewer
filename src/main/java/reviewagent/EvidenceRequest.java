@@ -7,6 +7,20 @@ import java.util.regex.Pattern;
 
 record EvidenceRequest(int line, String text) {
     private static final Pattern MARKER = Pattern.compile("REQUEST_[A-Z][A-Z_]*\\|");
+    static final String SCOPED_GUIDANCE = """
+
+            SCOPED EVIDENCE REQUESTS
+            State the missing premise and which answer would change the verdict. Request related base and target
+            excerpts together. Use a line range or symbol selector when the file is known. To locate callers or
+            readers in tracked source, use a literal symbol or resource name from the supplied evidence:
+            REQUEST_FILE|target|src/main/**/*.java|references:Service.write|Find the caller and its guard
+            In <adaptive-review> XML, put the raw request lines directly inside <requests>, without child tags.
+            In structured JSON, use one string per item in the requests array. For <verification> XML, put the
+            lines after the closing </verification> tag.
+            The CLI supplies bounded pinned excerpts for a literal reference search. Check the binding and reachability.
+            A file-name index alone will not schedule a scoped follow-up. If the decisive premise cannot be located,
+            record the specific evidence gap in the verdict.
+            """;
 
     String key() {
         int count = text.startsWith("REQUEST_KNOWLEDGE|") ? 3 : text.startsWith("REQUEST_LANGUAGE|") ? 7 : 5;

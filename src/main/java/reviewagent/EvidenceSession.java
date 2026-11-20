@@ -95,13 +95,23 @@ final class EvidenceSession {
 
     /** Re-deliver known material to this recipient, not to every candidate sharing the session. */
     Set<String> delivery(String requests, EvidenceCatalog supplied) {
+        return delivery(requests, supplied, true);
+    }
+
+    Set<String> scopedDelivery(String requests, EvidenceCatalog supplied) {
+        return delivery(requests, supplied, false);
+    }
+
+    private Set<String> delivery(String requests, EvidenceCatalog supplied, boolean includeNavigation) {
         var result = new LinkedHashSet<String>();
         var visible = supplied.sources().stream().map(EvidenceSource::id).collect(java.util.stream.Collectors.toSet());
         var available = catalog();
         for (EvidenceRequest request : EvidenceRequest.parse(requests)) {
             if (!collector.reusable(bundle(supplied, 0), request.text()).isEmpty()) continue;
             for (String id : fulfilled.getOrDefault(request.key(), Set.of())) {
-                if (!visible.contains(id) && !FileEvidenceCache.alreadySupplied(available.source(id), supplied)) result.add(id);
+                var source = available.source(id);
+                if (source == null || !includeNavigation && source.role(EvidenceSource.Role.INDEX)) continue;
+                if (!visible.contains(id) && !FileEvidenceCache.alreadySupplied(source, supplied)) result.add(id);
             }
         }
         return java.util.Collections.unmodifiableSet(result);

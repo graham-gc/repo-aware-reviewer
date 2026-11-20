@@ -131,16 +131,17 @@ final class FocusedReview {
                     : structured ? structuredPrompt(area, index, language, assignment + instructions, schema)
                     : AdaptiveReview.prompt(area.evidence(), index, language,
                             assignment + output + (riskScope ? RISK_XML_CONTRACT : "") + instructions, true);
+            String guidedPrompt = prompt + EvidenceRequest.SCOPED_GUIDANCE;
             Path savedPrompt = focused.resolve(area.id() + "-prompt.md");
             if (!structured && resume && Files.isRegularFile(savedPrompt)) {
                 String saved = Files.readString(savedPrompt);
                 // Keep exact matches for earlier prompts so validated checkpoints remain reusable.
-                if (!saved.equals(prompt) && (saved.equals(AdaptiveReview.prompt(
+                if (saved.equals(prompt) || saved.equals(AdaptiveReview.prompt(
                         area.evidence(), index, language, assignment + instructions, true))
                         || riskScope && saved.equals(AdaptiveReview.prompt(
-                            area.evidence(), index, language, assignment + output + instructions, true)))) prompt = saved;
+                            area.evidence(), index, language, assignment + output + instructions, true))) guidedPrompt = saved;
             }
-            tasks.add(new ReviewTasks.Task(area.id(), prompt,
+            tasks.add(new ReviewTasks.Task(area.id(), guidedPrompt,
                     reply -> parse(area, reply, index, structured), null, structured ? schema : null));
             AtomicFiles.write(focused.resolve(area.id() + "-evidence.md"), area.evidence().catalog().manifest());
             coverage.append("\n### ").append(area.id()).append(" — ").append(area.name()).append("\n\n")
@@ -461,7 +462,7 @@ final class FocusedReview {
         var evidence = new EvidenceBundle(original.scope(), anchors, markdown, "", original.supplementBudget(), null,
                 new EvidenceCatalog(List.copyOf(sources.values()), true));
         var area = new Area(COMPLETE_SCOPE, "Complete diff in one request", questions.toString(), evidence, detail, List.of());
-        return EvidenceText.bytes(completeDiffPrompt(area, language)) <= limit ? area : null;
+        return EvidenceText.bytes(completeDiffPrompt(area, language) + EvidenceRequest.SCOPED_GUIDANCE) <= limit ? area : null;
     }
 
     private static Area scope(String id, String name, String question, EvidenceBundle original, GitClient git,

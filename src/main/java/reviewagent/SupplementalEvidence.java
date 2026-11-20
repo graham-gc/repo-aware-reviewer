@@ -7,9 +7,13 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 final class SupplementalEvidence {
     private static final int MAX_SOURCE_BYTES = 1_000_000;
+    private static final int MAX_REFERENCE_FILES = 12;
+    private static final int MAX_REFERENCE_EXCERPTS = 6;
+    private static final int REFERENCE_CONTEXT = 10;
 
     record Result(String markdown, String coverage, boolean hasMaterial, EvidenceCatalog catalog,
                   java.util.Map<String, Set<String>> resolvedSources) {
@@ -126,6 +130,8 @@ final class SupplementalEvidence {
                 Excerpt excerpt;
                 if (query.operation() == EvidenceQuery.Operation.FIND_FILES) {
                     excerpt = new Excerpt(new RepositoryBrowser(repository).source(revision, query.resource(), quota), "INDEX_ONLY");
+                } else if (query.operation() == EvidenceQuery.Operation.FIND_REFERENCES) {
+                    excerpt = references(evidence, revision, query, quota);
                 } else if (query.operation() == EvidenceQuery.Operation.READ_FILE) {
                     if (evidence.scopedKnowledge() != null && evidence.scopedKnowledge().isSourcePath(query.resource())) {
                         throw new IOException("Use a knowledge query for the scoped knowledge document");
@@ -179,6 +185,45 @@ final class SupplementalEvidence {
                 coverage.append(summary).append(knowledge.coverage()).toString(), material, catalog, java.util.Map.copyOf(resolved));
     }
 
+    private Excerpt references(EvidenceBundle evidence, String revision, EvidenceQuery query, int quota)
+            throws IOException, InterruptedException {
+        var inScope = RepositoryBrowser.pathsMatching(query.resource());
+        String reference = query.reference();
+        var exact = Pattern.compile("(?<![\\p{L}\\p{N}_$-])" + Pattern.quote(reference) + "(?![\\p{L}\\p{N}_$-])");
+        var matches = git.filesMatching(revision, List.of(reference), RepositoryBrowser.searchPathspec(query.resource())).stream()
+                .filter(path -> path.equals(query.resource()) || inScope.test(path))
+                .filter(this::eligiblePath)
+                .filter(path -> evidence.scopedKnowledge() == null || !evidence.scopedKnowledge().isSourcePath(path))
+                .sorted().toList();
+        var sources = new ArrayList<EvidenceSource>();
+        var blocks = new StringBuilder();
+        boolean limited = matches.size() > MAX_REFERENCE_FILES;
+        for (String path : matches.stream().limit(MAX_REFERENCE_FILES).toList()) {
+            List<String> lines;
+            try { lines = git.regularBlobAt(revision, path, MAX_SOURCE_BYTES).lines().toList(); }
+            catch (IOException unavailable) { limited = true; continue; }
+            for (int line = 0; line < lines.size(); line++) {
+                if (!exact.matcher(lines.get(line)).find()) continue;
+                int first = Math.max(1, line + 1 - REFERENCE_CONTEXT);
+                int last = Math.min(lines.size(), line + 1 + REFERENCE_CONTEXT);
+                var source = fileExcerpt(evidence.scope(), revision, path, lines, first, last);
+                String block = source.markdown();
+                int bytes = EvidenceText.bytes(block);
+                if (sources.size() >= MAX_REFERENCE_EXCERPTS || bytes > quota) {
+                    limited = true;
+                    break;
+                }
+                sources.add(source);
+                blocks.append(block);
+                quota -= bytes;
+                line = last - 1;
+            }
+        }
+        if (sources.isEmpty()) throw new IOException("No readable pinned excerpts matched the literal reference within budget");
+        return new Excerpt(blocks.toString(), "INCLUDED (literal reference excerpts; verify binding"
+                + (limited ? "; partial search coverage" : "") + ")", new EvidenceCatalog(sources, true));
+    }
+
     private Excerpt repositoryFile(ReviewScope scope, String revision, String path, String selector, int quota)
             throws IOException, InterruptedException {
         if (!eligiblePath(path)) {
@@ -212,15 +257,20 @@ final class SupplementalEvidence {
         if (bySymbol && to - from >= 200) {
             throw new IOException("Method spans more than 200 lines; request the relevant line range instead");
         }
-        List<String> lines = source.lines().skip(from - 1L).limit(to - from + 1L).toList();
-        if (lines.isEmpty()) {
+        List<String> lines = source.lines().toList();
+        if (from > lines.size()) {
             throw new IOException("Requested range is beyond the end of the file");
         }
-        String location = "lines " + from + "–" + (from + lines.size() - 1);
-        EvidenceSource sourceBlock = EvidenceSources.file(revision, path, from, title + " (" + location + ")",
-                String.join("\n", lines), scope, languages);
-        if (from + lines.size() - 1 == source.lines().count()) sourceBlock = sourceBlock.throughEndOfFile();
+        int last = Math.min(to, lines.size());
+        String location = "lines " + from + "–" + last;
+        var sourceBlock = fileExcerpt(scope, revision, path, lines, from, last);
         return new Excerpt(sourceBlock, bySymbol ? "INCLUDED (" + location + ")" : "INCLUDED");
+    }
+
+    private EvidenceSource fileExcerpt(ReviewScope scope, String revision, String path, List<String> lines, int first, int last) {
+        var source = EvidenceSources.file(revision, path, first, path + " at " + revision + " (lines " + first + "–" + last + ")",
+                String.join("\n", lines.subList(first - 1, last)), scope, languages);
+        return last == lines.size() ? source.throughEndOfFile() : source;
     }
 
     private boolean eligiblePath(String path) {

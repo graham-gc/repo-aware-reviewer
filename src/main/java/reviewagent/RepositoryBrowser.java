@@ -2,6 +2,7 @@ package reviewagent;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.function.Predicate;
 import java.util.regex.Pattern;
 
 /** Language-neutral discovery of regular tracked paths at an immutable revision. */
@@ -20,10 +21,9 @@ final class RepositoryBrowser {
     }
 
     EvidenceSource source(String revision, String query, int budget) throws IOException, InterruptedException {
-        String prefix = directoryPrefix(query);
-        Pattern pattern = query.contains("*") || query.contains("?") ? glob(query) : null;
+        var matches = pathsMatching(query);
         List<String> matching = repository.paths(revision).stream().filter(RepositoryPathPolicy::allowed)
-                .filter(path -> pattern == null ? path.startsWith(prefix) : pattern.matcher(path).matches()).sorted().toList();
+                .filter(matches).sorted().toList();
         StringBuilder body = new StringBuilder("Tracked repository files (metadata only; all languages).\n");
         int listed = 0;
         for (String path : matching) {
@@ -39,6 +39,21 @@ final class RepositoryBrowser {
         String block = source.markdown();
         if (EvidenceText.bytes(block) > budget) throw new IOException("Repository navigation exceeds the evidence budget");
         return source;
+    }
+
+    static Predicate<String> pathsMatching(String query) throws IOException {
+        String prefix = directoryPrefix(query);
+        if (!(query.contains("*") || query.contains("?"))) return path -> path.startsWith(prefix);
+        Pattern pattern = glob(query);
+        return path -> pattern.matcher(path).matches();
+    }
+
+    static String searchPathspec(String query) {
+        int wildcard = query.indexOf('*');
+        int question = query.indexOf('?');
+        if (wildcard < 0 || question >= 0 && question < wildcard) wildcard = question;
+        String prefix = wildcard < 0 ? query : query.substring(0, query.lastIndexOf('/', wildcard) + 1);
+        return prefix.isEmpty() || prefix.equals(".") ? ":(top,glob)**" : ":(top,literal)" + prefix;
     }
 
     private static String directoryPrefix(String query) throws IOException {

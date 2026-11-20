@@ -109,7 +109,7 @@ final class AdaptiveReview {
                       AgentRunner agent, Path directory, CommandProgress progress, int stages, String routeReason)
             throws IOException, InterruptedException {
         var index = new EvidenceIndex(evidence.catalog());
-        var task = new ReviewTasks.Task("local", prompt(evidence, index, OutputLanguage.parse(options.language())),
+        var task = new ReviewTasks.Task("local", prompt(evidence, index, OutputLanguage.parse(options.language())) + EvidenceRequest.SCOPED_GUIDANCE,
                 reply -> parse(reply, evidence, index, "L"));
         Path adaptive = directory.resolve("adaptive");
         progress.step(2, stages, "Reviewing the local change (0 of 1 complete)");
@@ -159,7 +159,7 @@ final class AdaptiveReview {
         var delivered = new LinkedHashMap<String, Set<String>>();
         for (var candidate : requested) {
             String id = candidate.decision().verdict().candidate().id();
-            var sources = session.delivery(candidate.requests(), evidence.catalog());
+            var sources = session.scopedDelivery(candidate.requests(), evidence.catalog());
             if (!sources.isEmpty()) delivered.put(id, sources);
             session.recordFollowup(folder + "/" + id, candidate.requests(), sources);
         }

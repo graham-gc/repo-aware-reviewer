@@ -67,6 +67,7 @@ final class ReviewQuality {
                         + "\nFor another evidence request, cite what the newly supplied material actually proves "
                         + "and identify the remaining premise that determines the outcome. Ask for the smallest "
                         + "source excerpt that can resolve that premise. Use an insufficient verdict when the gap cannot be resolved.\n"
+                        + EvidenceRequest.SCOPED_GUIDANCE
                         + (delivered.containsKey(candidate.id()) ? "\nPREVIOUS DECISION — RECHECK WITH THE NEW EVIDENCE\n"
                            + PromptFactory.decisionSummary(previous.get(candidate.id()), view.index()) : ""),
                 candidate -> {
@@ -297,16 +298,14 @@ final class ReviewQuality {
             for (String id : replies.keySet()) continuations.put(id, new VerificationContinuation(results.get(id),
                     candidateRequests.getOrDefault(id, ""), session.lastCoverage(),
                     views.get(id).bundle().catalog().sources().stream().map(EvidenceSource::id).collect(java.util.stream.Collectors.toSet())));
-            var delivered = new LinkedHashSet<String>();
-            var nextDelivery = new LinkedHashMap<String, Set<String>>();
+            var delivered = new LinkedHashMap<String, Set<String>>();
             for (var entry : candidateRequests.entrySet()) {
-                Set<String> needed = session.delivery(entry.getValue(), views.get(entry.getKey()).bundle().catalog());
+                var supplied = views.get(entry.getKey()).bundle().catalog();
+                Set<String> needed = newEvidenceOnly ? session.scopedDelivery(entry.getValue(), supplied)
+                        : session.delivery(entry.getValue(), supplied);
                 retainedEvidence.computeIfAbsent(entry.getKey(), unused -> new LinkedHashSet<>()).addAll(needed);
                 if (results.get(entry.getKey()).verdict().status() == ReviewOutput.Status.INSUFFICIENT_EVIDENCE) {
-                    if (!needed.isEmpty()) {
-                        delivered.add(entry.getKey());
-                        nextDelivery.put(entry.getKey(), needed);
-                    }
+                    if (!needed.isEmpty()) delivered.put(entry.getKey(), needed);
                     if (newEvidenceOnly && !entry.getValue().isBlank())
                         session.recordFollowup(path + "/" + entry.getKey(), entry.getValue(), needed);
                     else session.recordDelivery(path + "/" + entry.getKey(), needed);
@@ -314,10 +313,10 @@ final class ReviewQuality {
             }
             saveEvidence();
             if (newEvidenceOnly ? delivered.isEmpty() : !material && delivered.isEmpty() && awaitingVerdicts.isEmpty()) break;
-            lastDelivery = nextDelivery;
+            lastDelivery = delivered;
             pending = findings.stream().filter(candidate -> results.get(candidate.id()).verdict().status()
                     == ReviewOutput.Status.INSUFFICIENT_EVIDENCE)
-                    .filter(candidate -> !newEvidenceOnly || delivered.contains(candidate.id())).toList();
+                    .filter(candidate -> !newEvidenceOnly || delivered.containsKey(candidate.id())).toList();
             round++;
         }
         return findings.stream().map(candidate -> results.get(candidate.id())).toList();

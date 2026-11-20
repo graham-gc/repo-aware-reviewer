@@ -31,11 +31,20 @@ final class ReviewRequestTests {
                       *'Question: Trace who can trigger'*)
                         if [ -f "$fixture/expand.xml" ]; then cat "$fixture/expand.xml"; exit; fi
                         if [ -f "$fixture/stalled-xml" ]; then cat "$fixture/stalled-xml"; exit; fi
+                        if [ -f "$fixture/navigation.xml" ]; then cat "$fixture/navigation.xml"; exit; fi
                         if [ -f "$fixture/location-first.xml" ]; then cat "$fixture/location-first.xml"; exit; fi ;;
                     esac
                     printf '<adaptive-review><route>LOCAL</route><summary>Reviewed fixture.</summary><decisions/></adaptive-review>' ;;
                   'Correct the finding location for only the supplied candidate'*) cat "$fixture/location-reply.xml" ;;
                   'You are the independent candidate verification'*)
+                    if [ -f "$fixture/navigation.xml" ]; then
+                        case "$prompt" in
+                          *'CALLER_GUARD_EVIDENCE'*)
+                            printf '<verification><status>REJECTED</status><reason>The pinned caller already rejects unchecked requests.</reason></verification>' ;;
+                          *) printf '<verification><status>INSUFFICIENT_EVIDENCE</status><reason>The caller remains unlocated.</reason></verification>\\nREQUEST_FILE|target|queue|index|Find the caller\\n' ;;
+                        esac
+                        exit
+                    fi
                     if [ -f "$fixture/stalled-xml" ]; then
                         case "$prompt" in
                           *'CONSUMER_BLOCKS_UNAPPROVED'*)
@@ -69,6 +78,7 @@ final class ReviewRequestTests {
             new ReviewRequestTests(Files.createDirectory(fixture.resolve("java"))).javaCaller();
             new ReviewRequestTests(Files.createDirectory(fixture.resolve("expansion"))).expansion();
             new ReviewRequestTests(Files.createDirectory(fixture.resolve("stalled"))).stalledEvidence();
+            new ReviewRequestTests(Files.createDirectory(fixture.resolve("navigation"))).navigationEvidence();
             new ReviewRequestTests(Files.createDirectory(fixture.resolve("locations"))).locations();
         } finally {
             try (var paths = Files.walk(fixture)) {
@@ -319,6 +329,59 @@ final class ReviewRequestTests {
                 && Files.readString(continued.resolve("focused/F1/round-3/F1-1-prompt.md")).contains("CONSUMER_BLOCKS_UNAPPROVED")
                 && !Files.readString(continued.resolve("report.md")).contains("Unapproved work may pass the guard"),
                 "a new pinned producer citation justifies continuing to the decisive consumer evidence");
+    }
+
+    private void navigationEvidence() throws Exception {
+        write("auth/check.py", "def authorize(approved):\n    return approved\n");
+        write("queue/caller.py", "def schedule(approved):\n    if not approved:\n        return 'CALLER_GUARD_EVIDENCE'\n    return rules.authorize(approved)  # approval-rules.json\n");
+        write("queue/near_match.py", "def schedule(approved):\n    return rules.authorize_later(approved)\n");
+        write("elsewhere/unrelated.py", "def schedule(approved):\n    return rules.authorize(approved)  # OUT_OF_SCOPE_REFERENCE\n");
+        write("other.py", "OTHER_MATERIAL = 1\n");
+        commit("base");
+        write("auth/check.py", "def authorize(approved):\n    return True\n");
+        commit("change the permission check");
+        write("queue/caller.py", "WORKTREE_ONLY = rules.authorize(True)\n");
+        Path response = root.resolve("navigation.xml");
+        String candidate = """
+                <adaptive-review><route>DEEP</route><summary>Check admission.</summary><decisions>
+                  <local-decision><status>INSUFFICIENT_EVIDENCE</status>
+                    <reason>Check whether the caller guards unapproved work.</reason>
+                    <finding><title>Unapproved work may proceed</title><path>auth/check.py</path>
+                    <line>2</line><endLine>2</endLine><trigger>Unapproved work reaches authorize</trigger>
+                    <impact>Unchecked work executes</impact><evidence>The target returns true.</evidence>
+                    <diffRelation>The predicate changed.</diffRelation></finding>
+                    <requests>%s</requests>
+                  </local-decision>
+                </decisions></adaptive-review>
+                """;
+        Files.writeString(response, candidate.formatted("REQUEST_FILE|target|queue|index|Find possible callers"));
+        var index = review();
+        check(Main.reviewExitCode(index) == 0 && calls(index, 1)
+                && Files.readString(index.resolve("coverage.md")).contains("INDEX_ONLY")
+                && Files.readString(index.resolve("report.md")).contains("Unapproved work may proceed"),
+                "a file listing alone leaves the candidate pending without a model call");
+
+        Files.writeString(response, candidate.formatted("REQUEST_FILE|target|other.py|all|Read an implementation file"));
+        var verifierIndex = review();
+        check(Main.reviewExitCode(verifierIndex) == 0 && calls(verifierIndex, 2)
+                && Files.readString(verifierIndex.resolve("coverage.md")).contains("INDEX_ONLY")
+                && !Files.exists(verifierIndex.resolve("focused/F1/round-2/F1-1-prompt.md")),
+                "a verifier's file listing does not start another round");
+
+        Files.writeString(response, candidate.formatted("REQUEST_FILE|target|queue/**/*.py|references:rules.authorize|Find the caller and its approval guard"));
+        var located = review();
+        var prompt = Files.readString(located.resolve("focused/F1/F1-1-prompt.md"));
+        check(Main.reviewExitCode(located) == 0 && calls(located, 2)
+                && prompt.contains("CALLER_GUARD_EVIDENCE") && !prompt.contains("WORKTREE_ONLY")
+                && !prompt.contains("authorize_later") && !prompt.contains("OUT_OF_SCOPE_REFERENCE")
+                && !Files.readString(located.resolve("report.md")).contains("Unapproved work may proceed"),
+                "locally located pinned caller context can disprove a candidate in one verification request");
+
+        Files.writeString(response, candidate.formatted("REQUEST_FILE|target|queue/**/*.py|references:approval-rules.json|Find the rule consumer"));
+        var resource = review();
+        check(Main.reviewExitCode(resource) == 0 && calls(resource, 2)
+                && Files.readString(resource.resolve("focused/F1/F1-1-prompt.md")).contains("CALLER_GUARD_EVIDENCE"),
+                "a hyphenated resource name can locate pinned source excerpts");
     }
 
     private void commit(String message) throws Exception {
