@@ -17,8 +17,12 @@ fetch_java_dependency() {
     temporary=$(mktemp "$archive.XXXXXX") || return 1
     if ! curl --fail --silent --show-error --location --retry 2 \
         "https://repo.maven.apache.org/maven2/$coordinates" -o "$temporary"; then
-        rm -f "$temporary"
-        return 1
+        printf 'Retrying %s via the Maven Central mirror\n' "$coordinates" >&2
+        if ! curl --fail --silent --show-error --location --retry 2 \
+            "https://maven-central.storage-download.googleapis.com/maven2/$coordinates" -o "$temporary"; then
+            rm -f "$temporary"
+            return 1
+        fi
     fi
     if ! java_dependency_matches "$temporary" "$checksum"; then
         printf 'SHA-256 verification failed for %s\n' "$coordinates" >&2
