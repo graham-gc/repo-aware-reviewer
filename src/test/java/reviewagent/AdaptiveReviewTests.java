@@ -487,7 +487,12 @@ final class AdaptiveReviewTests {
             git(repository, "commit", "-qam", "large early diff and small late regression");
             Path complete = pipeline.run(options(arguments));
             Path clipped = pipeline.run(options(arguments, "--max-evidence-bytes", "10000"));
-            String completePrompt = Files.readString(complete.resolve("focused/FULL-prompt.md"));
+            String completePrompt;
+            try (var artifacts = Files.list(complete.resolve("focused"))) {
+                var discoveryPrompts = artifacts.filter(path -> path.getFileName().toString().endsWith("-prompt.md")).toList();
+                check(discoveryPrompts.size() == 1, "a complete diff plan produces one discovery prompt");
+                completePrompt = Files.readString(discoveryPrompts.getFirst());
+            }
             check(Main.reviewExitCode(complete) == 0 && calls(complete, 1)
                     && completePrompt.contains("# late guard removal")
                     && completePrompt.contains("modified text for an early hunk")
