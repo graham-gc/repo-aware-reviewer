@@ -10,7 +10,7 @@
 
 需要 Java 21 或以上版本、Git、Bash，以及已经配置好、能正常运行的 `claude` 命令。目标项目须在本地，包含要审查的提交及其父提交。
 
-要使用正式版本，从 [Releases](https://github.com/graham-gc/repo-aware-reviewer/releases) 下载 `code-review-agent.jar`，并将下方示例中的 JAR 路径替换为下载位置。从源码构建需要 JDK 21 或以上版本。
+要使用正式版本，从 [Releases](https://github.com/graham-gc/repo-aware-reviewer/releases) 下载 `code-review-agent.jar`，并将下方示例中的 JAR 路径替换为下载位置。从源码构建需要 JDK 21 或以上版本和 `curl`。首次构建会从 Maven Central 下载并校验 Java 依赖。
 
 ```bash
 git clone https://github.com/graham-gc/repo-aware-reviewer.git

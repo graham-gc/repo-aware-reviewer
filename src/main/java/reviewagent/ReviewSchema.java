@@ -60,6 +60,35 @@ final class ReviewSchema {
     static boolean container(String name) { return CHILDREN.containsKey(name); }
     static boolean allows(String parent, String child) { return CHILDREN.getOrDefault(parent, Set.of()).contains(child); }
 
+    static String repairGrammar() {
+        var grammar = new StringBuilder("<grammar xmlns=\"http://relaxng.org/ns/structure/1.0\"><start><choice>");
+        CHILDREN.keySet().forEach(name -> appendReference(grammar, name));
+        grammar.append("</choice></start>");
+        TEXT.forEach(name -> appendRule(grammar, name, "<text/>"));
+        CHILDREN.forEach((name, children) -> {
+            boolean list = LISTS.contains(name);
+            var content = new StringBuilder(list ? "<zeroOrMore><choice>" : "<interleave>");
+            for (String child : children) {
+                if (!list) content.append("<optional>");
+                appendReference(content, child);
+                if (!list) content.append("</optional>");
+            }
+            content.append(list ? "</choice></zeroOrMore>" : "</interleave>");
+            appendRule(grammar, name, content.toString());
+        });
+        return grammar.append("</grammar>").toString();
+    }
+
+    private static void appendReference(StringBuilder grammar, String name) {
+        grammar.append("<ref name=\"").append(name).append("\"/>");
+    }
+
+    private static void appendRule(StringBuilder grammar, String name, String content) {
+        grammar.append("<define name=\"").append(name).append("\"><element name=\"").append(name)
+                .append("\"><zeroOrMore><attribute><anyName/></attribute></zeroOrMore>")
+                .append(content).append("</element></define>");
+    }
+
     // Advisory text can be omitted if it has no owner. Evidence requests need an explicit recipient.
     private static final Set<String> ADVISORY = Set.of("nextCheck");
 

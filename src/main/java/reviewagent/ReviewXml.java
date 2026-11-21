@@ -79,38 +79,18 @@ final class ReviewXml {
     }
 
     static XmlBlock xml(String response, String rootName) throws IOException {
+        XmlBlock parsed;
         try {
-            XmlBlock parsed = strict(response, rootName);
-            parsed.normalizations().forEach(ResponseDiagnostics::record);
-            return parsed;
+            parsed = strict(response, rootName);
         } catch (IOException original) {
             if (original instanceof AmbiguousTextFieldException) throw original;
-            var valid = new LinkedHashMap<String, XmlBlock>();
-            var notes = new LinkedHashMap<String, String>();
-            var candidates = XmlStructureRepair.candidates(response, rootName);
-            for (var candidate : candidates) {
-                try {
-                    XmlBlock parsed = strict(candidate.response(), rootName);
-                    valid.putIfAbsent(candidate.response(), parsed);
-                    notes.putIfAbsent(candidate.response(), candidate.note());
-                } catch (IOException rejected) { /* Never accept a repair without strict parsing and schema validation. */ }
-            }
-            if (valid.size() == 1) {
-                var entry = valid.entrySet().iterator().next();
-                XmlBlock parsed = entry.getValue();
-                var applied = new ArrayList<String>();
-                applied.add(notes.get(entry.getKey()));
-                applied.addAll(parsed.normalizations());
-                applied.forEach(ResponseDiagnostics::record);
-                return new XmlBlock(parsed.root(), parsed.remainder(), List.copyOf(applied));
-            }
-            if (!candidates.isEmpty()) throw new IOException(original.getMessage()
-                    + "; delimiter repair was not applied: " + (valid.isEmpty() ? "no structurally valid candidate" : "ambiguous candidates"), original);
-            throw original;
+            parsed = XmlStructureRepair.recover(response, rootName, original);
         }
+        parsed.normalizations().forEach(ResponseDiagnostics::record);
+        return parsed;
     }
 
-    private static XmlBlock strict(String response, String rootName) throws IOException {
+    static XmlBlock strict(String response, String rootName) throws IOException {
         return parseEnvelope(response, rootName, true);
     }
 

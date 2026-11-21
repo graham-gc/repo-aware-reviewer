@@ -14,6 +14,7 @@ final class ReviewXmlTests {
         damagedQuoteDoesNotBecomeEvidence();
         missingContainerClosers();
         repeatedContainerClosers();
+        repeatedRootChildCloser();
         opaqueTextAndEnvelope();
         protocolFenceBoundaries();
         missingOpeningBracket();
@@ -103,7 +104,8 @@ final class ReviewXmlTests {
         String premise = "<verification>\n<status>INSUFFICIENT_EVIDENCE</status>\n<reason>More evidence needed.</reason>\n"
                 + "<premises><premise><statement>Claim.</statement><basis>ASSUMPTION</basis><citations/>\n"
                 + "</premises>\n</verification>";
-        require(ReviewXml.xml(premise, "verification").normalizations().getFirst().contains("</premise>"), "missing premise closer is unambiguous");
+        require(ReviewXml.xml(premise, "verification").normalizations().getFirst().contains("jsoup: Inserted missing container closers </premise>"),
+                "jsoup agrees with inserting the single missing premise closer");
         String two = "<verification><status>INSUFFICIENT_EVIDENCE</status><reason>More evidence needed.</reason>"
                 + "<premises><premise><statement>Claim.</statement><basis>CONTRACT</basis><citations><citation>"
                 + "<source>rules</source><quote>" + RULE + "</quote></premise></premises></verification>";
@@ -130,9 +132,6 @@ final class ReviewXmlTests {
                 """;
         String request = "REQUEST_FILE|target|runner.py|all|Check the guard\n";
         String broken = xml.replace("</premises>", "</premise>") + request;
-        var repairs = XmlStructureRepair.candidates(broken, "verification");
-        require(repairs.size() == 1 && repairs.getFirst().response().equals(xml + request),
-                "replace only the repeated closing tag name and preserve the original response text");
         var parsed = ReviewXml.xml(broken, "verification");
         var fields = ReviewXml.fields(parsed.root(), ReviewSchema.VERIFICATION);
         require(parsed.normalizations().size() == 1
@@ -140,6 +139,7 @@ final class ReviewXmlTests {
                 && ReviewXml.children(fields.get("citations"), "citation").size() == 1
                 && parsed.root().getElementsByTagName("premise").getLength() == 2
                 && ReviewXml.text(fields, "status").equals("INSUFFICIENT_EVIDENCE")
+                && ReviewXml.text(fields, "reason").equals("Trace the check a < b && c > d.")
                 && parsed.remainder().equals("\n" + request),
                 "preserve the verdict, two premises, root citations and adjacent file request");
 
@@ -150,6 +150,34 @@ final class ReviewXmlTests {
         fails(() -> ReviewXml.xml(xml.replace("</premises>", "</premise></premises>"), "verification"));
         fails(() -> ReviewXml.xml(xml.replace("</premises>", "</premise>").replace("</verification>", ""), "verification"));
         fails(() -> ReviewXml.xml(xml.replace("</premises>", "</premise><unknown/>"), "verification"));
+    }
+
+    private static void repeatedRootChildCloser() throws Exception {
+        String xml = "<verification>\n<status>INSUFFICIENT_EVIDENCE</status>\n<reason>More evidence needed.</reason>\n"
+                + "<finding><id>R1-1</id></finding>\n</finding>\n"
+                + "<citations><citation><source>rules</source><quote><![CDATA[if (a < b && c > d) return;]]></quote>"
+                + "</citation></citations>\n</verification>";
+        String request = "\nREQUEST_FILE|target|runner.py|all|Check the guard\n";
+        var parsed = ReviewXml.xml(xml + request, "verification");
+        var fields = ReviewXml.fields(parsed.root(), ReviewSchema.VERIFICATION);
+        require(parsed.normalizations().size() == 1
+                && parsed.normalizations().getFirst().contains("jsoup: Removed repeated </finding>")
+                && ReviewXml.children(fields.get("finding"), "id").getFirst().getTextContent().equals("R1-1")
+                && fields.get("citations").getElementsByTagName("quote").item(0).getTextContent().equals("if (a < b && c > d) return;")
+                && parsed.remainder().equals(request), "keep the finding, following quotation and evidence request after the one-tag edit");
+        fails(() -> ReviewXml.xml(xml.replace("</verification>", ""), "verification"));
+        fails(() -> ReviewXml.xml(xml.replace("</finding>\n", "</finding></finding>\n"), "verification"));
+
+        String foreign = xml.replace("<verification>", "<verification xmlns=\"urn:foreign-protocol\">");
+        ReviewXml.strict(foreign.replace("</finding>\n</finding>", "</finding>"), "verification");
+        try {
+            ReviewXml.xml(foreign, "verification");
+            throw new AssertionError("Jing must veto a repaired reply with a foreign protocol namespace");
+        } catch (IOException invalid) {
+            require(invalid.getCause() != null && java.util.Arrays.stream(invalid.getCause().getSuppressed())
+                            .anyMatch(candidate -> candidate.getMessage().contains("failed RELAX NG validation")),
+                    "the final RELAX NG gate can reject a candidate accepted by the existing structure check");
+        }
     }
 
     private static void opaqueTextAndEnvelope() throws Exception {

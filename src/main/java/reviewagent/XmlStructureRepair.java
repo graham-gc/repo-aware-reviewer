@@ -1,13 +1,17 @@
 package reviewagent;
 
+import org.jsoup.nodes.Document;
+import org.jsoup.parser.Parser;
+
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.regex.Pattern;
 
 /** Bounded delimiter repairs that preserve response values and require an explicit root closer. */
 final class XmlStructureRepair {
-    record Candidate(String response, String note) { }
+    private record Candidate(String response, String note) { }
     private enum ScanMode { TEXT_BOUNDARIES, RAW_RESPONSE, PROTECTED_FIELDS }
     private static final Pattern TAG = Pattern.compile("<(/?)([A-Za-z][A-Za-z0-9-]*)(?:\\s[^<>]*?)?\\s*(/?)>");
     private static final int MAX_CANDIDATES = 12;
@@ -20,7 +24,29 @@ final class XmlStructureRepair {
                 + " No repair applied: close the text field explicitly, or use CDATA for literal protocol tags.");
     }
 
-    static List<Candidate> candidates(String response, String root) {
+    static ReviewXml.XmlBlock recover(String response, String root, IOException original) throws IOException {
+        var candidates = candidates(response, root);
+        if (candidates.isEmpty()) throw original;
+        var valid = new LinkedHashMap<String, ReviewXml.XmlBlock>();
+        for (var candidate : candidates) {
+            if (valid.containsKey(candidate.response())) continue;
+            try {
+                var parsed = ReviewXml.strict(candidate.response(), root);
+                ReviewRepairValidation.validate(parsed.root());
+                var notes = new ArrayList<String>();
+                notes.add(candidate.note());
+                notes.addAll(parsed.normalizations());
+                valid.put(candidate.response(), new ReviewXml.XmlBlock(parsed.root(), parsed.remainder(), List.copyOf(notes)));
+            } catch (IOException rejected) {
+                original.addSuppressed(rejected);
+            }
+        }
+        if (valid.size() == 1) return valid.values().iterator().next();
+        throw new IOException(original.getMessage() + "; delimiter repair was not applied: "
+                + (valid.isEmpty() ? "no structurally valid candidate" : "ambiguous candidates"), original);
+    }
+
+    private static List<Candidate> candidates(String response, String root) {
         String stripped = response.stripLeading();
         if (stripped.startsWith(root + ">") && stripped.contains("</" + root + ">")) {
             int start = response.length() - stripped.length();
@@ -73,11 +99,15 @@ final class XmlStructureRepair {
                 int ancestor = stack.lastIndexOf(name);
                 if (ancestor < 0) {
                     // An immediately repeated child closer can be a typo for the current container's closer.
-                    if (mode == ScanMode.RAW_RESPONSE && stack.size() > 1 && name.equals(previousCloser)
+                    if (mode == ScanMode.RAW_RESPONSE && !stack.isEmpty() && name.equals(previousCloser)
                             && ReviewSchema.allows(stack.getLast(), name)
                             && content.substring(previousCloserEnd, tokens.start()).isBlank()
                             && tokens.group().substring(tag.end(2), tokens.group().length() - 1).isBlank()) {
                         String expected = stack.getLast();
+                        if (stack.size() == 1) {
+                            removeRepeatedCloser(result, response, content, start, end, tokens.start(), tokens.end(), name);
+                            return;
+                        }
                         int from = start + tokens.start() + tag.start(2);
                         int to = start + tokens.start() + tag.end(2);
                         long line = content.substring(0, tokens.start()).chars().filter(c -> c == '\n').count() + 1;
@@ -94,12 +124,41 @@ final class XmlStructureRepair {
                 if (mode == ScanMode.PROTECTED_FIELDS && ancestor < stack.size() - 1 && stack.size() - ancestor <= 4) {
                     StringBuilder missing = new StringBuilder();
                     for (int i = stack.size() - 1; i > ancestor; i--) missing.append("</").append(stack.get(i)).append('>');
-                    add(result, response, content, start, end, tokens.start(), missing.toString(),
-                            "Inserted missing container closers " + missing + " before </" + name + ">", name);
+                    int position = tokens.start();
+                    String repaired = content.substring(0, position) + missing + content.substring(position);
+                    boolean jsoupAgrees = ancestor == stack.size() - 2 && jsoupAgrees(content, repaired);
+                    add(result, response, content, start, end, position, missing.toString(),
+                            (jsoupAgrees ? "jsoup: " : "") + "Inserted missing container closers " + missing
+                                    + " before </" + name + ">", name);
                 }
                 while (stack.size() > ancestor) stack.removeLast();
             }
         }
+    }
+
+    private static void removeRepeatedCloser(List<Candidate> result, String response, String content,
+                                             int start, int end, int from, int to, String name) {
+        String repaired = content.substring(0, from) + content.substring(to);
+        try {
+            if (!jsoupAgrees(XmlTextFields.protect(content), XmlTextFields.protect(repaired))) return;
+        } catch (IOException incompleteField) {
+            return;
+        }
+        long line = content.substring(0, from).chars().filter(c -> c == '\n').count() + 1;
+        result.add(new Candidate(response.substring(0, start) + repaired + response.substring(end),
+                "jsoup: Removed repeated </" + name + "> at response-block line " + line
+                        + "; only one closing tag removed; raw response retained."));
+    }
+
+    private static boolean jsoupAgrees(String original, String candidate) {
+        // Use jsoup to check recovery. The accepted candidate keeps the source slices outside the delimiter.
+        return jsoupXml(original).equals(jsoupXml(candidate));
+    }
+
+    private static String jsoupXml(String content) {
+        var document = Parser.xmlParser().parseInput(content, "");
+        document.outputSettings().syntax(Document.OutputSettings.Syntax.xml).prettyPrint(false);
+        return document.outerHtml();
     }
 
     private static int parentBoundary(String text, int from, int before, String parent) {

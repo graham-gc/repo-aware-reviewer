@@ -10,7 +10,7 @@ Review committed Git changes through your local Claude Code setup, with optional
 
 Install Java 21 or later, Git and Bash, and have a working, configured `claude` command. The project to review must be available locally, including the target commit and its parent.
 
-For a published version, download `code-review-agent.jar` from [Releases](https://github.com/graham-gc/repo-aware-reviewer/releases) and substitute its path in the examples below. To build from source, use JDK 21 or later.
+For a published version, download `code-review-agent.jar` from [Releases](https://github.com/graham-gc/repo-aware-reviewer/releases) and substitute its path in the examples below. To build from source, use JDK 21 or later and `curl`. The first build downloads and verifies the Java dependencies from Maven Central.
 
 ```bash
 git clone https://github.com/graham-gc/repo-aware-reviewer.git

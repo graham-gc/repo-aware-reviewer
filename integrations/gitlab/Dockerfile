@@ -2,13 +2,13 @@
 FROM node:22-bookworm-slim AS node-runtime
 FROM eclipse-temurin:21-jdk-noble AS reviewer
 COPY --from=node-runtime /usr/local/ /usr/local/
-RUN apt-get update && apt-get install -y --no-install-recommends git python3 ca-certificates libstdc++6 \
+RUN apt-get update && apt-get install -y --no-install-recommends git python3 ca-certificates libstdc++6 curl \
     && rm -rf /var/lib/apt/lists/*
 ARG CLAUDE_CODE_VERSION=2.1.325
 RUN npm install --global "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" && claude --version
 WORKDIR /opt/repo-aware
 COPY src/main/ src/main/
-COPY scripts/build.sh scripts/compile.sh scripts/progress.sh scripts/
+COPY scripts/build.sh scripts/compile.sh scripts/dependencies.sh scripts/progress.sh scripts/
 RUN bash scripts/build.sh
 COPY integrations/gitlab/repo_aware_gitlab/ /opt/gitlab/repo_aware_gitlab/
 ENV PYTHONPATH=/opt/gitlab PYTHONDONTWRITEBYTECODE=1

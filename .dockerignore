@@ -6,6 +6,7 @@
 !scripts/
 !scripts/build.sh
 !scripts/compile.sh
+!scripts/dependencies.sh
 !scripts/progress.sh
 !integrations/
 !integrations/gitlab/
