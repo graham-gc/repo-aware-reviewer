@@ -65,27 +65,30 @@ final class ReviewTasks {
             try {
                 for (Task task : tasks) {
                     futures.add(completions.submit(() -> {
-                        try (var budget = agent.task(task.model(), task.schema())) {
-                            if (globalFailure.get()) {
-                                state(directory, task, "BLOCKED", "GLOBAL_FAILURE");
-                                return new Reply(task.id(), new Outcome(null, "Blocked by a global failure", "GLOBAL_FAILURE"));
+                        try {
+                            if (globalFailure.get()) return blocked(directory, task);
+                            try (var budget = agent.task(task.model(), task.schema())) {
+                                if (globalFailure.get()) return blocked(directory, task);
+                                try {
+                                    state(directory, task, "RUNNING", "");
+                                    String response = invoke(task, agent, directory, resume);
+                                    Files.deleteIfExists(directory.resolve(task.id() + "-error.txt"));
+                                    state(directory, task, "SUCCEEDED", "");
+                                    agent.timings().task(budget.calls() == 0, true);
+                                    return new Reply(task.id(), new Outcome(response, null));
+                                } catch (IOException failure) {
+                                    // A task waiting for this permit must see a fatal failure before it can launch.
+                                    if (!isolatedFailure(failure)) globalFailure.set(true);
+                                    throw failure;
+                                }
                             }
-                            state(directory, task, "RUNNING", "");
-                            String response = invoke(task, agent, directory, resume);
-                            Files.deleteIfExists(directory.resolve(task.id() + "-error.txt"));
-                            state(directory, task, "SUCCEEDED", "");
-                            agent.timings().task(budget.calls() == 0, true);
-                            return new Reply(task.id(), new Outcome(response, null));
                         } catch (IOException failure) {
                             agent.timings().task(false, false);
-                            boolean isolated = failure instanceof InvalidReviewResponseException
-                                    || failure instanceof AgentCallException call && !call.fatal();
-                            if (!isolated) globalFailure.set(true);
                             AtomicFiles.write(directory.resolve(task.id() + "-error.txt"), failure.getMessage());
                             String kind = failure instanceof AgentCallException call ? call.kind().name()
                                     : failure instanceof InvalidReviewResponseException ? "INVALID_OUTPUT" : "IO_FAILURE";
                             state(directory, task, "FAILED", kind, failure);
-                            if (isolated) {
+                            if (isolatedFailure(failure)) {
                                 return new Reply(task.id(), new Outcome(null, failure.getMessage(), kind));
                             }
                             throw failure;
@@ -124,6 +127,16 @@ final class ReviewTasks {
                 workers.shutdownNow();
             }
         } finally { agent.timings().stage(directory, batchStarted, System.nanoTime()); }
+    }
+
+    private static Reply blocked(Path directory, Task task) throws IOException {
+        state(directory, task, "BLOCKED", "GLOBAL_FAILURE");
+        return new Reply(task.id(), new Outcome(null, "Blocked by a global failure", "GLOBAL_FAILURE"));
+    }
+
+    private static boolean isolatedFailure(IOException failure) {
+        return failure instanceof InvalidReviewResponseException
+                || failure instanceof AgentCallException call && !call.fatal();
     }
 
     private static void state(Path directory, Task task, String status, String failure) throws IOException {
