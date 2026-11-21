@@ -142,7 +142,7 @@ final class ReviewXml {
             if (!root.getTagName().equals(rootName)) {
                 throw new IOException("Unexpected review response root");
             }
-            var normalizations = validateTree ? ReviewSchema.normalizeAdvisories(root) : List.<String>of();
+            var normalizations = validateTree ? ReviewSchema.normalize(root) : List.<String>of();
             if (validateTree) ReviewSchema.validate(root);
             XmlStructureRepair.checkTextBoundaries(content);
             return new XmlBlock(root, response.substring(0, envelope.start()) + response.substring(envelope.end()), normalizations);

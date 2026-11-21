@@ -280,8 +280,9 @@ final class AdaptiveReviewTests {
             check(riskPrompt.contains("Do not call or request any tools."),
                     "focused requests ask for a complete review from the supplied evidence");
             check(riskPrompt.contains("<decisions><local-decision><status>INSUFFICIENT_EVIDENCE</status>")
-                    && riskPrompt.contains("<requests>REQUEST_FILE|target|path|all|Specific question</requests></local-decision>"),
-                    "default risk prompts declare the evidence request's parent and eligible decision before invocation");
+                    && riskPrompt.contains("<requests>REQUEST_FILE|target|path|all|Specific question</requests></local-decision>")
+                    && riskPrompt.contains(ReviewSchema.ADAPTIVE_XML) && overview.contains(ReviewSchema.ADAPTIVE_XML),
+                    "risk and overview prompts share the evidence request's envelope and placement rules");
 
             Path malformedScope = fixture.resolve("focused-first.txt");
             Files.writeString(malformedScope, "<tool_call>No review content</tool_call>");
@@ -289,6 +290,7 @@ final class AdaptiveReviewTests {
             String scopeRecovery = Files.readString(partialFocused.resolve("focused/F1-repair-prompt.md"));
             check(Main.reviewExitCode(partialFocused) == 3 && calls(partialFocused, 4)
                     && scopeRecovery.startsWith("ADAPTIVE RESPONSE RECOVERY")
+                    && scopeRecovery.contains(ReviewSchema.ADAPTIVE_XML)
                     && scopeRecovery.contains("runtime/worker.py") && !scopeRecovery.contains("No review content")
                     && Files.readString(partialFocused.resolve("focused/F1-state.properties")).contains("status=SUCCEEDED")
                     && Files.readString(partialFocused.resolve("focused/O-state.properties")).contains("status=FAILED")

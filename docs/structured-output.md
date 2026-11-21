@@ -1,6 +1,6 @@
 # Structured response handling
 
-Each model task declares its response format in the request. Default risk prompts show where evidence requests belong and which verdict and proof values apply. The CLI validates the result against the review protocol and the pinned evidence.
+Each model task declares its response format in the request. Local review and every focused XML scope use the same adaptive envelope and candidate-level request example. Recovery prompts repeat that contract. Independent verification uses a `<verification>` reply with any request lines after the closing element. The CLI checks the reply against its protocol and the pinned evidence.
 
 ## JSON Schema pilot
 
@@ -32,6 +32,7 @@ For a focused scope, `DEEP` with an `INSUFFICIENT_EVIDENCE` decision identifies 
 | Missing adjacent container closers before an existing ancestor close | Consider a bounded insertion and require unique structural validity. |
 | A child container closer is immediately repeated where its parent container should close | Try replacing the second closer's name when the parent is still open and the root already has an explicit closer. Require unique structural validity and keep the original text. |
 | Two valid structural interpretations | Reject rather than choose one. |
+| Plain evidence requests outside their unresolved decision | Restore a request only when its candidate is uniquely identifiable. Multiple candidates require an explicit file or symbol association for every request. The original response and normalization diagnostics are retained. |
 | A text field appears to swallow sibling citations | Require an explicit closer or CDATA; do not silently accept the merged field. |
 | A root is truncated or absent | Reject; do not infer the missing response. |
 | Other mismatched closers, unknown fields, duplicate scalar fields | Reject. |

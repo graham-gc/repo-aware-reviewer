@@ -241,13 +241,9 @@ final class ReviewTasks {
                 } else if (ReviewXml.missingResponseBlock(invalid, "adaptive-review")) {
                     repairPrompt = """
                             ADAPTIVE RESPONSE RECOVERY
-                            Review the assigned scope again using the supplied Git evidence. Start with one complete
-                            <adaptive-review> XML document with a route, summary, and decisions. Consider each assigned
-                            risk before returning <decisions/>. Do not call or request any tools. Record missing
-                            tracked evidence through the XML requests field.
-
-                            ORIGINAL REVIEW
-                            """ + task.prompt();
+                            Review the assigned scope again using the supplied Git evidence.
+                            Consider each applicable risk before returning <decisions/>. Do not call or request any tools.
+                            """ + ReviewSchema.ADAPTIVE_XML + "\nORIGINAL REVIEW\n" + task.prompt();
                 } else {
                     repairPrompt = task.prompt() + "\n\n" + correction + task.validator().correctionInstructions(invalid)
                             + "Return the complete corrected response.\nValidation error: " + invalid.getMessage()

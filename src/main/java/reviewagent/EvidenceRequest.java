@@ -16,9 +16,6 @@ record EvidenceRequest(int line, String text) {
             symbol selector. Use a directory or glob with references to locate callers or readers:
             REQUEST_FILE|target|src/main/**/*.java|references:Service.write|Find the caller and its guard
             REQUEST_FILE|target|src/main/**/*.java|references:new Worker|Locate constructor call sites
-            In <adaptive-review> XML, put the raw request lines directly inside <requests>, without child tags.
-            In structured JSON, use one string per item in the requests array. For <verification> XML, put the
-            lines after the closing </verification> tag.
             The CLI supplies bounded pinned excerpts for a literal reference search. Check the binding and reachability.
             A file-name index alone will not schedule a scoped follow-up. If the decisive premise cannot be located,
             record the specific evidence gap in the verdict.

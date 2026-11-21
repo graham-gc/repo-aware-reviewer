@@ -383,15 +383,19 @@ final class ReviewRequestTests {
                 && !Files.exists(verifierIndex.resolve("focused/F1/round-2/F1-1-prompt.md")),
                 "a verifier's file listing does not start another round");
 
-        Files.writeString(response, candidate.formatted("REQUEST_FILE|target|queue/**/*.py|references:rules.authorize|Find the caller and its approval guard"));
+        String request = "<requests>REQUEST_FILE|target|queue/**/*.py|references:rules.authorize|Find the caller and its approval guard</requests>";
+        Files.writeString(response, candidate.formatted("").replace("<requests></requests>", "")
+                .replace("</adaptive-review>", request + "</adaptive-review>"));
         var located = review();
         var prompt = Files.readString(located.resolve("focused/F1/F1-1-prompt.md"));
         check(Main.reviewExitCode(located) == 0 && calls(located, 2)
                 && prompt.contains("CALLER_GUARD_EVIDENCE") && prompt.contains("Original evidence questions for this candidate")
+                && prompt.contains(ReviewSchema.VERIFICATION_REQUESTS)
+                && Files.readString(located.resolve("focused/F1-normalization.log")).contains("Moved misplaced evidence requests")
                 && !prompt.contains("WORKTREE_ONLY")
                 && !prompt.contains("authorize_later") && !prompt.contains("OUT_OF_SCOPE_REFERENCE")
                 && !Files.readString(located.resolve("report.md")).contains("Unapproved work may proceed"),
-                "locally located pinned caller context can disprove a candidate in one verification request");
+                "a misplaced request reaches its verifier without a format call and the pinned caller disproves the candidate");
 
         Files.writeString(response, candidate.formatted("REQUEST_FILE|target|queue/**/*.py|references:approval-rules.json|Find the rule consumer"));
         var resource = review();

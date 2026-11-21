@@ -19,6 +19,7 @@ final class ReviewXmlTests {
         missingOpeningBracket();
         rejectedStructures();
         misplacedAdvisories();
+        misplacedRequests();
         normalizationArtifacts();
     }
 
@@ -229,6 +230,43 @@ final class ReviewXmlTests {
         fails(() -> ReviewXml.xml(ambiguous.replace(suggestion, "<status>CONFIRMED</status>"), "adaptive-review"));
         fails(() -> ReviewXml.xml(ambiguous.replace(suggestion, "<requests>REQUEST_FILE|target|file|all|Read</requests>"), "adaptive-review"));
         fails(() -> ReviewXml.xml(ambiguous.replace(suggestion, "<citations/>"), "adaptive-review"));
+    }
+
+    private static void misplacedRequests() throws Exception {
+        String auth = """
+                <local-decision><status>INSUFFICIENT_EVIDENCE</status>
+                  <reason>Check PolicyGuard before calling the handler.</reason>
+                  <finding><path>src/Handler.java</path></finding><requests/>
+                </local-decision>
+                """;
+        String retry = """
+                <local-decision><status>INSUFFICIENT_EVIDENCE</status>
+                  <reason>Check RetryClient when resuming a delivery.</reason>
+                  <finding><path>src/Worker.java</path></finding>
+                </local-decision>
+                """;
+        String policy = "REQUEST_FILE|target|src/PolicyGuard.java|all|Read the policy guard";
+        String client = "REQUEST_FILE|base|src/**/*.java|references:RetryClient|Find the retry caller";
+        String requests = "<requests>" + client + "\n" + policy + "</requests>";
+        String start = "<adaptive-review><route>DEEP</route><summary>Two missing premises.</summary>";
+        String decisions = "<decisions>" + auth + retry + "</decisions>";
+        String end = "</adaptive-review>";
+        for (String reply : List.of(start + requests + decisions + end, start + decisions + requests + end,
+                start + decisions.replace("</decisions>", requests + "</decisions>") + end)) {
+            var parsed = ReviewXml.xml(reply, "adaptive-review");
+            var candidates = parsed.root().getElementsByTagName("local-decision");
+            var first = ReviewXml.fields((org.w3c.dom.Element) candidates.item(0), ReviewSchema.LOCAL_DECISION);
+            var second = ReviewXml.fields((org.w3c.dom.Element) candidates.item(1), ReviewSchema.LOCAL_DECISION);
+            require(ReviewXml.text(first, "requests").equals(policy) && ReviewXml.text(second, "requests").equals(client)
+                    && ReviewXml.text(first, "status").equals("INSUFFICIENT_EVIDENCE")
+                    && parsed.normalizations().getFirst().contains("uniquely identified unresolved candidates"),
+                    "plain requests are restored to their uniquely named owners without changing the verdicts");
+        }
+        fails(() -> ReviewXml.xml(start + decisions.replace("Check RetryClient", "Check PolicyGuard and RetryClient")
+                + requests + end, "adaptive-review"));
+        fails(() -> ReviewXml.xml(start + decisions.replace("INSUFFICIENT_EVIDENCE", "CONFIRMED")
+                + requests + end, "adaptive-review"));
+        fails(() -> ReviewXml.xml(start + decisions + requests.replace(policy, "unstructured advice") + end, "adaptive-review"));
     }
 
     private static void normalizationArtifacts() throws Exception {
