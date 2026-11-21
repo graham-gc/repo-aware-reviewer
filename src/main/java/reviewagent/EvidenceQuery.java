@@ -7,7 +7,9 @@ import java.util.regex.Pattern;
 record EvidenceQuery(String command, String side, String language, String context, String resource,
                      String selector, String reason) {
     private static final String REFERENCES = "references:";
-    private static final Pattern REFERENCE_NAME = Pattern.compile("[\\p{L}_$][\\p{L}\\p{N}_$-]*(?:\\.[\\p{L}_$][\\p{L}\\p{N}_$-]*)*");
+    private static final String REFERENCE_NAME = "[\\p{L}_$][\\p{L}\\p{N}_$-]*(?:\\.[\\p{L}_$][\\p{L}\\p{N}_$-]*)*";
+    private static final Pattern NAME = Pattern.compile(REFERENCE_NAME);
+    private static final Pattern CONSTRUCTION = Pattern.compile("new[ \\t]+(" + REFERENCE_NAME + ")[ \\t]*\\(?");
 
     enum Operation { READ_FILE, FIND_FILES, FIND_REFERENCES, LANGUAGE_RESOURCE }
     Operation operation() {
@@ -18,6 +20,12 @@ record EvidenceQuery(String command, String side, String language, String contex
 
     String reference() { return selector.substring(REFERENCES.length()); }
 
+    static String normalizeSelector(String selector) {
+        if (!selector.startsWith(REFERENCES)) return selector;
+        var construction = CONSTRUCTION.matcher(selector.substring(REFERENCES.length()));
+        return construction.matches() ? REFERENCES + "new " + construction.group(1) : selector;
+    }
+
     static EvidenceQuery parse(String line, LanguageRegistry languages) throws IOException {
         String[] fields = line.split("\\|", line.startsWith("REQUEST_LANGUAGE|") ? 7 : 5);
         if (line.length() > 1200 || fields.length < 2 || !(fields[1].equals("base") || fields[1].equals("target")))
@@ -27,9 +35,12 @@ record EvidenceQuery(String command, String side, String language, String contex
             return new EvidenceQuery(fields[0], fields[1], fields[2], fields[3], fields[4], fields[5], fields[6]);
         }
         if (fields.length != 5 || java.util.Arrays.stream(fields).anyMatch(String::isBlank)) throw new IOException("Expected five file or legacy evidence fields");
-        if (fields[0].equals("REQUEST_FILE") && fields[3].startsWith(REFERENCES)
-                && !REFERENCE_NAME.matcher(fields[3].substring(REFERENCES.length())).matches())
-            throw new IOException("A reference search requires a literal symbol or resource name");
+        if (fields[0].equals("REQUEST_FILE") && fields[3].startsWith(REFERENCES)) {
+            String reference = fields[3].substring(REFERENCES.length());
+            if (!NAME.matcher(reference).matches() && !CONSTRUCTION.matcher(reference).matches())
+                throw new IOException("A reference search requires a literal symbol, resource name, or new Type");
+            fields[3] = normalizeSelector(fields[3]);
+        }
         String language = fields[0].equals("REQUEST_FILE") ? "" : languages.legacy(fields[0]).id();
         return new EvidenceQuery(fields[0], fields[1], language, "", fields[2], fields[3], fields[4]);
     }

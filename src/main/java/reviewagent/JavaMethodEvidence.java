@@ -1,5 +1,6 @@
 package reviewagent;
 
+import com.sun.source.tree.ClassTree;
 import com.sun.source.tree.CompilationUnitTree;
 import com.sun.source.tree.MethodTree;
 import com.sun.source.util.JavacTask;
@@ -16,6 +17,7 @@ import javax.tools.ToolProvider;
 import java.io.IOException;
 import java.net.URI;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 
 final class JavaMethodEvidence {
@@ -30,29 +32,42 @@ final class JavaMethodEvidence {
         }
         var syntax = parse(source, false);
         var declarations = new ArrayList<Lines>();
+        var constructors = new LinkedHashMap<ClassTree, List<Lines>>();
         var unit = syntax.unit();
         var lineMap = unit.getLineMap();
-        new TreeScanner<Void, Void>() {
+        new TreeScanner<Void, ClassTree>() {
             @Override
-            public Void visitMethod(MethodTree node, Void unused) {
-                if (node.getName().contentEquals(method)) {
+            public Void visitClass(ClassTree node, ClassTree owner) {
+                return super.visitClass(node, node);
+            }
+
+            @Override
+            public Void visitMethod(MethodTree node, ClassTree owner) {
+                boolean constructor = owner != null && owner.getSimpleName().contentEquals(method)
+                        && node.getName().contentEquals("<init>");
+                if (constructor || node.getName().contentEquals(method)) {
                     long start = syntax.positions().getStartPosition(unit, node);
                     long end = syntax.positions().getEndPosition(unit, node);
                     if (start >= 0 && end > start) {
-                        declarations.add(new Lines((int) lineMap.getLineNumber(start),
-                                (int) lineMap.getLineNumber(end - 1)));
+                        var lines = new Lines((int) lineMap.getLineNumber(start), (int) lineMap.getLineNumber(end - 1));
+                        if (constructor) constructors.computeIfAbsent(owner, unused -> new ArrayList<>()).add(lines);
+                        else declarations.add(lines);
                     }
                 }
-                return super.visitMethod(node, unused);
+                return super.visitMethod(node, owner);
             }
         }.scan(unit, null);
-        if (declarations.isEmpty()) {
-            throw new IOException("Java method declaration not found at that revision");
-        }
         if (declarations.size() > 1) {
             throw new IOException("Java method name matches multiple declarations; request a line range instead");
         }
-        return declarations.getFirst();
+        if (!declarations.isEmpty()) return declarations.getFirst();
+        if (constructors.size() > 1)
+            throw new IOException("Java constructor name matches multiple types; request a line range instead");
+        if (!constructors.isEmpty()) {
+            var overloads = constructors.values().iterator().next();
+            return new Lines(overloads.getFirst().first(), overloads.getLast().last());
+        }
+        throw new IOException("Java method declaration not found at that revision");
     }
 
     static Syntax parse(String source, boolean requireValid) throws IOException {

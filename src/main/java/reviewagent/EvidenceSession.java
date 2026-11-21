@@ -15,6 +15,7 @@ final class EvidenceSession {
     private final int knowledgeLimit;
     private final Set<String> seen = new LinkedHashSet<>();
     private final Map<String, Set<String>> fulfilled = new LinkedHashMap<>();
+    private final Map<String, String> initialRequests = new LinkedHashMap<>();
     private final StringBuilder markdown = new StringBuilder();
     private final StringBuilder coverage = new StringBuilder();
     private int files;
@@ -30,6 +31,9 @@ final class EvidenceSession {
     }
 
     boolean requestOnly(String response) { return collector.requestOnly(evidence, response); }
+
+    void recordInitialRequests(String candidate, String requests) { initialRequests.put(candidate, requests); }
+    String initialRequests(String candidate) { return initialRequests.getOrDefault(candidate, ""); }
 
     boolean load(String replies, String phase) throws InterruptedException {
         int coverageStart = coverage.length();

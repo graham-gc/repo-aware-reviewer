@@ -23,9 +23,13 @@ A candidate's selected evidence is retained across its verification rounds and s
 
 Each evidence request gets an initial share of its batch budget. A whole-file read that exceeds its share can use the remaining space after the other requests run. Coverage records whether the remaining space was sufficient. The same total byte budget and request limits still apply.
 
-Focused areas can verify candidates concurrently after discovery. They share the execution's review parallelism limit and keep each candidate's evidence rounds ordered. The final coverage and report follow the original scope order.
+Focused discovery reserves source context for risk scopes, then packs ordinary changes and any remaining whole hunks into the same bounded diff batches. Each task receives risk questions for the paths shown in its evidence. Changes that cannot fit still appear as unreviewed.
+
+Focused areas can verify candidates concurrently after discovery. They share the execution's review parallelism limit and keep each candidate's evidence rounds ordered. Automatic expansion reuses only new collected source named by the missing-evidence question. Candidates that already received requested evidence expand further only when they name another specific check. The final coverage and report follow the original scope order.
 
 For a scoped follow-up, a file index records navigation and does not schedule another model call on its own. The reviewer can request `REQUEST_FILE|target|src/main/**/*.java|references:Service.write|Find the caller and its guard` to locate bounded excerpts directly in tracked source at the pinned revision. A literal hit helps locate code; type binding, execution, and impact still require evidence. Narrow the path or supply a file and line range when a reference search cannot resolve a premise.
+
+A reference request can also locate `new Type` constructor calls. Search results prioritize excerpts from different files within the existing limit. A Java `symbol:Type` read can return that type's constructors. The first verifier sees the original evidence questions and checks whether the pinned sources rule out a necessary trigger before requesting more evidence. Repacked excerpts of already supplied lines do not trigger a new round.
 
 After individual verification, a group of confirmed local regressions with the same code anchor and shared pinned baseline and target sources can receive one publication verdict. The adjudicator resolves provisional severity differences using the proved impact and preconditions. Sharing requires explicit coverage of every candidate ID in the independent publication response and revalidation of the common evidence. The remaining candidates run separately when the response leaves applicability uncertain. Coverage retains the individual verification records and lists which candidates shared a publication verdict.
 

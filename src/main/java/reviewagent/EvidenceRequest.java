@@ -11,9 +11,11 @@ record EvidenceRequest(int line, String text) {
 
             SCOPED EVIDENCE REQUESTS
             State the missing premise and which answer would change the verdict. Request related base and target
-            excerpts together. Use a line range or symbol selector when the file is known. To locate callers or
-            readers in tracked source, use a literal symbol or resource name from the supplied evidence:
+            excerpts together. Request the implementation, its consumer, and any decisive guard in the same
+            batch when the claim depends on all of them. Use a single pinned file with all, a line range, or a
+            symbol selector. Use a directory or glob with references to locate callers or readers:
             REQUEST_FILE|target|src/main/**/*.java|references:Service.write|Find the caller and its guard
+            REQUEST_FILE|target|src/main/**/*.java|references:new Worker|Locate constructor call sites
             In <adaptive-review> XML, put the raw request lines directly inside <requests>, without child tags.
             In structured JSON, use one string per item in the requests array. For <verification> XML, put the
             lines after the closing </verification> tag.
@@ -25,6 +27,7 @@ record EvidenceRequest(int line, String text) {
     String key() {
         int count = text.startsWith("REQUEST_KNOWLEDGE|") ? 3 : text.startsWith("REQUEST_LANGUAGE|") ? 7 : 5;
         String[] fields = text.split("\\|", count);
+        if (fields.length == 5 && fields[0].equals("REQUEST_FILE")) fields[3] = EvidenceQuery.normalizeSelector(fields[3]);
         return text.startsWith("REQUEST_KNOWLEDGE|") && fields.length >= 3
                 ? fields[0] + "|" + fields[1].strip().toLowerCase(Locale.ROOT)
                 : fields.length >= 5 ? String.join("|", java.util.Arrays.copyOf(fields, fields.length - 1)) : text;

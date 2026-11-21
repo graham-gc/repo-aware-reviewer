@@ -199,8 +199,11 @@ final class SupplementalEvidence {
             throws IOException, InterruptedException {
         var inScope = RepositoryBrowser.pathsMatching(query.resource());
         String reference = query.reference();
-        var exact = Pattern.compile("(?<![\\p{L}\\p{N}_$-])" + Pattern.quote(reference) + "(?![\\p{L}\\p{N}_$-])");
-        var matches = git.filesMatching(revision, List.of(reference), RepositoryBrowser.searchPathspec(query.resource())).stream()
+        boolean construction = reference.startsWith("new ");
+        String needle = construction ? reference.substring("new ".length()) : reference;
+        var exact = Pattern.compile("(?<![\\p{L}\\p{N}_$-])" + (construction ? "new\\s+" : "")
+                + Pattern.quote(needle) + (construction ? "(?=\\s*[<(])" : "(?![\\p{L}\\p{N}_$-])"));
+        var matches = git.filesMatching(revision, List.of(needle), RepositoryBrowser.searchPathspec(query.resource())).stream()
                 .filter(path -> path.equals(query.resource()) || inScope.test(path))
                 .filter(this::eligiblePath)
                 .filter(path -> evidence.scopedKnowledge() == null || !evidence.scopedKnowledge().isSourcePath(path))
@@ -208,29 +211,44 @@ final class SupplementalEvidence {
         var sources = new ArrayList<EvidenceSource>();
         var blocks = new StringBuilder();
         boolean limited = matches.size() > MAX_REFERENCE_FILES;
+        var excerptsByFile = new ArrayList<List<EvidenceSource>>();
         for (String path : matches.stream().limit(MAX_REFERENCE_FILES).toList()) {
             List<String> lines;
             try { lines = git.regularBlobAt(revision, path, MAX_SOURCE_BYTES).lines().toList(); }
             catch (IOException unavailable) { limited = true; continue; }
+            var excerpts = new ArrayList<EvidenceSource>();
             for (int line = 0; line < lines.size(); line++) {
                 if (!exact.matcher(lines.get(line)).find()) continue;
+                if (excerpts.size() >= MAX_REFERENCE_EXCERPTS) {
+                    limited = true;
+                    break;
+                }
                 int first = Math.max(1, line + 1 - REFERENCE_CONTEXT);
                 int last = Math.min(lines.size(), line + 1 + REFERENCE_CONTEXT);
-                var source = fileExcerpt(evidence.scope(), revision, path, lines, first, last);
+                excerpts.add(fileExcerpt(evidence.scope(), revision, path, lines, first, last));
+                line = last - 1;
+            }
+            if (!excerpts.isEmpty()) excerptsByFile.add(excerpts);
+        }
+        // An occurrence in a different file can establish a caller or guard that more hits in one file cannot.
+        for (int i = 0; i < MAX_REFERENCE_EXCERPTS; i++) {
+            for (var excerpts : excerptsByFile) {
+                if (i >= excerpts.size()) continue;
+                var source = excerpts.get(i);
                 String block = source.markdown();
                 int bytes = EvidenceText.bytes(block);
                 if (sources.size() >= MAX_REFERENCE_EXCERPTS || bytes > quota) {
                     limited = true;
-                    break;
+                    continue;
                 }
                 sources.add(source);
                 blocks.append(block);
                 quota -= bytes;
-                line = last - 1;
             }
         }
         if (sources.isEmpty()) throw new IOException("No readable pinned excerpts matched the literal reference within budget");
         return new Excerpt(blocks.toString(), "INCLUDED (literal reference excerpts; verify binding"
+                + "; " + sources.stream().map(EvidenceSource::path).distinct().count() + " files"
                 + (limited ? "; partial search coverage" : "") + ")", new EvidenceCatalog(sources, true));
     }
 

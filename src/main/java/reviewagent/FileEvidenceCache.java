@@ -1,5 +1,6 @@
 package reviewagent;
 
+import java.util.BitSet;
 import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -12,15 +13,22 @@ final class FileEvidenceCache {
     static boolean alreadySupplied(EvidenceSource excerpt, EvidenceCatalog supplied) {
         if (excerpt == null || !nativeFile(excerpt)) return false;
         var lines = excerpt.text().lines().toList();
-        return supplied.sources().stream().filter(source -> nativeFile(source) && source.path().equals(excerpt.path())
-                && source.revision().equals(excerpt.revision()) && source.roles().equals(excerpt.roles())
-                && source.firstLine() <= excerpt.firstLine()).anyMatch(source -> {
-                    int offset = excerpt.firstLine() - source.firstLine();
-                    var existing = source.text().lines().toList();
-                    int end = offset + lines.size();
-                    return end <= existing.size() && (!excerpt.endOfFile() || source.endOfFile() && end == existing.size())
-                            && existing.subList(offset, end).equals(lines);
-                });
+        var visible = new BitSet(lines.size());
+        boolean knownEnd = !excerpt.endOfFile();
+        for (var source : supplied.sources()) {
+            if (!nativeFile(source) || !source.path().equals(excerpt.path()) || !source.revision().equals(excerpt.revision())
+                    || !source.roles().equals(excerpt.roles())) continue;
+            int offset = source.firstLine() - excerpt.firstLine();
+            var existing = source.text().lines().toList();
+            int sourceEnd = offset + existing.size();
+            int first = Math.max(0, offset);
+            int last = Math.min(lines.size(), sourceEnd);
+            if (first > last || !existing.subList(first - offset, last - offset).equals(lines.subList(first, last))) continue;
+            visible.set(first, last);
+            if (source.endOfFile() && sourceEnd == lines.size()) knownEnd = true;
+            if (knownEnd && visible.nextClearBit(0) >= lines.size()) return true;
+        }
+        return false;
     }
 
     static Set<String> covering(EvidenceQuery query, ReviewScope scope, EvidenceCatalog catalog) {

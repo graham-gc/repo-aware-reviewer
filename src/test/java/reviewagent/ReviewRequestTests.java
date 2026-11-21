@@ -97,10 +97,10 @@ final class ReviewRequestTests {
         write("c.txt", "third edit\n".repeat(480));
         commit("all remaining hunks fit together");
         var reviewed = review();
-        var prompt = Files.readString(reviewed.resolve("focused/T-prompt.md"));
+        var prompt = Files.readString(reviewed.resolve("focused/O-prompt.md"));
         check(Main.reviewExitCode(reviewed) == 0 && calls(reviewed, 1)
                 && prompt.contains("large edit") && prompt.contains("second edit") && prompt.contains("third edit"),
-                "remaining hunks share one request when their total fits");
+                "the first overview packs whole hunks into one request when their total fits");
 
         write("a.txt", "new large edit\n".repeat(4600));
         write("b.txt", "new second edit\n".repeat(4500));
@@ -110,14 +110,14 @@ final class ReviewRequestTests {
         check(Main.reviewExitCode(oversized) == 3
                 && Files.readString(oversized.resolve("review-status.md")).contains("Unreviewed change"),
                 "a hunk larger than a single request is still disclosed");
-        String first = Files.readString(oversized.resolve("focused/T-prompt.md"));
-        String next = Files.readString(oversized.resolve("focused/T2-prompt.md"));
+        String first = Files.readString(oversized.resolve("focused/O-prompt.md"));
+        String next = Files.readString(oversized.resolve("focused/T-prompt.md"));
         String firstPath = first.contains("- b.txt\n") ? "b.txt" : "c.txt";
         String nextPath = firstPath.equals("b.txt") ? "c.txt" : "b.txt";
         check(first.contains("- " + firstPath + "\n") && next.contains("- " + nextPath + "\n")
                 && !first.contains(nextPath) && !next.contains(firstPath)
                 && !first.contains("a.txt") && !next.contains("a.txt"),
-                "each follow-up gives the model only the eligible paths for that scope");
+                "each packed scope gives the model only the eligible paths for that scope");
     }
 
     private void locations() throws Exception {
@@ -387,7 +387,8 @@ final class ReviewRequestTests {
         var located = review();
         var prompt = Files.readString(located.resolve("focused/F1/F1-1-prompt.md"));
         check(Main.reviewExitCode(located) == 0 && calls(located, 2)
-                && prompt.contains("CALLER_GUARD_EVIDENCE") && !prompt.contains("WORKTREE_ONLY")
+                && prompt.contains("CALLER_GUARD_EVIDENCE") && prompt.contains("Original evidence questions for this candidate")
+                && !prompt.contains("WORKTREE_ONLY")
                 && !prompt.contains("authorize_later") && !prompt.contains("OUT_OF_SCOPE_REFERENCE")
                 && !Files.readString(located.resolve("report.md")).contains("Unapproved work may proceed"),
                 "locally located pinned caller context can disprove a candidate in one verification request");

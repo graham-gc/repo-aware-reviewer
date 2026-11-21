@@ -64,12 +64,20 @@ final class ReviewQuality {
         return verifyRounds(candidates.stream().map(decision -> decision.verdict().candidate()).toList(),
                 (candidate, view) -> prompts.verifyFinding(view.bundle(), candidate, "", view.index())
                         + outcomeRules
-                        + "\nFor another evidence request, cite what the newly supplied material actually proves "
-                        + "and identify the remaining premise that determines the outcome. Ask for the smallest "
-                        + "source excerpt that can resolve that premise. Use an insufficient verdict when the gap cannot be resolved.\n"
+                        + """
+
+                        Before asking for more evidence, decide whether a required trigger is contradicted by the pinned
+                        source. If it is, reject this candidate and finish; a different hypothetical trigger is a different
+                        candidate. If the supplied sources prove the trigger, changed behavior and outcome, confirm and finish.
+                        Otherwise name the still-missing premise, say what each answer would do to this verdict, and request
+                        the smallest set of excerpts needed together. Cite what newly supplied material establishes before
+                        extending the investigation. If no tracked source could settle the premise, leave a maintainer question.
+                        """
                         + EvidenceRequest.SCOPED_GUIDANCE
                         + (delivered.containsKey(candidate.id()) ? "\nPREVIOUS DECISION — RECHECK WITH THE NEW EVIDENCE\n"
-                           + PromptFactory.decisionSummary(previous.get(candidate.id()), view.index()) : ""),
+                           + PromptFactory.decisionSummary(previous.get(candidate.id()), view.index())
+                           + EvidenceText.block("Original evidence questions for this candidate", "text",
+                                EvidenceText.linePrefix(session.initialRequests(candidate.id()), 1_600)) : ""),
                 candidate -> {
                     var sources = new LinkedHashSet<>(delivered.getOrDefault(candidate.id(), Set.of()));
                     sources.addAll(citationIds(previous.get(candidate.id()).citations()));
