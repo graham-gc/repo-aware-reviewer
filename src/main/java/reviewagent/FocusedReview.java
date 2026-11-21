@@ -232,7 +232,7 @@ final class FocusedReview {
             if (response.candidates().isEmpty() && response.misplaced().isEmpty())
                 issues.add(folder + " reported an unassessed scope without an evidence question.");
             for (var decision : pending) {
-                if (!delivered.containsKey(decision.verdict().candidate().id()) || !decision.verdict().nextCheck().isBlank())
+                if (session.initialRequests(decision.verdict().candidate().id()).isBlank())
                     expand(decision, evidence, session, folder, collected, delivered);
             }
         }

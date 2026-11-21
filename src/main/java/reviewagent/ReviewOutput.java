@@ -191,6 +191,15 @@ final class ReviewOutput {
         return xml(response, rootName).remainder();
     }
 
+    record Followup(String requests, boolean answeredPreviousPremise) { }
+
+    static Followup verificationFollowup(String response) throws IOException {
+        var block = xml(response, "verification");
+        var premise = fields(block.root(), ReviewSchema.VERIFICATION).get("previousPremise");
+        String result = premise == null ? "" : premise.getTextContent().strip();
+        return new Followup(block.remainder(), result.equals("SUPPORTED") || result.equals("REFUTED"));
+    }
+
     static List<EvidenceIndex.Citation> citations(Element element) throws IOException {
         if (element == null) return List.of();
         var citations = new ArrayList<EvidenceIndex.Citation>();

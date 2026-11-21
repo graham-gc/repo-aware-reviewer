@@ -41,7 +41,11 @@ final class ReviewRequestTests {
                         case "$prompt" in
                           *'CALLER_GUARD_EVIDENCE'*)
                             printf '<verification><status>REJECTED</status><reason>The pinned caller already rejects unchecked requests.</reason></verification>' ;;
-                          *) printf '<verification><status>INSUFFICIENT_EVIDENCE</status><reason>The caller remains unlocated.</reason></verification>\\nREQUEST_FILE|target|queue|index|Find the caller\\n' ;;
+                          *)
+                            ref=$(printf '%s\\n' "$prompt" | sed -n 's/^- \\(SRC-[0-9]*\\): other.py at .*/\\1/p' | head -n 1)
+                            printf '<verification><status>INSUFFICIENT_EVIDENCE</status><reason>The supplied implementation has no caller guard. The caller remains unlocated.</reason>'
+                            printf '<previousPremise>REFUTED</previousPremise><citations><citation><source>%s</source><lines>1:1</lines></citation></citations>' "$ref"
+                            printf '</verification>\\nREQUEST_FILE|target|queue|index|Find the caller\\n' ;;
                         esac
                         exit
                     fi
@@ -55,7 +59,13 @@ final class ReviewRequestTests {
                                 ref=$(printf '%s\\n' "$prompt" | sed -n 's/^- \\(SRC-[0-9]*\\): queue\\/producer.py at .*/\\1/p' | head -n 1)
                                 printf '<citations><citation><source>%s</source><lines>1:1</lines></citation></citations>' "$ref"
                             fi
-                            printf '</verification>\\nREQUEST_FILE|target|queue/consumer.py|all|Does the consumer block unapproved work?\\n' ;;
+                            if [ -f "$fixture/answered-producer" ]; then
+                                printf '<previousPremise>SUPPORTED</previousPremise>'
+                            fi
+                            printf '</verification>\\nREQUEST_FILE|target|queue/consumer.py|all|Does the consumer block unapproved work?\\n'
+                            if [ -f "$fixture/require-call-entry" ]; then
+                                printf 'REQUEST_FILE|target|queue/entry.py|symbol:dispatch|Can an unapproved job reach the consumer?\\n'
+                            fi ;;
                           *) printf '<verification><status>INSUFFICIENT_EVIDENCE</status><reason>Need the producer contract.</reason></verification>\\nREQUEST_FILE|target|queue/producer.py|all|Where does the producer send this work?\\n' ;;
                         esac
                         exit
@@ -339,11 +349,25 @@ final class ReviewRequestTests {
                 "a speculative third check preserves the known gap without launching another call");
 
         Files.createFile(root.resolve("cite-producer"));
+        var unanswered = review();
+        check(Main.reviewExitCode(unanswered) == 0 && calls(unanswered, 4)
+                && Files.readString(unanswered.resolve("coverage.md")).contains("previous evidence question remains unanswered"),
+                "a fresh citation alone does not show that the last question has been answered");
+
+        Files.createFile(root.resolve("answered-producer"));
+        Files.createFile(root.resolve("require-call-entry"));
+        var partial = review();
+        check(Main.reviewExitCode(partial) == 0 && calls(partial, 4)
+                && Files.readString(partial.resolve("coverage.md")).contains("target queue/consumer.py all: INCLUDED")
+                && Files.readString(partial.resolve("coverage.md")).contains("Missing required evidence: REQUEST_FILE|target|queue/entry.py|symbol:dispatch")
+                && Files.readString(partial.resolve("report.md")).contains("Unapproved work may pass the guard"),
+                "fetching one part of a required group leaves the candidate unresolved without launching another call");
+        Files.delete(root.resolve("require-call-entry"));
         var continued = review();
         check(Main.reviewExitCode(continued) == 0 && calls(continued, 5)
                 && Files.readString(continued.resolve("focused/F1/round-3/F1-1-prompt.md")).contains("CONSUMER_BLOCKS_UNAPPROVED")
                 && !Files.readString(continued.resolve("report.md")).contains("Unapproved work may pass the guard"),
-                "a new pinned producer citation justifies continuing to the decisive consumer evidence");
+                "answering and citing the prior evidence question allows verification against the complete next group");
     }
 
     private void navigationEvidence() throws Exception {
@@ -375,6 +399,15 @@ final class ReviewRequestTests {
                 && Files.readString(index.resolve("coverage.md")).contains("INDEX_ONLY")
                 && Files.readString(index.resolve("report.md")).contains("Unapproved work may proceed"),
                 "a file listing alone leaves the candidate pending without a model call");
+
+        Files.writeString(response, candidate.formatted("""
+                REQUEST_FILE|target|other.py|all|Read a necessary helper
+                REQUEST_FILE|target|queue/unknown.py|all|Read the guard that selects the helper
+                """));
+        var partial = review();
+        check(Main.reviewExitCode(partial) == 0 && calls(partial, 1)
+                && Files.readString(partial.resolve("coverage.md")).contains("Missing required evidence: REQUEST_FILE|target|queue/unknown.py|all"),
+                "a partial initial evidence group cannot start scoped verification or bypass the gate through scope expansion");
 
         Files.writeString(response, candidate.formatted("REQUEST_FILE|target|other.py|all|Read an implementation file"));
         var verifierIndex = review();

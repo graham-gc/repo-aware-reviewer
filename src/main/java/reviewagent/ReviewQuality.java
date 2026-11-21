@@ -69,9 +69,11 @@ final class ReviewQuality {
                         Before asking for more evidence, decide whether a required trigger is contradicted by the pinned
                         source. If it is, reject this candidate and finish; a different hypothetical trigger is a different
                         candidate. If the supplied sources prove the trigger, changed behavior and outcome, confirm and finish.
-                        Otherwise name the still-missing premise, say what each answer would do to this verdict, and request
-                        the smallest set of excerpts needed together. Cite what newly supplied material establishes before
-                        extending the investigation. If no tracked source could settle the premise, leave a maintainer question.
+                        When replying to a prior evidence question, include one <previousPremise> field directly inside
+                        <verification>. Allowed values are SUPPORTED, REFUTED and UNRESOLVED. In <reason>, explain
+                        what the new excerpts establish about that exact question and cite them. Ask another question
+                        only after answering that premise. If it remains unresolved, return INSUFFICIENT_EVIDENCE
+                        without further requests and name the missing fact for the maintainer.
                         """
                         + EvidenceRequest.SCOPED_GUIDANCE
                         + (delivered.containsKey(candidate.id()) ? "\nPREVIOUS DECISION — RECHECK WITH THE NEW EVIDENCE\n"
@@ -82,7 +84,7 @@ final class ReviewQuality {
                     var sources = new LinkedHashSet<>(delivered.getOrDefault(candidate.id(), Set.of()));
                     sources.addAll(citationIds(previous.get(candidate.id()).citations()));
                     return sources;
-                }, folder, 5, "Independently verifying selected candidates", true, batchEligible);
+                }, folder, 5, "Independently verifying selected candidates", true, batchEligible, delivered);
     }
 
     Adjudication adjudicate(List<ReviewOutput.Decision> preliminary, String assessment, Set<String> requirementCandidates)
@@ -195,18 +197,18 @@ final class ReviewQuality {
     private List<ReviewOutput.Decision> verifyRounds(List<ReviewFinding> findings, VerificationPrompt prompt,
             Function<ReviewFinding, Set<String>> requiredSources, String folder, int stage, String description)
             throws IOException, InterruptedException {
-        return verifyRounds(findings, prompt, requiredSources, folder, stage, description, false, Map.of());
+        return verifyRounds(findings, prompt, requiredSources, folder, stage, description, false, Map.of(), Map.of());
     }
 
     private List<ReviewOutput.Decision> verifyRounds(List<ReviewFinding> findings, VerificationPrompt prompt,
             Function<ReviewFinding, Set<String>> requiredSources, String folder, int stage, String description,
-            boolean newEvidenceOnly, Map<String, ReviewOutput.Decision> batchEligible)
+            boolean newEvidenceOnly, Map<String, ReviewOutput.Decision> batchEligible, Map<String, Set<String>> initialDelivery)
             throws IOException, InterruptedException {
         var results = new LinkedHashMap<String, ReviewOutput.Decision>();
         var priorPrompts = new LinkedHashMap<String, String>();
         var continuations = new LinkedHashMap<String, VerificationContinuation>();
         var awaitingVerdicts = new LinkedHashSet<String>();
-        Map<String, Set<String>> lastDelivery = Map.of();
+        Map<String, Set<String>> lastDelivery = initialDelivery;
         OutputLanguage language = OutputLanguage.parse(options.language());
         List<ReviewFinding> pending = findings;
         int round = 1;
@@ -287,14 +289,22 @@ final class ReviewQuality {
                             "The reply requested evidence. A validated verification verdict is still pending.",
                             "回复仅请求了证据，尚无经过校验的复核结论。"))
                         : ReviewGrounding.verification(response, candidate, view.bundle(), view.index()));
-                String requests = requestOnly ? response : ReviewOutput.requestText(response, "verification");
+                var followup = requestOnly ? new ReviewOutput.Followup(response, false)
+                        : ReviewOutput.verificationFollowup(response);
+                String requests = followup.requests();
                 if (newEvidenceOnly && !requests.isBlank()) {
                     var decision = results.get(candidate.id());
                     if (decision.verdict().status() != ReviewOutput.Status.INSUFFICIENT_EVIDENCE) continue;
                     var supplied = lastDelivery.getOrDefault(candidate.id(), Set.of());
-                    if (round > 1 && decision.citations().stream().noneMatch(citation -> supplied.contains(citation.sourceId()))) {
+                    boolean answeringRequest = round > 1 || !session.initialRequests(candidate.id()).isBlank();
+                    if (answeringRequest && decision.citations().stream().noneMatch(citation -> supplied.contains(citation.sourceId()))) {
                         session.recordFollowup(path + "/" + candidate.id(), requests, Set.of(),
                                 "Stopped; the verdict cites no newly supplied evidence for the remaining premise.");
+                        continue;
+                    }
+                    if (answeringRequest && !followup.answeredPreviousPremise()) {
+                        session.recordFollowup(path + "/" + candidate.id(), requests, Set.of(),
+                                "Stopped; the previous evidence question remains unanswered.");
                         continue;
                     }
                 }
@@ -308,15 +318,15 @@ final class ReviewQuality {
                     views.get(id).bundle().catalog().sources().stream().map(EvidenceSource::id).collect(java.util.stream.Collectors.toSet())));
             var delivered = new LinkedHashMap<String, Set<String>>();
             for (var entry : candidateRequests.entrySet()) {
+                if (entry.getValue().isBlank()) continue;
                 var supplied = views.get(entry.getKey()).bundle().catalog();
-                Set<String> needed = newEvidenceOnly ? session.scopedDelivery(entry.getValue(), supplied)
+                Set<String> needed = newEvidenceOnly
+                        ? session.deliverScoped(path + "/" + entry.getKey(), entry.getValue(), supplied)
                         : session.delivery(entry.getValue(), supplied);
                 retainedEvidence.computeIfAbsent(entry.getKey(), unused -> new LinkedHashSet<>()).addAll(needed);
                 if (results.get(entry.getKey()).verdict().status() == ReviewOutput.Status.INSUFFICIENT_EVIDENCE) {
                     if (!needed.isEmpty()) delivered.put(entry.getKey(), needed);
-                    if (newEvidenceOnly && !entry.getValue().isBlank())
-                        session.recordFollowup(path + "/" + entry.getKey(), entry.getValue(), needed);
-                    else session.recordDelivery(path + "/" + entry.getKey(), needed);
+                    if (!newEvidenceOnly) session.recordDelivery(path + "/" + entry.getKey(), needed);
                 }
             }
             saveEvidence();

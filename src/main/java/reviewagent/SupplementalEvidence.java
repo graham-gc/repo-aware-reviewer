@@ -68,7 +68,9 @@ final class SupplementalEvidence {
 
     private Set<String> reusable(EvidenceBundle evidence, EvidenceQuery query) {
         if (!eligiblePath(query.resource()) || evidence.scopedKnowledge() != null && evidence.scopedKnowledge().isSourcePath(query.resource())) return Set.of();
-        return FileEvidenceCache.covering(query, evidence.scope(), evidence.catalog());
+        var covering = FileEvidenceCache.covering(query, evidence.scope(), evidence.catalog());
+        return covering.isEmpty() && !query.fallback().isEmpty()
+                ? FileEvidenceCache.covering(query.fallbackQuery(), evidence.scope(), evidence.catalog()) : covering;
     }
 
     Result collect(EvidenceBundle evidence, String candidates, int maxRequests, int maxKnowledgeQueries)
@@ -111,7 +113,7 @@ final class SupplementalEvidence {
             boolean deferred = i >= total;
             int quota = deferred ? remaining : Math.min(remaining, Math.max(256, remaining / (total - i)));
             boolean canDefer = !deferred && quota < remaining && query.operation() == EvidenceQuery.Operation.READ_FILE
-                    && query.selector().equals("all");
+                    && (query.selector().equals("all") || !query.fallback().isEmpty());
             String revision = query.side().equals("base") ? evidence.scope().baseCommit() : evidence.scope().targetCommit();
             String label = EvidenceText.oneLine(query.label());
             String status;
@@ -137,7 +139,7 @@ final class SupplementalEvidence {
                     if (evidence.scopedKnowledge() != null && evidence.scopedKnowledge().isSourcePath(query.resource())) {
                         throw new IOException("Use a knowledge query for the scoped knowledge document");
                     }
-                    excerpt = repositoryFile(evidence.scope(), revision, query.resource(), query.selector(), quota);
+                    excerpt = repositoryFile(evidence.scope(), revision, query, quota);
                 } else {
                     LanguageModule module = languages.module(query.language());
                     var browser = new RepositoryBrowser(repository);
@@ -252,6 +254,19 @@ final class SupplementalEvidence {
                 + (limited ? "; partial search coverage" : "") + ")", new EvidenceCatalog(sources, true));
     }
 
+    private Excerpt repositoryFile(ReviewScope scope, String revision, EvidenceQuery query, int quota)
+            throws IOException, InterruptedException {
+        if (query.fallback().isEmpty()) return repositoryFile(scope, revision, query.resource(), query.selector(), quota);
+        try {
+            var requested = repositoryFile(scope, revision, query.resource(), query.selector(), quota);
+            if (EvidenceText.bytes(requested.markdown()) <= quota) return requested;
+        } catch (IOException unavailable) {
+            // The request explicitly names a smaller location that can answer the same question.
+        }
+        var fallback = repositoryFile(scope, revision, query.resource(), query.fallback(), quota);
+        return new Excerpt(fallback.markdown(), "INCLUDED (fallback " + query.fallback() + ")", fallback.catalog());
+    }
+
     private Excerpt repositoryFile(ReviewScope scope, String revision, String path, String selector, int quota)
             throws IOException, InterruptedException {
         if (!eligiblePath(path)) {
@@ -271,7 +286,7 @@ final class SupplementalEvidence {
             from = lines.first();
             to = lines.last();
         } else {
-            if (!selector.matches("[1-9][0-9]{0,6}:[1-9][0-9]{0,6}")) {
+            if (!EvidenceQuery.LINES.matcher(selector).matches()) {
                 throw new IOException("Expected all, a line range such as 10:90, or a registered language's symbol selector");
             }
             String[] endpoints = selector.split(":");

@@ -5,7 +5,9 @@ import java.util.List;
 import java.util.regex.Pattern;
 
 record EvidenceQuery(String command, String side, String language, String context, String resource,
-                     String selector, String reason) {
+                     String selector, String reason, String fallback) {
+    private static final String FALLBACK = ";fallback=";
+    static final Pattern LINES = Pattern.compile("[1-9][0-9]{0,6}:[1-9][0-9]{0,6}");
     private static final String REFERENCES = "references:";
     private static final String REFERENCE_NAME = "[\\p{L}_$][\\p{L}\\p{N}_$-]*(?:\\.[\\p{L}_$][\\p{L}\\p{N}_$-]*)*";
     private static final Pattern NAME = Pattern.compile(REFERENCE_NAME);
@@ -32,18 +34,38 @@ record EvidenceQuery(String command, String side, String language, String contex
             throw new IOException("Expected a bounded evidence request at base or target");
         if (fields[0].equals("REQUEST_LANGUAGE")) {
             if (fields.length != 7 || java.util.Arrays.stream(fields).anyMatch(String::isBlank)) throw new IOException("Expected seven REQUEST_LANGUAGE fields");
-            return new EvidenceQuery(fields[0], fields[1], fields[2], fields[3], fields[4], fields[5], fields[6]);
+            return new EvidenceQuery(fields[0], fields[1], fields[2], fields[3], fields[4], fields[5], fields[6], "");
         }
         if (fields.length != 5 || java.util.Arrays.stream(fields).anyMatch(String::isBlank)) throw new IOException("Expected five file or legacy evidence fields");
-        if (fields[0].equals("REQUEST_FILE") && fields[3].startsWith(REFERENCES)) {
+        boolean file = fields[0].equals("REQUEST_FILE");
+        String fallback = "";
+        int alternative = file ? fields[3].indexOf(FALLBACK) : -1;
+        if (alternative >= 0) {
+            fallback = fields[3].substring(alternative + FALLBACK.length());
+            fields[3] = fields[3].substring(0, alternative);
+            boolean narrower = fields[3].equals("all") && (symbol(fallback) || LINES.matcher(fallback).matches())
+                    || symbol(fields[3]) && LINES.matcher(fallback).matches();
+            if (!narrower) throw new IOException("Expected a narrower file selector after " + FALLBACK);
+        }
+        if (file && fields[3].startsWith(REFERENCES)) {
             String reference = fields[3].substring(REFERENCES.length());
             if (!NAME.matcher(reference).matches() && !CONSTRUCTION.matcher(reference).matches())
                 throw new IOException("A reference search requires a literal symbol, resource name, or new Type");
             fields[3] = normalizeSelector(fields[3]);
         }
-        String language = fields[0].equals("REQUEST_FILE") ? "" : languages.legacy(fields[0]).id();
-        return new EvidenceQuery(fields[0], fields[1], language, "", fields[2], fields[3], fields[4]);
+        String language = file ? "" : languages.legacy(fields[0]).id();
+        return new EvidenceQuery(fields[0], fields[1], language, "", fields[2], fields[3], fields[4], fallback);
     }
-    List<String> key() { return List.of(command, side, language, context, resource, selector); }
+
+    private static boolean symbol(String selector) {
+        return selector.startsWith("symbol:") && !selector.substring("symbol:".length()).isBlank()
+                && !selector.contains(FALLBACK);
+    }
+
+    EvidenceQuery fallbackQuery() {
+        return new EvidenceQuery(command, side, language, context, resource, fallback, reason, "");
+    }
+
+    List<String> key() { return List.of(command, side, language, context, resource, selector, fallback); }
     String label() { return side + " " + (language.isEmpty() || !command.equals("REQUEST_LANGUAGE") ? "" : "[" + language + "] " + context + " -> ") + resource + " " + selector; }
 }

@@ -15,10 +15,10 @@ final class ReviewSchema {
     static final Set<String> TEXT = Set.of("id", "title", "severity", "path", "line", "endLine", "trigger", "impact", "evidence",
             "diffRelation", "status", "reason", "relation", "baseline", "contract", "requirement", "requirementText", "behavior",
             "reasoning", "boundaries", "gap", "source", "quote", "support", "statement", "basis", "policyBasis", "policyReason", "lines", "requirementLines",
-            "nextCheck", "sharedCandidates", "summary", "route", "requests", "escalate");
+            "nextCheck", "previousPremise", "sharedCandidates", "summary", "route", "requests", "escalate");
     static final Set<String> FINDING = Set.of("id", "title", "severity", "path", "line", "endLine", "trigger", "impact", "evidence", "diffRelation");
     static final Set<String> VERIFICATION = Set.of("status", "reason", "finding", "relation", "baseline", "contract", "citations", "support", "premises",
-            "nextCheck", "sharedCandidates");
+            "nextCheck", "previousPremise", "sharedCandidates");
     static final Set<String> ASSESSMENT_ITEM = Set.of("id", "requirement", "requirementText", "behavior", "status", "reasoning", "boundaries", "gap",
             "citations", "policyBasis", "policyReason", "requirementLines");
     private static final List<String> ADAPTIVE_FIELDS = List.of("route", "summary", "decisions");

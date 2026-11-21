@@ -160,9 +160,8 @@ final class AdaptiveReview {
         for (var candidate : requested) {
             String id = candidate.decision().verdict().candidate().id();
             session.recordInitialRequests(id, candidate.requests());
-            var sources = session.scopedDelivery(candidate.requests(), evidence.catalog());
+            var sources = session.deliverScoped(folder + "/" + id, candidate.requests(), evidence.catalog());
             if (!sources.isEmpty()) delivered.put(id, sources);
-            session.recordFollowup(folder + "/" + id, candidate.requests(), sources);
         }
         return delivered;
     }

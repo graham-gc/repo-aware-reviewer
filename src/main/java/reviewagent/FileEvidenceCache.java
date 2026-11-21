@@ -36,7 +36,7 @@ final class FileEvidenceCache {
         boolean whole = query.selector().equals("all");
         int first = 1, last = Integer.MAX_VALUE;
         if (!whole) {
-            if (!query.selector().matches("[1-9][0-9]{0,6}:[1-9][0-9]{0,6}")) return Set.of();
+            if (!EvidenceQuery.LINES.matcher(query.selector()).matches()) return Set.of();
             String[] range = query.selector().split(":");
             first = Integer.parseInt(range[0]); last = Integer.parseInt(range[1]);
             if (last < first || last - first >= 200) return Set.of();

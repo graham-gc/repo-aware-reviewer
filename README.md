@@ -62,12 +62,12 @@ flowchart TD
         Q -->|Other multi-file changes or risk signals| F["Review selected risk areas and the remaining diff excerpts"]
         Q -->|Deep review requested or required| P3["R1, R2 and R3 independently propose findings"]
         F --> FC["If a confirmed candidate has a broken citation,<br/>try one correction with the supplied source"]
-        FC --> FN{"Did a candidate receive new evidence?"}
+        FC --> FN{"Did the candidate receive all required evidence with new material?"}
         FN -->|Yes| FV["Recheck only that candidate"]
         FN -->|No| FP["Check impact and severity against the evidence<br/>Summarize the final decisions"]
         FV --> FP
         FP --> P8
-        L -->|Specific new evidence available| T["Verify the affected candidate"]
+        L -->|Required evidence available| T["Verify the affected candidate"]
         L -->|Broader risk or conflicting conclusions| P3
         T -->|Broader risk| P3
         L -->|Ready or no new evidence| P8
@@ -204,7 +204,7 @@ A grouped local review starts with complete diffs and nearby implementation line
 
 A small change limited to existing Markdown READMEs or files under `docs/` can also finish in one call. The CLI resolves cited lines to the pinned Git revision and lists model observations for human review. A specific issue that needs implementation or contract evidence can trigger deep review.
 
-For other multi-file changes or detected risk signals, the CLI gives related files and more source context to a scoped risk check, and reviews the remaining files with bounded diff excerpts. A scoped candidate can receive one citation correction using available source. The CLI rechecks a candidate's conclusion when it receives new evidence. The scoped report summarizes the final decisions. A confirmed finding needs target evidence for its stated impact, and high or critical severity also needs evidence of the material effect or affected scope. See `coverage.md` for evidence gaps and publishing decisions. Supplied review rules and explicit `--review-mode deep` use the full workflow.
+For other multi-file changes or detected risk signals, the CLI gives related files and more source context to a scoped risk check, and reviews the remaining files with bounded diff excerpts. A scoped candidate can receive one citation correction using available source. For a requested follow-up, the CLI rechecks a candidate once every required excerpt is available and at least one adds evidence. The scoped report summarizes the final decisions. A confirmed finding needs target evidence for its stated impact, and high or critical severity also needs evidence of the material effect or affected scope. See `coverage.md` for evidence gaps and publishing decisions. Supplied review rules and explicit `--review-mode deep` use the full workflow.
 
 When explicit Python sibling imports link changed durable state to a changed external-effect caller, the scoped request groups those implementations and their identified dependencies for the recovery check. Other changed code stays in scope. For verified additions in that request, the new-file diff header establishes attribution and complete target source supplies the added lines. Scopes without a recognized link use the regular file grouping.
 
@@ -212,7 +212,7 @@ Durable-write checks cover inputs, caller guards, commit and error propagation. 
 
 Initial scoped verification can send up to three candidates together when they anchor to the same file, share a decisive outcome citation in another file, and use the same pinned evidence. Each candidate receives its own verdict. Missing or invalid verdicts are verified individually.
 
-If the default scoped plan would leave hunks for later requests, the CLI first tries to fit the complete diff and selected source context into one request. If the combined prompt exceeds its budget, the CLI reviews the remaining hunks in bounded scopes. The report lists any ranges still unreviewed and returns exit code 3. Risk checks can include unchanged Python siblings and direct Go or Java callers from the pinned revision. A scope can reuse implementation named in the candidate's evidence question. To keep extending a candidate's investigation, the verifier must cite newly supplied evidence and identify the remaining premise. Confirmed scoped candidates rated medium or higher, or supported by a premise in another target file, receive independent verification before publication.
+If the default scoped plan would leave hunks for later requests, the CLI first tries to fit the complete diff and selected source context into one request. If the combined prompt exceeds its budget, the CLI reviews the remaining hunks in bounded scopes. The report lists any ranges still unreviewed and returns exit code 3. Risk checks can include unchanged Python siblings and direct Go or Java callers from the pinned revision. A scope can reuse implementation named in the candidate's evidence question. To request another round, the verifier must answer the previous evidence question and cite newly supplied evidence. Missing required excerpts are recorded for human review. Confirmed scoped candidates rated medium or higher, or supported by a premise in another target file, receive independent verification before publication.
 
 Use `--focused-json-schema` to pilot Claude Code's schema-constrained response for initial risk checks. Use the same flag when resuming that run. A custom agent command used with this flag must accept Claude Code's `--output-format json` and `--json-schema` flags and return its JSON envelope. [Structured output and failure handling](docs/structured-output.md#json-schema-pilot).
 
