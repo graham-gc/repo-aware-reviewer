@@ -191,6 +191,15 @@ final class ReviewOutput {
         return xml(response, rootName).remainder();
     }
 
+    record Followup(String requests, boolean answeredPreviousPremise) { }
+
+    static Followup verificationFollowup(String response) throws IOException {
+        var block = xml(response, "verification");
+        var premise = fields(block.root(), ReviewSchema.VERIFICATION).get("previousPremise");
+        String result = premise == null ? "" : premise.getTextContent().strip();
+        return new Followup(block.remainder(), result.equals("SUPPORTED") || result.equals("REFUTED"));
+    }
+
     static List<EvidenceIndex.Citation> citations(Element element) throws IOException {
         if (element == null) return List.of();
         var citations = new ArrayList<EvidenceIndex.Citation>();
@@ -237,6 +246,12 @@ final class ReviewOutput {
         return finding(element, id, changedFiles, checkCandidateId, false);
     }
 
+    static final class FindingOutsideScopeException extends IOException {
+        FindingOutsideScopeException(String path) {
+            super("Finding location is outside the changed files: " + EvidenceText.oneLine(path));
+        }
+    }
+
     static ReviewFinding finding(Element element, String id, List<String> changedFiles, boolean checkCandidateId,
                                  boolean allowUnrated) throws IOException {
         List<Element> contents = children(element, null);
@@ -259,7 +274,7 @@ final class ReviewOutput {
         }
         String path = text(fields, "path");
         if (!changedFiles.contains(path)) {
-            throw new IOException("Finding location is outside the changed files: " + EvidenceText.oneLine(path));
+            throw new FindingOutsideScopeException(path);
         }
         try {
             int first = Integer.parseInt(text(fields, "line"));

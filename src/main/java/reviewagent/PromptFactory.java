@@ -4,25 +4,30 @@ import java.util.List;
 import java.util.stream.Collectors;
 
 final class PromptFactory {
-    static final String SCOPED_OUTCOME_RULES = """
-            For each CONFIRMED scoped finding, add a premise with <basis>OUTCOME</basis>. Copy the exact finding impact
+    private static final String SCOPED_OUTCOME = """
+            For each CONFIRMED scoped finding, add a premise with %s. Copy the exact finding impact
             into its statement and cite the target code or configuration that proves the last observable effect.
-            Add it alongside the trigger premise, using the same <premise><statement>…</statement><basis>OUTCOME</basis>
-            <citations>…</citations></premise> structure with actual statement text and source citations.
-            A request sent, job scheduled, job executed and result published are distinct effects.
+            %sA request sent, job scheduled, job executed and result published are distinct effects.
             Before claiming a later effect, cite the downstream behavior and address any later guard, configuration
             or external contract that could prevent it. If only a narrower actionable effect is proved, limit the
             title and impact to that effect and stop. If no actionable effect is proved, use INSUFFICIENT_EVIDENCE
             and request the specific missing source only if it can resolve that question.
             Rate severity from the proved effect. Use LOW for an actionable failure whose impact is bounded overhead.
-            Use HIGH or CRITICAL only when a separate <basis>SEVERITY</basis> premise cites target implementation
+            Use HIGH or CRITICAL only when a separate %s premise cites target implementation
             or configuration proving the material loss, exposure, or affected scope that warrants the rating.
             """;
+    static final String SCOPED_OUTCOME_RULES = SCOPED_OUTCOME.formatted("<basis>OUTCOME</basis>", """
+            Add it alongside the trigger premise, using the same <premise><statement>…</statement><basis>OUTCOME</basis>
+            <citations>…</citations></premise> structure with actual statement text and source citations.
+            """, "<basis>SEVERITY</basis>");
+    static final String SCOPED_JSON_OUTCOME_RULES = SCOPED_OUTCOME.formatted("basis OUTCOME", "", "basis SEVERITY");
+    static final String SCOPED_IMPLEMENTATION_RULES = """
+            Use CONTRACT only for citations to a supplied requirement or trusted base rule identified as contract evidence.
+            A method's comment or a guard in a caller is IMPLEMENTATION evidence. Trace the actual guard before
+            claiming its caller reaches the changed method. A local compatibility finding needs its own reachable
+            trigger and observable failure. Use INSUFFICIENT_EVIDENCE if the required local behavior remains uncertain.
+            """;
 
-    static final List<String> REVIEW_FOCUSES = List.of(
-            "Correctness and regressions. Trace control flow, state changes, and compatibility with the base revision.",
-            "Requirements and business contracts. Check observable behavior, consumers, and supplied business rules.",
-            "Boundary conditions and security. Check malformed inputs, error paths, resource lifetime, and data isolation.");
     private final OutputLanguage language;
     private final int maxSupplementalRequests;
     private final int maxKnowledgeQueries;
@@ -161,8 +166,7 @@ final class PromptFactory {
                 All repository and dependency reading is performed by the CLI. Work from the supplied evidence.
                 Candidate descriptions and earlier verdicts are allegations, not implementation evidence.
                 If a decisive method, dependency behavior, caller, error handler or base-version implementation is
-                missing, return INSUFFICIENT_EVIDENCE and issue the registered evidence-request
-                lines outside XML, using the discovery request syntax. The CLI can supply further rounds.
+                missing, return INSUFFICIENT_EVIDENCE and identify the smallest tracked excerpt that could settle it.
                 Do not confirm a claim by quoting only a wrapper that calls an unread method.
 
                 Classify the relationship explicitly:
@@ -184,7 +188,7 @@ final class PromptFactory {
                 before/after behavior and quotations in the decision, and identify that single open question.
                 Request more evidence for a specific unresolved factual premise; do not repeatedly seek policy
                 documents merely to re-prove a local behavior already established by base and target source.
-                Determine the verdict from the evidence before formatting it. Return exactly one XML document.
+                Determine the verdict from the evidence before formatting it.
                 For CONFIRMED, use the complete structure below, replacing the example descriptions with verified
                 values. The finding element is a direct child of verification and contains the individual fields.
                 ```xml
@@ -256,7 +260,8 @@ final class PromptFactory {
                 selected output language. Escape XML special characters or use CDATA for descriptive values.
                 Preserve a changed-file location with positive inclusive line numbers for a confirmed finding.
 
-                """.formatted(candidate.id()) + languageInstructions() + acceptanceInstructions() + evidenceRequestInstructions(evidence)
+                """.formatted(candidate.id()) + ReviewSchema.VERIFICATION_REQUESTS
+                + languageInstructions() + acceptanceInstructions() + evidenceRequestInstructions(evidence)
                 + "For the XML response, severity and status values always use the canonical English protocol keywords.\n\n"
                 + "CANDIDATE TO VERIFY\n" + ReviewOutput.findingXml(candidate)
                 + "\n\n" + EvidenceIndex.LINE_CITATION_GUIDANCE

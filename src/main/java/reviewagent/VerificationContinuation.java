@@ -11,7 +11,8 @@ record VerificationContinuation(ReviewOutput.Decision previous, String requests,
         String decision = previous.verdict().validationFailed() ? "The previous check did not produce a validated decision."
                 : "Previous model opinion: " + previous.verdict().status() + ".\nReason: "
                     + ReportText.summary(previous.verdict().reason(), 600) + "\nOpen contract/context: "
-                    + ReportText.summary(previous.contract(), 300);
+                    + ReportText.summary(previous.contract(), 300) + "\nRemaining check: "
+                    + ReportText.summary(previous.verdict().nextCheck(), 500);
         List<EvidenceSource> added = view.bundle().catalog().sources().stream().filter(source -> !supplied.contains(source.id())).toList();
         String inventory = added.stream().map(source -> "- " + view.bundle().catalog().describe(source) + "\n")
                 .collect(java.util.stream.Collectors.joining());

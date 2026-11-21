@@ -22,8 +22,9 @@ final class ReviewTasks {
         default boolean allowOutputCorrection() { return true; }
     }
 
-    record Task(String id, String prompt, Validator validator, String model) {
+    record Task(String id, String prompt, Validator validator, String model, String schema) {
         Task(String id, String prompt, Validator validator) { this(id, prompt, validator, null); }
+        Task(String id, String prompt, Validator validator, String model) { this(id, prompt, validator, model, null); }
     }
 
     record Outcome(String response, String error, String failureKind) {
@@ -64,27 +65,30 @@ final class ReviewTasks {
             try {
                 for (Task task : tasks) {
                     futures.add(completions.submit(() -> {
-                        if (globalFailure.get()) {
-                            state(directory, task, "BLOCKED", "GLOBAL_FAILURE");
-                            return new Reply(task.id(), new Outcome(null, "Blocked by a global failure", "GLOBAL_FAILURE"));
-                        }
-                        state(directory, task, "RUNNING", "");
-                        try (var budget = agent.task(task.model())) {
-                            String response = invoke(task, agent, directory, resume);
-                            Files.deleteIfExists(directory.resolve(task.id() + "-error.txt"));
-                            state(directory, task, "SUCCEEDED", "");
-                            agent.timings().task(budget.calls() == 0, true);
-                            return new Reply(task.id(), new Outcome(response, null));
+                        try {
+                            if (globalFailure.get()) return blocked(directory, task);
+                            try (var budget = agent.task(task.model(), task.schema())) {
+                                if (globalFailure.get()) return blocked(directory, task);
+                                try {
+                                    state(directory, task, "RUNNING", "");
+                                    String response = invoke(task, agent, directory, resume);
+                                    Files.deleteIfExists(directory.resolve(task.id() + "-error.txt"));
+                                    state(directory, task, "SUCCEEDED", "");
+                                    agent.timings().task(budget.calls() == 0, true);
+                                    return new Reply(task.id(), new Outcome(response, null));
+                                } catch (IOException failure) {
+                                    // A task waiting for this permit must see a fatal failure before it can launch.
+                                    if (!isolatedFailure(failure)) globalFailure.set(true);
+                                    throw failure;
+                                }
+                            }
                         } catch (IOException failure) {
                             agent.timings().task(false, false);
-                            boolean isolated = failure instanceof InvalidReviewResponseException
-                                    || failure instanceof AgentCallException call && !call.fatal();
-                            if (!isolated) globalFailure.set(true);
                             AtomicFiles.write(directory.resolve(task.id() + "-error.txt"), failure.getMessage());
                             String kind = failure instanceof AgentCallException call ? call.kind().name()
                                     : failure instanceof InvalidReviewResponseException ? "INVALID_OUTPUT" : "IO_FAILURE";
                             state(directory, task, "FAILED", kind, failure);
-                            if (isolated) {
+                            if (isolatedFailure(failure)) {
                                 return new Reply(task.id(), new Outcome(null, failure.getMessage(), kind));
                             }
                             throw failure;
@@ -123,6 +127,16 @@ final class ReviewTasks {
                 workers.shutdownNow();
             }
         } finally { agent.timings().stage(directory, batchStarted, System.nanoTime()); }
+    }
+
+    private static Reply blocked(Path directory, Task task) throws IOException {
+        state(directory, task, "BLOCKED", "GLOBAL_FAILURE");
+        return new Reply(task.id(), new Outcome(null, "Blocked by a global failure", "GLOBAL_FAILURE"));
+    }
+
+    private static boolean isolatedFailure(IOException failure) {
+        return failure instanceof InvalidReviewResponseException
+                || failure instanceof AgentCallException call && !call.fatal();
     }
 
     private static void state(Path directory, Task task, String status, String failure) throws IOException {
@@ -196,7 +210,7 @@ final class ReviewTasks {
                 boolean quotation = invalid instanceof SourceQuotationException;
                 boolean decision = invalid instanceof ReviewDecisionException;
                 String kind = quotation ? "quote-repair" : decision ? "decision-repair" : "repair";
-                boolean correct = task.validator().allowOutputCorrection();
+                boolean correct = task.validator().allowOutputCorrection() && (task.schema() == null || quotation || decision);
                 if (!correct || !attempted.add(kind)) {
                     throw new InvalidReviewResponseException("Task " + task.id() + " returned invalid structured output"
                             + (correct ? " after bounded output correction" : "") + ": "
@@ -240,13 +254,9 @@ final class ReviewTasks {
                 } else if (ReviewXml.missingResponseBlock(invalid, "adaptive-review")) {
                     repairPrompt = """
                             ADAPTIVE RESPONSE RECOVERY
-                            Review the assigned scope again using the supplied Git evidence. Start with one complete
-                            <adaptive-review> XML document with a route, summary, and decisions. Consider each assigned
-                            risk before returning <decisions/>. Do not call or request any tools. Record missing
-                            tracked evidence through the XML requests field.
-
-                            ORIGINAL REVIEW
-                            """ + task.prompt();
+                            Review the assigned scope again using the supplied Git evidence.
+                            Consider each applicable risk before returning <decisions/>. Do not call or request any tools.
+                            """ + ReviewSchema.ADAPTIVE_XML + "\nORIGINAL REVIEW\n" + task.prompt();
                 } else {
                     repairPrompt = task.prompt() + "\n\n" + correction + task.validator().correctionInstructions(invalid)
                             + "Return the complete corrected response.\nValidation error: " + invalid.getMessage()

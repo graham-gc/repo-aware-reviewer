@@ -13,11 +13,14 @@ final class ReviewXmlTests {
     static void run() throws Exception {
         damagedQuoteDoesNotBecomeEvidence();
         missingContainerClosers();
+        repeatedContainerClosers();
+        repeatedRootChildCloser();
         opaqueTextAndEnvelope();
         protocolFenceBoundaries();
         missingOpeningBracket();
         rejectedStructures();
         misplacedAdvisories();
+        misplacedRequests();
         normalizationArtifacts();
     }
 
@@ -101,7 +104,8 @@ final class ReviewXmlTests {
         String premise = "<verification>\n<status>INSUFFICIENT_EVIDENCE</status>\n<reason>More evidence needed.</reason>\n"
                 + "<premises><premise><statement>Claim.</statement><basis>ASSUMPTION</basis><citations/>\n"
                 + "</premises>\n</verification>";
-        require(ReviewXml.xml(premise, "verification").normalizations().getFirst().contains("</premise>"), "missing premise closer is unambiguous");
+        require(ReviewXml.xml(premise, "verification").normalizations().getFirst().contains("jsoup: Inserted missing container closers </premise>"),
+                "jsoup agrees with inserting the single missing premise closer");
         String two = "<verification><status>INSUFFICIENT_EVIDENCE</status><reason>More evidence needed.</reason>"
                 + "<premises><premise><statement>Claim.</statement><basis>CONTRACT</basis><citations><citation>"
                 + "<source>rules</source><quote>" + RULE + "</quote></premise></premises></verification>";
@@ -112,6 +116,68 @@ final class ReviewXmlTests {
                 "grouping shares the same structural parser");
         String duplicate = premise.replace("</reason>", "</reason><status>CONFIRMED</status>");
         fails(() -> ReviewXml.xml(duplicate, "verification"));
+    }
+
+    private static void repeatedContainerClosers() throws Exception {
+        String xml = """
+                <verification>
+                  <status>INSUFFICIENT_EVIDENCE</status>
+                  <reason>Trace the check a < b && c > d.</reason>
+                  <premises>
+                    <premise><statement>First premise.</statement><basis>ASSUMPTION</basis></premise>
+                    <premise><statement>Second premise.</statement><basis>IMPLEMENTATION</basis></premise>
+                  </premises>
+                  <citations><citation><source>SRC-1</source><lines>1:2</lines></citation></citations>
+                </verification>
+                """;
+        String request = "REQUEST_FILE|target|runner.py|all|Check the guard\n";
+        String broken = xml.replace("</premises>", "</premise>") + request;
+        var parsed = ReviewXml.xml(broken, "verification");
+        var fields = ReviewXml.fields(parsed.root(), ReviewSchema.VERIFICATION);
+        require(parsed.normalizations().size() == 1
+                && parsed.normalizations().getFirst().contains("Replaced repeated </premise> with </premises>")
+                && ReviewXml.children(fields.get("citations"), "citation").size() == 1
+                && parsed.root().getElementsByTagName("premise").getLength() == 2
+                && ReviewXml.text(fields, "status").equals("INSUFFICIENT_EVIDENCE")
+                && ReviewXml.text(fields, "reason").equals("Trace the check a < b && c > d.")
+                && parsed.remainder().equals("\n" + request),
+                "preserve the verdict, two premises, root citations and adjacent file request");
+
+        var citations = ReviewXml.xml(xml.replace("</citations>", "</citation>"), "verification");
+        require(citations.normalizations().getFirst().contains("Replaced repeated </citation> with </citations>"),
+                "the rule applies to other structurally equivalent containers");
+        fails(() -> ReviewXml.xml(xml.replace("</premises>", "</premisse>"), "verification"));
+        fails(() -> ReviewXml.xml(xml.replace("</premises>", "</premise></premises>"), "verification"));
+        fails(() -> ReviewXml.xml(xml.replace("</premises>", "</premise>").replace("</verification>", ""), "verification"));
+        fails(() -> ReviewXml.xml(xml.replace("</premises>", "</premise><unknown/>"), "verification"));
+    }
+
+    private static void repeatedRootChildCloser() throws Exception {
+        String xml = "<verification>\n<status>INSUFFICIENT_EVIDENCE</status>\n<reason>More evidence needed.</reason>\n"
+                + "<finding><id>R1-1</id></finding>\n</finding>\n"
+                + "<citations><citation><source>rules</source><quote><![CDATA[if (a < b && c > d) return;]]></quote>"
+                + "</citation></citations>\n</verification>";
+        String request = "\nREQUEST_FILE|target|runner.py|all|Check the guard\n";
+        var parsed = ReviewXml.xml(xml + request, "verification");
+        var fields = ReviewXml.fields(parsed.root(), ReviewSchema.VERIFICATION);
+        require(parsed.normalizations().size() == 1
+                && parsed.normalizations().getFirst().contains("jsoup: Removed repeated </finding>")
+                && ReviewXml.children(fields.get("finding"), "id").getFirst().getTextContent().equals("R1-1")
+                && fields.get("citations").getElementsByTagName("quote").item(0).getTextContent().equals("if (a < b && c > d) return;")
+                && parsed.remainder().equals(request), "keep the finding, following quotation and evidence request after the one-tag edit");
+        fails(() -> ReviewXml.xml(xml.replace("</verification>", ""), "verification"));
+        fails(() -> ReviewXml.xml(xml.replace("</finding>\n", "</finding></finding>\n"), "verification"));
+
+        String foreign = xml.replace("<verification>", "<verification xmlns=\"urn:foreign-protocol\">");
+        ReviewXml.strict(foreign.replace("</finding>\n</finding>", "</finding>"), "verification");
+        try {
+            ReviewXml.xml(foreign, "verification");
+            throw new AssertionError("Jing must veto a repaired reply with a foreign protocol namespace");
+        } catch (IOException invalid) {
+            require(invalid.getCause() != null && java.util.Arrays.stream(invalid.getCause().getSuppressed())
+                            .anyMatch(candidate -> candidate.getMessage().contains("failed RELAX NG validation")),
+                    "the final RELAX NG gate can reject a candidate accepted by the existing structure check");
+        }
     }
 
     private static void opaqueTextAndEnvelope() throws Exception {
@@ -192,6 +258,43 @@ final class ReviewXmlTests {
         fails(() -> ReviewXml.xml(ambiguous.replace(suggestion, "<status>CONFIRMED</status>"), "adaptive-review"));
         fails(() -> ReviewXml.xml(ambiguous.replace(suggestion, "<requests>REQUEST_FILE|target|file|all|Read</requests>"), "adaptive-review"));
         fails(() -> ReviewXml.xml(ambiguous.replace(suggestion, "<citations/>"), "adaptive-review"));
+    }
+
+    private static void misplacedRequests() throws Exception {
+        String auth = """
+                <local-decision><status>INSUFFICIENT_EVIDENCE</status>
+                  <reason>Check PolicyGuard before calling the handler.</reason>
+                  <finding><path>src/Handler.java</path></finding><requests/>
+                </local-decision>
+                """;
+        String retry = """
+                <local-decision><status>INSUFFICIENT_EVIDENCE</status>
+                  <reason>Check RetryClient when resuming a delivery.</reason>
+                  <finding><path>src/Worker.java</path></finding>
+                </local-decision>
+                """;
+        String policy = "REQUEST_FILE|target|src/PolicyGuard.java|all|Read the policy guard";
+        String client = "REQUEST_FILE|base|src/**/*.java|references:RetryClient|Find the retry caller";
+        String requests = "<requests>" + client + "\n" + policy + "</requests>";
+        String start = "<adaptive-review><route>DEEP</route><summary>Two missing premises.</summary>";
+        String decisions = "<decisions>" + auth + retry + "</decisions>";
+        String end = "</adaptive-review>";
+        for (String reply : List.of(start + requests + decisions + end, start + decisions + requests + end,
+                start + decisions.replace("</decisions>", requests + "</decisions>") + end)) {
+            var parsed = ReviewXml.xml(reply, "adaptive-review");
+            var candidates = parsed.root().getElementsByTagName("local-decision");
+            var first = ReviewXml.fields((org.w3c.dom.Element) candidates.item(0), ReviewSchema.LOCAL_DECISION);
+            var second = ReviewXml.fields((org.w3c.dom.Element) candidates.item(1), ReviewSchema.LOCAL_DECISION);
+            require(ReviewXml.text(first, "requests").equals(policy) && ReviewXml.text(second, "requests").equals(client)
+                    && ReviewXml.text(first, "status").equals("INSUFFICIENT_EVIDENCE")
+                    && parsed.normalizations().getFirst().contains("uniquely identified unresolved candidates"),
+                    "plain requests are restored to their uniquely named owners without changing the verdicts");
+        }
+        fails(() -> ReviewXml.xml(start + decisions.replace("Check RetryClient", "Check PolicyGuard and RetryClient")
+                + requests + end, "adaptive-review"));
+        fails(() -> ReviewXml.xml(start + decisions.replace("INSUFFICIENT_EVIDENCE", "CONFIRMED")
+                + requests + end, "adaptive-review"));
+        fails(() -> ReviewXml.xml(start + decisions + requests.replace(policy, "unstructured advice") + end, "adaptive-review"));
     }
 
     private static void normalizationArtifacts() throws Exception {

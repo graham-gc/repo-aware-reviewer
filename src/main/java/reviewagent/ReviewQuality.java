@@ -50,20 +50,41 @@ final class ReviewQuality {
     }
 
     List<ReviewOutput.Decision> verifyScoped(List<ReviewOutput.Decision> candidates, Map<String, Set<String>> delivered,
-                                            String folder, String outcomeRules)
+                                            String folder, String outcomeRules, boolean allowBatch)
             throws IOException, InterruptedException {
         var previous = candidates.stream().collect(java.util.stream.Collectors.toMap(
                 decision -> decision.verdict().candidate().id(), Function.identity()));
+        var batchEligible = new LinkedHashMap<String, ReviewOutput.Decision>();
+        if (allowBatch) {
+            previous.forEach((id, decision) -> {
+                if (decision.verdict().status() == ReviewOutput.Status.CONFIRMED && !delivered.containsKey(id))
+                    batchEligible.put(id, decision);
+            });
+        }
         return verifyRounds(candidates.stream().map(decision -> decision.verdict().candidate()).toList(),
                 (candidate, view) -> prompts.verifyFinding(view.bundle(), candidate, "", view.index())
                         + outcomeRules
+                        + """
+
+                        Before asking for more evidence, decide whether a required trigger is contradicted by the pinned
+                        source. If it is, reject this candidate and finish; a different hypothetical trigger is a different
+                        candidate. If the supplied sources prove the trigger, changed behavior and outcome, confirm and finish.
+                        When replying to a prior evidence question, include one <previousPremise> field directly inside
+                        <verification>. Allowed values are SUPPORTED, REFUTED and UNRESOLVED. In <reason>, explain
+                        what the new excerpts establish about that exact question and cite them. Ask another question
+                        only after answering that premise. If it remains unresolved, return INSUFFICIENT_EVIDENCE
+                        without further requests and name the missing fact for the maintainer.
+                        """
+                        + EvidenceRequest.SCOPED_GUIDANCE
                         + (delivered.containsKey(candidate.id()) ? "\nPREVIOUS DECISION — RECHECK WITH THE NEW EVIDENCE\n"
-                           + PromptFactory.decisionSummary(previous.get(candidate.id()), view.index()) : ""),
+                           + PromptFactory.decisionSummary(previous.get(candidate.id()), view.index())
+                           + EvidenceText.block("Original evidence questions for this candidate", "text",
+                                EvidenceText.linePrefix(session.initialRequests(candidate.id()), 1_600)) : ""),
                 candidate -> {
                     var sources = new LinkedHashSet<>(delivered.getOrDefault(candidate.id(), Set.of()));
                     sources.addAll(citationIds(previous.get(candidate.id()).citations()));
                     return sources;
-                }, folder, 5, "Independently verifying selected candidates", true);
+                }, folder, 5, "Independently verifying selected candidates", true, batchEligible, delivered);
     }
 
     Adjudication adjudicate(List<ReviewOutput.Decision> preliminary, String assessment, Set<String> requirementCandidates)
@@ -176,16 +197,18 @@ final class ReviewQuality {
     private List<ReviewOutput.Decision> verifyRounds(List<ReviewFinding> findings, VerificationPrompt prompt,
             Function<ReviewFinding, Set<String>> requiredSources, String folder, int stage, String description)
             throws IOException, InterruptedException {
-        return verifyRounds(findings, prompt, requiredSources, folder, stage, description, false);
+        return verifyRounds(findings, prompt, requiredSources, folder, stage, description, false, Map.of(), Map.of());
     }
 
     private List<ReviewOutput.Decision> verifyRounds(List<ReviewFinding> findings, VerificationPrompt prompt,
-            Function<ReviewFinding, Set<String>> requiredSources, String folder, int stage, String description, boolean newEvidenceOnly)
+            Function<ReviewFinding, Set<String>> requiredSources, String folder, int stage, String description,
+            boolean newEvidenceOnly, Map<String, ReviewOutput.Decision> batchEligible, Map<String, Set<String>> initialDelivery)
             throws IOException, InterruptedException {
         var results = new LinkedHashMap<String, ReviewOutput.Decision>();
         var priorPrompts = new LinkedHashMap<String, String>();
         var continuations = new LinkedHashMap<String, VerificationContinuation>();
         var awaitingVerdicts = new LinkedHashSet<String>();
+        Map<String, Set<String>> lastDelivery = initialDelivery;
         OutputLanguage language = OutputLanguage.parse(options.language());
         List<ReviewFinding> pending = findings;
         int round = 1;
@@ -243,8 +266,10 @@ final class ReviewQuality {
                 }));
             }
             if (tasks.isEmpty()) break;
-            var replies = ReviewTasks.runIsolated(tasks, agent, taskDirectory, options.reviewParallelism(), progress,
-                    stage, stages, description + " (round " + round + ")", options.resumeDirectory() != null);
+            var execution = runVerificationTasks(tasks, round == 1 ? batchEligible : Map.of(), views, taskDirectory,
+                    stage, description + " (round " + round + ")", language);
+            var replies = execution.individual();
+            results.putAll(execution.shared());
             StringBuilder evidenceRequests = new StringBuilder();
             var candidateRequests = new LinkedHashMap<String, String>();
             for (ReviewFinding candidate : pending) {
@@ -264,7 +289,25 @@ final class ReviewQuality {
                             "The reply requested evidence. A validated verification verdict is still pending.",
                             "回复仅请求了证据，尚无经过校验的复核结论。"))
                         : ReviewGrounding.verification(response, candidate, view.bundle(), view.index()));
-                String requests = requestOnly ? response : ReviewOutput.requestText(response, "verification");
+                var followup = requestOnly ? new ReviewOutput.Followup(response, false)
+                        : ReviewOutput.verificationFollowup(response);
+                String requests = followup.requests();
+                if (newEvidenceOnly && !requests.isBlank()) {
+                    var decision = results.get(candidate.id());
+                    if (decision.verdict().status() != ReviewOutput.Status.INSUFFICIENT_EVIDENCE) continue;
+                    var supplied = lastDelivery.getOrDefault(candidate.id(), Set.of());
+                    boolean answeringRequest = round > 1 || !session.initialRequests(candidate.id()).isBlank();
+                    if (answeringRequest && decision.citations().stream().noneMatch(citation -> supplied.contains(citation.sourceId()))) {
+                        session.recordFollowup(path + "/" + candidate.id(), requests, Set.of(),
+                                "Stopped; the verdict cites no newly supplied evidence for the remaining premise.");
+                        continue;
+                    }
+                    if (answeringRequest && !followup.answeredPreviousPremise()) {
+                        session.recordFollowup(path + "/" + candidate.id(), requests, Set.of(),
+                                "Stopped; the previous evidence question remains unanswered.");
+                        continue;
+                    }
+                }
                 candidateRequests.put(candidate.id(), EvidenceRequest.parse(requests).stream().map(EvidenceRequest::text)
                         .collect(java.util.stream.Collectors.joining("\n")));
                 evidenceRequests.append(requests).append('\n');
@@ -273,25 +316,75 @@ final class ReviewQuality {
             for (String id : replies.keySet()) continuations.put(id, new VerificationContinuation(results.get(id),
                     candidateRequests.getOrDefault(id, ""), session.lastCoverage(),
                     views.get(id).bundle().catalog().sources().stream().map(EvidenceSource::id).collect(java.util.stream.Collectors.toSet())));
-            var delivered = new LinkedHashSet<String>();
+            var delivered = new LinkedHashMap<String, Set<String>>();
             for (var entry : candidateRequests.entrySet()) {
-                Set<String> needed = session.delivery(entry.getValue(), views.get(entry.getKey()).bundle().catalog());
+                if (entry.getValue().isBlank()) continue;
+                var supplied = views.get(entry.getKey()).bundle().catalog();
+                Set<String> needed = newEvidenceOnly
+                        ? session.deliverScoped(path + "/" + entry.getKey(), entry.getValue(), supplied)
+                        : session.delivery(entry.getValue(), supplied);
                 retainedEvidence.computeIfAbsent(entry.getKey(), unused -> new LinkedHashSet<>()).addAll(needed);
                 if (results.get(entry.getKey()).verdict().status() == ReviewOutput.Status.INSUFFICIENT_EVIDENCE) {
-                    if (!needed.isEmpty()) delivered.add(entry.getKey());
-                    if (newEvidenceOnly && !entry.getValue().isBlank())
-                        session.recordFollowup(path + "/" + entry.getKey(), entry.getValue(), needed);
-                    else session.recordDelivery(path + "/" + entry.getKey(), needed);
+                    if (!needed.isEmpty()) delivered.put(entry.getKey(), needed);
+                    if (!newEvidenceOnly) session.recordDelivery(path + "/" + entry.getKey(), needed);
                 }
             }
             saveEvidence();
             if (newEvidenceOnly ? delivered.isEmpty() : !material && delivered.isEmpty() && awaitingVerdicts.isEmpty()) break;
+            lastDelivery = delivered;
             pending = findings.stream().filter(candidate -> results.get(candidate.id()).verdict().status()
                     == ReviewOutput.Status.INSUFFICIENT_EVIDENCE)
-                    .filter(candidate -> !newEvidenceOnly || delivered.contains(candidate.id())).toList();
+                    .filter(candidate -> !newEvidenceOnly || delivered.containsKey(candidate.id())).toList();
             round++;
         }
         return findings.stream().map(candidate -> results.get(candidate.id())).toList();
+    }
+
+    private record VerificationReplies(Map<String, ReviewTasks.Outcome> individual, Map<String, ReviewOutput.Decision> shared) { }
+
+    private VerificationReplies runVerificationTasks(List<ReviewTasks.Task> tasks, Map<String, ReviewOutput.Decision> eligible,
+                                                        Map<String, VerificationEvidence> views, Path taskDirectory,
+                                                        int stage, String description, OutputLanguage language)
+            throws IOException, InterruptedException {
+        boolean resume = options.resumeDirectory() != null;
+        var taskIds = tasks.stream().map(ReviewTasks.Task::id).toList();
+        var batches = ScopedVerificationBatch.plan(taskIds, eligible, views, language).stream()
+                .filter(batch -> !resume || Files.isRegularFile(taskDirectory.resolve(batch.id() + "-response.md"))
+                        || batch.candidates().stream().noneMatch(candidate ->
+                                Files.isRegularFile(taskDirectory.resolve(candidate.id() + "-response.md")))).toList();
+        if (batches.isEmpty()) return new VerificationReplies(ReviewTasks.runIsolated(tasks, agent, taskDirectory,
+                options.reviewParallelism(), progress, stage, stages, description, resume), Map.of());
+
+        var planned = new ArrayList<ReviewTasks.Task>();
+        var grouped = new LinkedHashSet<String>();
+        for (var batch : batches) {
+            batch.candidates().forEach(candidate -> grouped.add(candidate.id()));
+            planned.add(new ReviewTasks.Task(batch.id(), batch.prompt(), new ReviewTasks.Validator() {
+                @Override public void validate(String reply) throws IOException {
+                    if (batch.decisions(reply, language).isEmpty()) throw new IOException("Batch supplied no verified candidate verdicts");
+                }
+                @Override public boolean allowOutputCorrection() { return false; }
+            }));
+            int bytes = EvidenceText.bytes(batch.prompt());
+            int sources = batch.view().bundle().catalog().sources().size();
+            agent.timings().prepared(taskDirectory.resolve(batch.id()), bytes, bytes, sources, batch.view().totalSources());
+            AtomicFiles.write(taskDirectory.resolve(batch.id() + "-evidence.md"), batch.view().manifest(bytes, bytes));
+        }
+        tasks.stream().filter(task -> !grouped.contains(task.id())).forEach(planned::add);
+        var replies = new LinkedHashMap<>(ReviewTasks.runIsolated(planned, agent, taskDirectory,
+                options.reviewParallelism(), progress, stage, stages, description, resume));
+        var verified = new LinkedHashMap<String, ReviewOutput.Decision>();
+        for (var batch : batches) {
+            var outcome = replies.remove(batch.id());
+            var accepted = outcome.valid() ? batch.decisions(outcome.response(), language) : Map.<String, ReviewOutput.Decision>of();
+            verified.putAll(accepted);
+            session.recordVerificationBatch(directory.relativize(taskDirectory).resolve(batch.id()).toString(),
+                    batch.candidates().stream().map(ReviewFinding::id).toList(), accepted.keySet());
+        }
+        var retry = tasks.stream().filter(task -> grouped.contains(task.id()) && !verified.containsKey(task.id())).toList();
+        if (!retry.isEmpty()) replies.putAll(ReviewTasks.runIsolated(retry, agent, taskDirectory, options.reviewParallelism(),
+                progress, stage, stages, "Verifying unresolved batch candidates individually", resume));
+        return new VerificationReplies(replies, verified);
     }
 
     private static ReviewOutput.Decision invalidCandidate(ReviewFinding candidate, String folder, ReviewTasks.Outcome outcome, OutputLanguage language) {

@@ -54,6 +54,11 @@ final class GitClient {
     }
 
     List<Change> changes(ReviewScope scope) throws IOException, InterruptedException {
+        return changes(scope, 8);
+    }
+
+    List<Change> changes(ReviewScope scope, int contextLines) throws IOException, InterruptedException {
+        String context = "--unified=" + contextLines;
         String listing = reviewDiff(scope, List.of(), "--name-status", "-z");
         if (listing.isEmpty()) {
             return List.of();
@@ -69,14 +74,14 @@ final class GitClient {
                 paths.add(new ChangedPath(status, null, path));
             }
         }
-        String[] patches = reviewDiff(scope, List.of(), "--patch", "--unified=8").split("(?m)(?=^diff --git )");
+        String[] patches = reviewDiff(scope, List.of(), "--patch", context).split("(?m)(?=^diff --git )");
         // Git can emit separate deletion and addition patches for one file type change.
         boolean needsPathLookup = paths.size() != patches.length || paths.stream().anyMatch(path -> path.status() == 'T');
         List<Change> changes = new ArrayList<>(paths.size());
         for (int i = 0; i < paths.size(); i++) {
             ChangedPath path = paths.get(i);
             String patch = needsPathLookup ? reviewDiff(scope, path.previousPath() == null ? List.of(path.path())
-                    : List.of(path.previousPath(), path.path()), "--patch", "--unified=8") : patches[i];
+                    : List.of(path.previousPath(), path.path()), "--patch", context) : patches[i];
             changes.add(new Change(path.path(), path.previousPath(), path.status() == 'D', patch));
         }
         return List.copyOf(changes);
@@ -124,11 +129,14 @@ final class GitClient {
 
     List<String> filesContaining(String revision, String directory, List<String> literals)
             throws IOException, InterruptedException {
+        return filesMatching(revision, literals, directory.equals(".") ? ":(top,glob)*" : ":(top,literal)" + directory + "/");
+    }
+
+    List<String> filesMatching(String revision, List<String> literals, String pathspec) throws IOException, InterruptedException {
         var command = new ArrayList<>(List.of("git", "grep", "-l", "-z", "-F", "--full-name", "--no-textconv",
                 "--no-recurse-submodules"));
         for (String literal : literals) command.addAll(List.of("-e", literal));
-        command.addAll(List.of(revision, "--", directory.equals(".") ? ":(top,glob)*"
-                : ":(top,literal)" + directory + "/"));
+        command.addAll(List.of(revision, "--", pathspec));
         var result = execute(command);
         if (result.exitCode() != 0) return List.of();
         String prefix = revision + ":";
@@ -140,6 +148,10 @@ final class GitClient {
         return execute(List.of("git", "cat-file", "-e", commit + ":" + path)).exitCode() == 0;
     }
 
+    static final class BlobTooLargeException extends IOException {
+        BlobTooLargeException() { super("File exceeds the available byte budget"); }
+    }
+
     String regularBlobAt(String commit, String path, int maxBytes) throws IOException, InterruptedException {
         String entry = run("--literal-pathspecs", "ls-tree", "--full-tree", "-z", commit, "--", path);
         int tab = entry.indexOf('\t');
@@ -149,7 +161,7 @@ final class GitClient {
         }
         String oid = entry.substring("100644 blob ".length(), tab);
         if (Long.parseLong(oneLine("cat-file", "-s", oid)) > maxBytes) {
-            throw new IOException("File exceeds the available byte budget");
+            throw new BlobTooLargeException();
         }
         String content = blob(oid);
         if (content.indexOf('\0') >= 0) {

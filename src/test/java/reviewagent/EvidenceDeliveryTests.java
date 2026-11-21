@@ -16,6 +16,8 @@ final class EvidenceDeliveryTests {
     static void run() throws Exception {
         fileCoverage();
         cachedRecipientDelivery();
+        sharedBatchBudget();
+        constructorReferences();
         pipelineDeliveryAndResume();
     }
 
@@ -46,6 +48,16 @@ final class EvidenceDeliveryTests {
                 "continuous native intervals can satisfy a request without inventing a merged quote");
         require(lookup("target", "all", List.of(first, gap)).isEmpty()
                 && lookup("target", "2:4", List.of(first, gap)).isEmpty(), "a missing line cannot count as collected evidence");
+        var firstLine = file("head", 1, "first line of source", false);
+        require(FileEvidenceCache.alreadySupplied(firstLine, new EvidenceCatalog(List.of(first), true))
+                && !FileEvidenceCache.alreadySupplied(first, new EvidenceCatalog(List.of(firstLine), true))
+                && !FileEvidenceCache.alreadySupplied(adjacent, new EvidenceCatalog(List.of(first, gap), true)),
+                "a renamed excerpt is neither new evidence nor a substitute for newly supplied lines");
+        var combined = file("head", 1, first.text() + adjacent.text(), true);
+        require(FileEvidenceCache.alreadySupplied(combined, new EvidenceCatalog(List.of(first, adjacent), true))
+                && !FileEvidenceCache.alreadySupplied(combined, new EvidenceCatalog(List.of(first, gap), true))
+                && !FileEvidenceCache.alreadySupplied(combined, new EvidenceCatalog(List.of(first, file("head", 3, adjacent.text(), false)), true)),
+                "overlapping delivery adds no evidence if native slices already show every line and the same file end");
         var contract = EvidenceSources.contract("Approved rules", PATH, "head", 1, BODY).throughEndOfFile();
         var index = EvidenceSource.create("File names", "index", BODY, "head", PATH, 1,
                 Set.of(EvidenceSource.Role.INDEX, EvidenceSource.Role.TARGET), true).throughEndOfFile();
@@ -97,6 +109,101 @@ final class EvidenceDeliveryTests {
                         "", "", 0, rules, oneSection), matched).isEmpty(),
                 "one visible rule section cannot satisfy a lookup whose matched sections have not all reached the recipient");
         Files.delete(root);
+    }
+
+    private static void sharedBatchBudget() throws Exception {
+        Path repo = Files.createTempDirectory("evidence-batch-budget-");
+        try {
+            git(repo, "init", "-q");
+            Files.writeString(repo.resolve("worker.py"), "# original implementation\n".repeat(35));
+            Files.writeString(repo.resolve("caller.py"), "result = worker.submit(payload)\n");
+            git(repo, "add", "--all");
+            git(repo, "commit", "-qm", "base");
+            String target = "# expanded implementation\n".repeat(105) + "result = record_delivery()\n";
+            Files.writeString(repo.resolve("worker.py"), target);
+            git(repo, "commit", "-qam", "target");
+            var executor = new ProcessExecutor();
+            var git = new GitClient(repo, executor);
+            var scope = git.resolve(CliOptions.parse(new String[]{"review", "--repo", repo.toString()}));
+            var collector = new SupplementalEvidence(git, executor, java.util.Map.of());
+            String requested = """
+                    REQUEST_FILE|base|worker.py|all|Inspect baseline behavior
+                    REQUEST_FILE|target|worker.py|all|Inspect target behavior
+                    REQUEST_FILE|target|caller.py|1:1|Inspect the call site
+                    """;
+            var evidence = new EvidenceBundle(scope, List.of("worker.py"), "", "", 4_800, null, EvidenceCatalog.empty());
+            var result = collector.collect(evidence, requested, 3, 0);
+            var supplied = result.catalog().sources();
+            require(result.coverage().contains("Supplemental requests included: 3/3")
+                    && result.coverage().contains("used remaining batch budget")
+                    && supplied.stream().anyMatch(source -> source.path().equals("caller.py"))
+                    && supplied.stream().anyMatch(source -> source.role(EvidenceSource.Role.BASELINE) && source.endOfFile())
+                    && supplied.stream().anyMatch(source -> source.role(EvidenceSource.Role.TARGET)
+                            && source.path().equals("worker.py") && source.endOfFile() && source.text().equals(target))
+                    && EvidenceText.bytes(result.markdown()) <= evidence.supplementBudget(),
+                    "the small caller and both pinned revisions fit a single batch without clipping a deferred file");
+
+            var tight = new EvidenceBundle(scope, evidence.changedFiles(), "", "", 3_200, null, EvidenceCatalog.empty());
+            var partial = collector.collect(tight, requested, 3, 0);
+            require(partial.coverage().contains("Supplemental requests included: 2/3")
+                    && partial.coverage().contains("target worker.py all: UNAVAILABLE")
+                    && partial.catalog().sources().stream().anyMatch(source -> source.path().equals("caller.py"))
+                    && partial.catalog().sources().stream().noneMatch(source -> source.path().equals("worker.py")
+                            && source.role(EvidenceSource.Role.TARGET))
+                    && EvidenceText.bytes(partial.markdown()) <= tight.supplementBudget(),
+                    "a whole file that genuinely cannot fit leaves a gap and preserves other evidence");
+        } finally {
+            try (var paths = Files.walk(repo)) {
+                for (Path path : paths.sorted(java.util.Comparator.reverseOrder()).toList()) Files.delete(path);
+            }
+        }
+    }
+
+    private static void constructorReferences() throws Exception {
+        Path repo = Files.createTempDirectory("constructor-evidence-");
+        try {
+            git(repo, "init", "-q");
+            Files.createDirectories(repo.resolve("src"));
+            Files.writeString(repo.resolve("src/Worker.java"), """
+                    class Worker {
+                        Worker() { this(1); }
+                        Worker(int capacity) { consume(capacity); }
+                        void consume(int capacity) {}
+                    }
+                    """);
+            Files.writeString(repo.resolve("src/ACallers.java"), ("var worker = new Worker(1);\n" + "\n".repeat(21)).repeat(7));
+            Files.writeString(repo.resolve("src/ZCaller.java"), "var guarded = new Worker (5);\n");
+            Files.writeString(repo.resolve("src/NearMatch.java"), "var other = new WorkerFactory();\n");
+            Files.writeString(repo.resolve("Unrelated.java"), "var outside = new Worker(1);\n");
+            git(repo, "add", "--all");
+            git(repo, "commit", "-qm", "base");
+            Files.writeString(repo.resolve("src/ZCaller.java"), "var guarded = new Worker (2);\n");
+            git(repo, "commit", "-qam", "target");
+            Files.writeString(repo.resolve("src/ZCaller.java"), "var dirty = new Worker (0);\n");
+            var executor = new ProcessExecutor();
+            var git = new GitClient(repo, executor);
+            var scope = git.resolve(CliOptions.parse(new String[]{"review", "--repo", repo.toString()}));
+            var evidence = new EvidenceBundle(scope, List.of("src/ZCaller.java"), "", "", 24_000, null, EvidenceCatalog.empty());
+            var collector = new SupplementalEvidence(git, executor, java.util.Map.of());
+            var session = new EvidenceSession(evidence, collector, 0, 0);
+            String callers = "REQUEST_FILE|target|src/*.java|references:new  Worker(|Find production constructors";
+            String decl = "REQUEST_FILE|target|src/Worker.java|symbol:Worker|Inspect constructor declarations";
+            require(session.load(callers + "\n" + decl, "Candidate evidence requests"), "constructor declarations and callers share one evidence batch");
+            var sources = session.catalog().sources();
+            require(sources.stream().anyMatch(source -> source.path().equals("src/Worker.java")
+                    && source.text().contains("Worker()") && source.text().contains("Worker(int capacity)"))
+                    && sources.stream().anyMatch(source -> source.path().equals("src/ZCaller.java") && source.text().contains("guarded"))
+                    && sources.stream().noneMatch(source -> source.text().contains("dirty") || source.path().equals("Unrelated.java")
+                            || source.path().equals("src/NearMatch.java"))
+                    && session.coverage().contains("partial search coverage"),
+                    "reference excerpts cover distinct files before repeated hits, report limits, and use scoped pinned content");
+            require(!session.load(callers.replace("new  Worker(", "new Worker"), "Equivalent request"),
+                    "equivalent constructor searches do not reread or justify a fresh check");
+        } finally {
+            try (var paths = Files.walk(repo)) {
+                for (Path path : paths.sorted(java.util.Comparator.reverseOrder()).toList()) Files.delete(path);
+            }
+        }
     }
 
     private static void pipelineDeliveryAndResume() throws Exception {

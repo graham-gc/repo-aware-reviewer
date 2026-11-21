@@ -17,6 +17,7 @@ final class AgentStabilityTests {
         retriesAndArtifacts();
         sharedBudget();
         independentFailures();
+        fatalFailureStopsQueuedCalls();
         processOwnership();
         shutdownCleanup();
         checkpointsAndStorage();
@@ -251,6 +252,37 @@ final class AgentStabilityTests {
         public static void main(String[] args) throws Exception {
             new ProcessExecutor().run(List.of("/bin/sh", "-c", "sleep 20 & printf '%s' \"$!\" > child.pid; wait"),
                     Path.of(args[0]), null, Duration.ofSeconds(30));
+        }
+    }
+
+    private static void fatalFailureStopsQueuedCalls() throws Exception {
+        Path dir = Files.createTempDirectory("review-fatal-queue-");
+        var agent = new AgentRunner(new ProcessExecutor(), "/bin/sh", List.of("-c", """
+                prompt=$(cat)
+                if [ "$prompt" = RECOVER ]; then printf VALID; exit 0; fi
+                printf x >> calls
+                sleep 0.1
+                printf 'authentication failed' >&2
+                exit 1
+                """), dir, Duration.ofSeconds(5), new AgentPolicy(0, 1, Duration.ofSeconds(5), Duration.ZERO), 1);
+        var tasks = List.of(new ReviewTasks.Task("first", "FAIL", reply -> {}),
+                new ReviewTasks.Task("second", "FAIL", reply -> {}),
+                new ReviewTasks.Task("third", "FAIL", reply -> {}));
+        try (var progress = progress()) {
+            try {
+                ReviewTasks.runIsolated(tasks, agent, dir, 3, progress, 1, 2, "Fatal configuration", false);
+                throw new AssertionError("Expected fatal configuration failure");
+            } catch (IOException failure) {
+                require(failure.getCause() instanceof AgentCallException call
+                                && call.kind() == AgentCallException.Kind.CONFIGURATION
+                                && Files.readString(dir.resolve("calls")).equals("x")
+                                && tasks.stream().filter(task -> Files.isDirectory(dir.resolve(task.id() + "-attempts"))).count() == 1,
+                        "publishing the failure before releasing the only permit prevents queued calls from launching");
+            }
+            var recovery = new ReviewTasks.Task("recovery", "RECOVER", reply -> {});
+            require(ReviewTasks.run(List.of(recovery), agent, dir, 1, progress, 1, 2, "Next batch", false)
+                            .get("recovery").equals("VALID"),
+                    "fatal batch cleanup releases the permit and leaves later batches usable");
         }
     }
 

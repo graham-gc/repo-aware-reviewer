@@ -1,18 +1,22 @@
 package reviewagent;
 
+import java.util.ArrayList;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.Map;
 import java.util.LinkedHashMap;
 
 /** Shared request counts and byte budget across discovery, verification and adjudication. */
 final class EvidenceSession {
+    private record Delivery(Set<String> sources, List<String> missing) { }
     private final EvidenceBundle evidence;
     private final SupplementalEvidence collector;
     private final int fileLimit;
     private final int knowledgeLimit;
     private final Set<String> seen = new LinkedHashSet<>();
     private final Map<String, Set<String>> fulfilled = new LinkedHashMap<>();
+    private final Map<String, String> initialRequests = new LinkedHashMap<>();
     private final StringBuilder markdown = new StringBuilder();
     private final StringBuilder coverage = new StringBuilder();
     private int files;
@@ -28,6 +32,9 @@ final class EvidenceSession {
     }
 
     boolean requestOnly(String response) { return collector.requestOnly(evidence, response); }
+
+    void recordInitialRequests(String candidate, String requests) { initialRequests.put(candidate, requests); }
+    String initialRequests(String candidate) { return initialRequests.getOrDefault(candidate, ""); }
 
     boolean load(String replies, String phase) throws InterruptedException {
         int coverageStart = coverage.length();
@@ -93,13 +100,39 @@ final class EvidenceSession {
 
     /** Re-deliver known material to this recipient, not to every candidate sharing the session. */
     Set<String> delivery(String requests, EvidenceCatalog supplied) {
-        var result = new LinkedHashSet<String>();
-        var visible = supplied.sources().stream().map(EvidenceSource::id).collect(java.util.stream.Collectors.toSet());
-        for (EvidenceRequest request : EvidenceRequest.parse(requests)) {
-            if (!collector.reusable(bundle(supplied, 0), request.text()).isEmpty()) continue;
-            for (String id : fulfilled.getOrDefault(request.key(), Set.of())) if (!visible.contains(id)) result.add(id);
+        return delivery(requests, supplied, true).sources();
+    }
+
+    Set<String> deliverScoped(String requester, String requests, EvidenceCatalog supplied) {
+        var delivery = delivery(requests, supplied, false);
+        if (delivery.missing().isEmpty()) {
+            recordFollowup(requester, requests, delivery.sources());
+            return delivery.sources();
         }
-        return java.util.Collections.unmodifiableSet(result);
+        recordFollowup(requester, requests, Set.of(), "Stopped; required evidence for this question is unavailable.");
+        for (String request : delivery.missing())
+            coverage.append("  - Missing required evidence: ").append(EvidenceText.oneLine(request)).append('\n');
+        return Set.of();
+    }
+
+    private Delivery delivery(String requests, EvidenceCatalog supplied, boolean includeNavigation) {
+        var result = new LinkedHashSet<String>();
+        var missing = new LinkedHashSet<String>();
+        var visible = supplied.sources().stream().map(EvidenceSource::id).collect(java.util.stream.Collectors.toSet());
+        var available = catalog();
+        var suppliedBundle = bundle(supplied, 0);
+        for (EvidenceRequest request : EvidenceRequest.parse(requests)) {
+            if (!collector.reusable(suppliedBundle, request.text()).isEmpty()) continue;
+            boolean fulfilledRequest = false;
+            for (String id : fulfilled.getOrDefault(request.key(), Set.of())) {
+                var source = available.source(id);
+                if (source == null || !includeNavigation && source.role(EvidenceSource.Role.INDEX)) continue;
+                fulfilledRequest = true;
+                if (!visible.contains(id) && !FileEvidenceCache.alreadySupplied(source, supplied)) result.add(id);
+            }
+            if (!fulfilledRequest && !includeNavigation) missing.add(request.key());
+        }
+        return new Delivery(java.util.Collections.unmodifiableSet(result), List.copyOf(missing));
     }
 
     void recordDelivery(String requester, Set<String> ids) {
@@ -110,8 +143,13 @@ final class EvidenceSession {
     }
 
     void recordFollowup(String requester, String requests, Set<String> ids) {
+        recordFollowup(requester, requests, ids, ids.isEmpty() ? "Stopped; no new evidence for this question."
+                : "Follow-up on newly supplied evidence.");
+    }
+
+    void recordFollowup(String requester, String requests, Set<String> ids, String outcome) {
         coverage.append("- ").append(requester).append(": ")
-                .append(ids.isEmpty() ? "Stopped; no new evidence for this question." : "Follow-up on newly supplied evidence.").append("\n");
+                .append(outcome).append("\n");
         for (var request : EvidenceRequest.parse(requests))
             coverage.append("  - Question and requested evidence: ").append(EvidenceText.oneLine(request.text())).append('\n');
         recordDelivery(requester, ids);
@@ -123,6 +161,42 @@ final class EvidenceSession {
     }
 
     String markdown() { return markdown.toString(); }
+
+    Set<String> supplyCollected(String requester, List<EvidenceSource> sources, int maxBytes) {
+        int remaining = evidence.supplementBudget() - EvidenceText.bytes(markdown.toString());
+        var known = catalog();
+        var added = new ArrayList<EvidenceSource>();
+        var supplied = new ArrayList<EvidenceSource>();
+        var ids = new LinkedHashSet<String>();
+        for (var source : sources) {
+            String block = source.markdown();
+            int bytes = EvidenceText.bytes(block);
+            boolean fresh = known.source(source.id()) == null;
+            if (bytes > maxBytes || fresh && bytes > remaining || !ids.add(source.id())) continue;
+            if (fresh) {
+                markdown.append(block);
+                remaining -= bytes;
+                added.add(source);
+            }
+            maxBytes -= bytes;
+            supplied.add(source);
+        }
+        if (!added.isEmpty()) catalog = catalog.plus(new EvidenceCatalog(added, true));
+        if (!supplied.isEmpty()) {
+            coverage.append("- Expanded ").append(requester).append(" with collected implementation: ")
+                    .append(supplied.stream().map(source -> EvidenceText.oneLine(source.path())).distinct()
+                            .collect(java.util.stream.Collectors.joining(", "))).append(".\n");
+        }
+        return java.util.Collections.unmodifiableSet(ids);
+    }
+
+    void recordVerificationBatch(String task, List<String> candidates, Set<String> accepted) {
+        coverage.append("- Shared verification [").append(task).append("](").append(task)
+                .append("-state.properties): ").append(String.join(", ", candidates)).append(". Validated in batch: ")
+                .append(accepted.isEmpty() ? "none" : String.join(", ", accepted))
+                .append(". Remaining candidates go to individual verification.\n");
+    }
+
     String coverage() { return coverage.toString(); }
     String lastCoverage() { return lastCoverage; }
     EvidenceIndex index() { return new EvidenceIndex(catalog()); }

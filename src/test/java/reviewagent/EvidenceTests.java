@@ -107,6 +107,18 @@ final class EvidenceTests {
         require(methods.coverage().contains("symbol:parseContract: INCLUDED (lines 235–238)"), "method source lines recorded");
         require(methods.coverage().contains("multiple declarations"), "ambiguous method request reported as unavailable");
         require(methods.coverage().contains("Java method declaration not found"), "missing method reported as unavailable");
+
+        var fallback = new SupplementalEvidence(git, executor, java.util.Map.of()).collect(evidence, """
+                REQUEST_FILE|base|Stable.java|symbol:overloaded;fallback=239:239|Read the selected overload
+                REQUEST_FILE|target|A-large.md|all;fallback=3:4|Check the documented behavior on those lines
+                """, 0, 0);
+        require(fallback.coverage().contains("INCLUDED (fallback 239:239)")
+                && fallback.coverage().contains("INCLUDED (fallback 3:4)")
+                && fallback.catalog().sources().stream().anyMatch(source -> source.path().equals("Stable.java")
+                    && source.revision().equals(scope.baseCommit()) && source.firstLine() == 239
+                    && source.text().contains("int overloaded()"))
+                && fallback.resolvedSources().get("REQUEST_FILE|target|A-large.md|all;fallback=3:4").size() == 1,
+                "an explicitly sufficient fallback supplies a pinned excerpt for the original request");
     }
 
     private static void checkKnowledgeSnapshot(Path fixture) throws Exception {

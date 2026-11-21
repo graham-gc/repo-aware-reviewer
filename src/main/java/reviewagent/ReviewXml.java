@@ -79,38 +79,26 @@ final class ReviewXml {
     }
 
     static XmlBlock xml(String response, String rootName) throws IOException {
+        XmlBlock parsed;
         try {
-            XmlBlock parsed = strict(response, rootName);
-            parsed.normalizations().forEach(ResponseDiagnostics::record);
-            return parsed;
+            parsed = strict(response, rootName);
         } catch (IOException original) {
             if (original instanceof AmbiguousTextFieldException) throw original;
-            var valid = new LinkedHashMap<String, XmlBlock>();
-            var notes = new LinkedHashMap<String, String>();
-            var candidates = XmlStructureRepair.candidates(response, rootName);
-            for (var candidate : candidates) {
-                try {
-                    XmlBlock parsed = strict(candidate.response(), rootName);
-                    valid.putIfAbsent(candidate.response(), parsed);
-                    notes.putIfAbsent(candidate.response(), candidate.note());
-                } catch (IOException rejected) { /* Never accept a repair without strict parsing and schema validation. */ }
-            }
-            if (valid.size() == 1) {
-                var entry = valid.entrySet().iterator().next();
-                XmlBlock parsed = entry.getValue();
-                var applied = new ArrayList<String>();
-                applied.add(notes.get(entry.getKey()));
-                applied.addAll(parsed.normalizations());
-                applied.forEach(ResponseDiagnostics::record);
-                return new XmlBlock(parsed.root(), parsed.remainder(), List.copyOf(applied));
-            }
-            if (!candidates.isEmpty()) throw new IOException(original.getMessage()
-                    + "; delimiter repair was not applied: " + (valid.isEmpty() ? "no structurally valid candidate" : "ambiguous candidates"), original);
-            throw original;
+            parsed = XmlStructureRepair.recover(response, rootName, original);
         }
+        parsed.normalizations().forEach(ResponseDiagnostics::record);
+        return parsed;
     }
 
-    private static XmlBlock strict(String response, String rootName) throws IOException {
+    static XmlBlock strict(String response, String rootName) throws IOException {
+        return parseEnvelope(response, rootName, true);
+    }
+
+    static XmlBlock xmlEnvelope(String response, String rootName) throws IOException {
+        return parseEnvelope(response, rootName, false);
+    }
+
+    private static XmlBlock parseEnvelope(String response, String rootName, boolean validateTree) throws IOException {
         Span span = rootSpan(response, rootName);
         String content = response.substring(span.start(), span.end());
         Span envelope = envelope(response, span);
@@ -134,8 +122,8 @@ final class ReviewXml {
             if (!root.getTagName().equals(rootName)) {
                 throw new IOException("Unexpected review response root");
             }
-            var normalizations = ReviewSchema.normalizeAdvisories(root);
-            ReviewSchema.validate(root);
+            var normalizations = validateTree ? ReviewSchema.normalize(root) : List.<String>of();
+            if (validateTree) ReviewSchema.validate(root);
             XmlStructureRepair.checkTextBoundaries(content);
             return new XmlBlock(root, response.substring(0, envelope.start()) + response.substring(envelope.end()), normalizations);
         } catch (SAXParseException invalid) {
@@ -195,6 +183,10 @@ final class ReviewXml {
 
     static String replaceRoot(String response, String rootName, Element root) throws IOException {
         Span span = rootSpan(response, rootName);
+        return response.substring(0, span.start()) + markup(root) + response.substring(span.end());
+    }
+
+    static String markup(Element root) throws IOException {
         try {
             var factory = javax.xml.transform.TransformerFactory.newInstance();
             factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "");
@@ -203,9 +195,9 @@ final class ReviewXml {
             transformer.setOutputProperty(javax.xml.transform.OutputKeys.OMIT_XML_DECLARATION, "yes");
             var output = new java.io.StringWriter();
             transformer.transform(new javax.xml.transform.dom.DOMSource(root), new javax.xml.transform.stream.StreamResult(output));
-            return response.substring(0, span.start()) + output + response.substring(span.end());
+            return output.toString();
         } catch (javax.xml.transform.TransformerException | IllegalArgumentException invalid) {
-            throw new IOException("Cannot serialize the corrected assessment without changing its envelope", invalid);
+            throw new IOException("Cannot serialize the review XML element", invalid);
         }
     }
 

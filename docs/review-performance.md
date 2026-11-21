@@ -21,11 +21,23 @@ Every candidate task writes `TASK-evidence.md` beside its prompt. It records ful
 
 A candidate's selected evidence is retained across its verification rounds and subsequent publication adjudication. Requested new material is pinned into the requester's next task even if it has no lexical match in the original allegation. This prevents a smaller publication prompt from accidentally losing a producer guard discovered during verification.
 
+Each evidence request gets an initial share of its batch budget. A whole-file read that exceeds its share can use the remaining space after the other requests run. Coverage records whether the remaining space was sufficient. The same total byte budget and request limits still apply.
+
+Focused discovery reserves source context for risk scopes, then packs ordinary changes and any remaining whole hunks into the same bounded diff batches. Each task receives risk questions for the paths shown in its evidence. Changes that cannot fit still appear as unreviewed.
+
+Focused areas can verify candidates concurrently after discovery. They share the execution's review parallelism limit and keep each candidate's evidence rounds ordered. Automatic expansion reuses new collected source named by the missing-evidence question when the candidate has no explicit requests. The final coverage and report follow the original scope order.
+
+Each scoped follow-up request group addresses one missing premise. All required requests must return usable evidence, and at least one must add material the candidate has not seen. A file index only supplies navigation. A request such as `REQUEST_FILE|target|src/Worker.java|symbol:run;fallback=42:49|Read the deciding call` authorizes the smaller excerpt if the symbol cannot be supplied. The same byte budget and pinned revision apply. For caller discovery, `references:Service.write` returns bounded excerpts around literal hits. Type binding, execution, and impact still require evidence.
+
+A reference request can also locate `new Type` constructor calls. Search results prioritize excerpts from different files within the existing limit. A Java `symbol:Type` read can return that type's constructors. The first verifier sees the original evidence questions and checks whether the pinned sources rule out a necessary trigger before requesting more evidence. Repacked excerpts of already supplied lines do not trigger a new round.
+
 After individual verification, a group of confirmed local regressions with the same code anchor and shared pinned baseline and target sources can receive one publication verdict. The adjudicator resolves provisional severity differences using the proved impact and preconditions. Sharing requires explicit coverage of every candidate ID in the independent publication response and revalidation of the common evidence. The remaining candidates run separately when the response leaves applicability uncertain. Coverage retains the individual verification records and lists which candidates shared a publication verdict.
 
 After shared evidence collection, a task whose complete prompt remains unchanged is not automatically called again. Its previous validated or unfinished result is retained and `TASK-unchanged.txt` records the decision. Explicit resume can retry unfinished tasks. New related material, indexes or trusted rules change the prompt and can trigger another verification. Changing the verification-evidence mode is allowed during resume, but changed prompts invalidate their task caches; prior discovery results can still be reused when unchanged.
 
 ## Deep review reporting
+
+Every independent discovery reviewer receives the available diffs, requirements and contracts. The contract and boundary reviewers can omit a standalone target block after verifying that a complete diff contains the same target lines. Context outside the diff stays in the prompt. Compare the saved `discovery/R1-prompt.md`, `R2-prompt.md` and `R3-prompt.md` to inspect the resulting views.
 
 When no external requirement or knowledge document is supplied, deep review renders the report locally from publication decisions, candidate groups and evidence coverage. Within a group, confirmed findings with matching locations, triggers and impacts share one entry. The first discovery task can include a short change summary. Existing results without a summary can be resumed, and the report can list the changed paths. Reviews with an external document still use the report consolidation call for the narrative and knowledge feedback.
 
