@@ -11,6 +11,7 @@ import java.util.regex.Pattern;
 
 final class SupplementalEvidence {
     private static final int MAX_SOURCE_BYTES = 1_000_000;
+    private static final int MAX_SOURCE_LINES = 200;
     private static final int MAX_REFERENCE_FILES = 12;
     private static final int MAX_REFERENCE_EXCERPTS = 6;
     private static final int REFERENCE_CONTEXT = 10;
@@ -113,7 +114,8 @@ final class SupplementalEvidence {
             boolean deferred = i >= total;
             int quota = deferred ? remaining : Math.min(remaining, Math.max(256, remaining / (total - i)));
             boolean canDefer = !deferred && quota < remaining && query.operation() == EvidenceQuery.Operation.READ_FILE
-                    && (query.selector().equals("all") || !query.fallback().isEmpty());
+                    && (query.selector().equals("all") || query.selector().startsWith(EvidenceQuery.DECLARATION)
+                        || !query.fallback().isEmpty());
             String revision = query.side().equals("base") ? evidence.scope().baseCommit() : evidence.scope().targetCommit();
             String label = EvidenceText.oneLine(query.label());
             String status;
@@ -203,8 +205,7 @@ final class SupplementalEvidence {
         String reference = query.reference();
         boolean construction = reference.startsWith("new ");
         String needle = construction ? reference.substring("new ".length()) : reference;
-        var exact = Pattern.compile("(?<![\\p{L}\\p{N}_$-])" + (construction ? "new\\s+" : "")
-                + Pattern.quote(needle) + (construction ? "(?=\\s*[<(])" : "(?![\\p{L}\\p{N}_$-])"));
+        var exact = literalReference(needle, construction);
         var matches = git.filesMatching(revision, List.of(needle), RepositoryBrowser.searchPathspec(query.resource())).stream()
                 .filter(path -> path.equals(query.resource()) || inScope.test(path))
                 .filter(this::eligiblePath)
@@ -254,8 +255,20 @@ final class SupplementalEvidence {
                 + (limited ? "; partial search coverage" : "") + ")", new EvidenceCatalog(sources, true));
     }
 
+    private static Pattern literalReference(String name, boolean construction) {
+        boolean callOnly = name.endsWith("(");
+        String needle = callOnly ? name.substring(0, name.length() - 1) : name;
+        return Pattern.compile("(?<![\\p{L}\\p{N}_$-])" + (construction ? "new\\s+" : "")
+                + Pattern.quote(needle)
+                + (construction ? "(?=\\s*[<(])" : callOnly ? "(?=\\s*\\()" : "(?![\\p{L}\\p{N}_$-])"));
+    }
+
     private Excerpt repositoryFile(ReviewScope scope, String revision, EvidenceQuery query, int quota)
             throws IOException, InterruptedException {
+        if (!eligiblePath(query.resource()))
+            throw new IOException("Path is not eligible tracked source, test, schema, or documentation");
+        if (query.fallback().startsWith(EvidenceQuery.NEAR))
+            return symbolExcerpt(scope, revision, query.resource(), query.selector(), query.fallback(), quota);
         if (query.fallback().isEmpty()) return repositoryFile(scope, revision, query.resource(), query.selector(), quota);
         try {
             var requested = repositoryFile(scope, revision, query.resource(), query.selector(), quota);
@@ -269,45 +282,77 @@ final class SupplementalEvidence {
 
     private Excerpt repositoryFile(ReviewScope scope, String revision, String path, String selector, int quota)
             throws IOException, InterruptedException {
-        if (!eligiblePath(path)) {
-            throw new IOException("Path is not eligible tracked source, test, schema, or documentation");
-        }
-        String title = path + " at " + revision;
         if (selector.equals("all")) {
-            return new Excerpt(EvidenceSources.file(revision, path, 1, title, git.regularBlobAt(revision, path, quota), scope, languages).throughEndOfFile(), "INCLUDED");
+            return new Excerpt(EvidenceSources.file(revision, path, 1, path + " at " + revision,
+                    git.regularBlobAt(revision, path, quota), scope, languages).throughEndOfFile(), "INCLUDED");
         }
-        int from;
-        int to;
-        String source;
-        boolean bySymbol = selector.startsWith("symbol:");
-        if (bySymbol) {
-            source = git.regularBlobAt(revision, path, MAX_SOURCE_BYTES);
-            LanguageModule.Lines lines = languages.forPath(path).locate(source, selector.substring("symbol:".length()));
-            from = lines.first();
-            to = lines.last();
-        } else {
-            if (!EvidenceQuery.LINES.matcher(selector).matches()) {
-                throw new IOException("Expected all, a line range such as 10:90, or a registered language's symbol selector");
-            }
-            String[] endpoints = selector.split(":");
-            from = Integer.parseInt(endpoints[0]);
-            to = Integer.parseInt(endpoints[1]);
-            if (to < from || to - from >= 200) {
-                throw new IOException("Requested range must contain between 1 and 200 lines");
-            }
-            source = git.regularBlobAt(revision, path, MAX_SOURCE_BYTES);
+        if (selector.startsWith(EvidenceQuery.DECLARATION))
+            return declarationExcerpts(scope, revision, path, selector.substring(EvidenceQuery.DECLARATION.length()));
+        if (selector.startsWith(EvidenceQuery.SYMBOL))
+            return symbolExcerpt(scope, revision, path, selector, "", quota);
+        if (!EvidenceQuery.LINES.matcher(selector).matches()) {
+            throw new IOException("Expected all, a line range, symbol:, or declaration:");
         }
-        if (bySymbol && to - from >= 200) {
+        String[] endpoints = selector.split(":");
+        int first = Integer.parseInt(endpoints[0]);
+        int last = Integer.parseInt(endpoints[1]);
+        if (last < first || last - first >= MAX_SOURCE_LINES)
+            throw new IOException("Requested range must contain between 1 and 200 lines");
+        var lines = git.regularBlobAt(revision, path, MAX_SOURCE_BYTES).lines().toList();
+        if (first > lines.size()) throw new IOException("Requested range is beyond the end of the file");
+        return new Excerpt(fileExcerpt(scope, revision, path, lines, first, Math.min(last, lines.size())), "INCLUDED");
+    }
+
+    private Excerpt declarationExcerpts(ReviewScope scope, String revision, String path, String name)
+            throws IOException, InterruptedException {
+        String source = git.regularBlobAt(revision, path, MAX_SOURCE_BYTES);
+        var spans = languages.forPath(path).declarations(source, name);
+        var lines = source.lines().toList();
+        var excerpts = new ArrayList<EvidenceSource>();
+        for (var span : spans) {
+            if (span.first() < 1 || span.last() < span.first() || span.last() > lines.size()
+                    || span.last() - span.first() >= MAX_SOURCE_LINES)
+                throw new IOException("Requested declaration has no bounded source range; request exact lines");
+            excerpts.add(fileExcerpt(scope, revision, path, lines, span.first(), span.last()));
+        }
+        if (excerpts.isEmpty()) throw new IOException("No matching declaration in the requested file");
+        var catalog = new EvidenceCatalog(excerpts, true);
+        return new Excerpt(catalog.sources().stream().map(EvidenceSource::markdown).collect(java.util.stream.Collectors.joining()),
+                "INCLUDED (pinned declarations)", catalog);
+    }
+
+    private Excerpt symbolExcerpt(ReviewScope scope, String revision, String path, String selector, String fallback, int quota)
+            throws IOException, InterruptedException {
+        String source = git.regularBlobAt(revision, path, MAX_SOURCE_BYTES);
+        var span = languages.forPath(path).locate(source, selector.substring(EvidenceQuery.SYMBOL.length()));
+        var lines = source.lines().toList();
+        int first = span.first();
+        int last = Math.min(span.last(), lines.size());
+        if (first < 1 || last < first) throw new IOException("Symbol has no usable source range");
+        if (span.last() - first < MAX_SOURCE_LINES) {
+            var full = fileExcerpt(scope, revision, path, lines, first, last);
+            if (fallback.isEmpty() || EvidenceText.bytes(full.markdown()) <= quota)
+                return new Excerpt(full, "INCLUDED (lines " + first + "–" + last + ")");
+        }
+        if (fallback.isEmpty())
             throw new IOException("Method spans more than 200 lines; request the relevant line range instead");
+        int hit = uniqueReferenceLine(lines, first, last, fallback.substring(EvidenceQuery.NEAR.length()));
+        var excerpt = fileExcerpt(scope, revision, path, lines, Math.max(first, hit - REFERENCE_CONTEXT),
+                Math.min(last, hit + REFERENCE_CONTEXT));
+        return new Excerpt(excerpt, "INCLUDED (fallback " + fallback + " within " + selector + "; verify binding)");
+    }
+
+    private static int uniqueReferenceLine(List<String> lines, int first, int last, String name) throws IOException {
+        var pattern = literalReference(name, false);
+        int hit = 0;
+        for (int line = first; line <= last; line++) {
+            var matcher = pattern.matcher(lines.get(line - 1));
+            if (!matcher.find()) continue;
+            if (hit != 0 || matcher.find()) throw new IOException("Fallback reference matches more than once within the symbol");
+            hit = line;
         }
-        List<String> lines = source.lines().toList();
-        if (from > lines.size()) {
-            throw new IOException("Requested range is beyond the end of the file");
-        }
-        int last = Math.min(to, lines.size());
-        String location = "lines " + from + "–" + last;
-        var sourceBlock = fileExcerpt(scope, revision, path, lines, from, last);
-        return new Excerpt(sourceBlock, bySymbol ? "INCLUDED (" + location + ")" : "INCLUDED");
+        if (hit == 0) throw new IOException("Fallback reference was not found within the symbol");
+        return hit;
     }
 
     private EvidenceSource fileExcerpt(ReviewScope scope, String revision, String path, List<String> lines, int first, int last) {

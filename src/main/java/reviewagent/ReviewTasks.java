@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -12,6 +13,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 final class ReviewTasks {
     @FunctionalInterface
@@ -32,8 +34,14 @@ final class ReviewTasks {
         boolean valid() { return error == null; }
     }
 
-    private record Reply(String id, Outcome outcome) {
+    record Job(Path directory, Task task) { }
+
+    @FunctionalInterface
+    interface OnCompletion {
+        List<Job> accept(Job job, Outcome outcome) throws IOException, InterruptedException;
     }
+
+    private record Reply(Job job, Outcome outcome) { }
 
     static Map<String, String> run(List<Task> tasks, AgentRunner agent, Path directory, int parallelism,
                                    CommandProgress progress, int stage, int stages, String description, boolean resume)
@@ -53,72 +61,58 @@ final class ReviewTasks {
     private static Map<String, Outcome> runBatch(List<Task> tasks, AgentRunner agent, Path directory, int parallelism,
                                                 CommandProgress progress, int stage, int stages, String description, boolean resume,
                                                 boolean isolateInvalidOutput) throws IOException, InterruptedException {
-        Files.createDirectories(directory);
-        if (tasks.isEmpty()) {
-            return Map.of();
+        var replies = new LinkedHashMap<String, Outcome>();
+        runReady(tasks.stream().map(task -> new Job(directory, task)).toList(), agent, directory,
+                Math.min(parallelism, tasks.size()), progress, stage, stages, description, resume, (job, outcome) -> {
+                    replies.put(job.task().id(), outcome);
+                    return List.of();
+                });
+        var ordered = new LinkedHashMap<String, Outcome>();
+        tasks.forEach(task -> ordered.put(task.id(), replies.get(task.id())));
+        if (!isolateInvalidOutput && ordered.values().stream().anyMatch(outcome -> !outcome.valid())) {
+            throw new ReviewStageException(description, ordered.entrySet().stream()
+                    .filter(entry -> !entry.getValue().valid())
+                    .map(entry -> new ReviewStageException.FailedTask(entry.getKey(), entry.getValue().failureKind(),
+                            directory.resolve(entry.getKey() + "-state.properties"))).toList());
         }
+        return ordered;
+    }
+
+    static void runReady(List<Job> initial, AgentRunner agent, Path directory, int parallelism,
+                         CommandProgress progress, int stage, int stages, String description, boolean resume,
+                         OnCompletion onCompletion) throws IOException, InterruptedException {
+        runReady(initial, agent, directory, parallelism, progress, stage, stages, description, resume, null, onCompletion);
+    }
+
+    static void runReady(List<Job> initial, AgentRunner agent, Path directory, int parallelism,
+                         CommandProgress progress, int stage, int stages, String description, boolean resume,
+                         AdaptiveConcurrency admission, OnCompletion onCompletion) throws IOException, InterruptedException {
+        Files.createDirectories(directory);
+        if (initial.isEmpty()) return;
         long batchStarted = System.nanoTime();
-        try (var workers = Executors.newFixedThreadPool(Math.min(parallelism, tasks.size()), Thread.ofVirtual().factory())) {
+        try (var workers = Executors.newFixedThreadPool(parallelism, Thread.ofVirtual().factory())) {
             var completions = new ExecutorCompletionService<Reply>(workers);
             var futures = new ArrayList<Future<Reply>>();
-            var globalFailure = new java.util.concurrent.atomic.AtomicBoolean();
+            var waiting = new ArrayDeque<>(initial);
+            var globalFailure = new AtomicBoolean();
             try {
-                for (Task task : tasks) {
-                    futures.add(completions.submit(() -> {
-                        try {
-                            if (globalFailure.get()) return blocked(directory, task);
-                            try (var budget = agent.task(task.model(), task.schema())) {
-                                if (globalFailure.get()) return blocked(directory, task);
-                                try {
-                                    state(directory, task, "RUNNING", "");
-                                    String response = invoke(task, agent, directory, resume);
-                                    Files.deleteIfExists(directory.resolve(task.id() + "-error.txt"));
-                                    state(directory, task, "SUCCEEDED", "");
-                                    agent.timings().task(budget.calls() == 0, true);
-                                    return new Reply(task.id(), new Outcome(response, null));
-                                } catch (IOException failure) {
-                                    // A task waiting for this permit must see a fatal failure before it can launch.
-                                    if (!isolatedFailure(failure)) globalFailure.set(true);
-                                    throw failure;
-                                }
-                            }
-                        } catch (IOException failure) {
-                            agent.timings().task(false, false);
-                            AtomicFiles.write(directory.resolve(task.id() + "-error.txt"), failure.getMessage());
-                            String kind = failure instanceof AgentCallException call ? call.kind().name()
-                                    : failure instanceof InvalidReviewResponseException ? "INVALID_OUTPUT" : "IO_FAILURE";
-                            state(directory, task, "FAILED", kind, failure);
-                            if (isolatedFailure(failure)) {
-                                return new Reply(task.id(), new Outcome(null, failure.getMessage(), kind));
-                            }
-                            throw failure;
-                        } catch (InterruptedException cancelled) {
-                            agent.timings().task(false, false);
-                            boolean interrupted = Thread.interrupted();
-                            try { state(directory, task, "CANCELLED", "CANCELLED"); }
-                            finally { if (interrupted) Thread.currentThread().interrupt(); }
-                            throw cancelled;
-                        }
-                    }));
-                }
-                var replies = new LinkedHashMap<String, Outcome>();
-                int invalidOutputs = 0;
-                for (int completed = 1; completed <= tasks.size(); completed++) {
+                int completed = 0;
+                int failed = 0;
+                while (!waiting.isEmpty() || completed < futures.size()) {
+                    if (admission != null) admission.readyTasks(waiting.size() + futures.size() - completed);
+                    while (!waiting.isEmpty() && futures.size() - completed < parallelism) {
+                        Job job = waiting.removeFirst();
+                        Files.createDirectories(job.directory());
+                        futures.add(completions.submit(() -> execute(job, agent, stage, resume, globalFailure, admission)));
+                    }
                     Reply reply = completions.take().get();
-                    replies.put(reply.id(), reply.outcome());
-                    if (!reply.outcome().valid()) invalidOutputs++;
-                    progress.step(stage, stages, description + " (" + completed + " of " + tasks.size() + " complete"
-                            + (invalidOutputs == 0 ? "" : "; " + invalidOutputs + " failed checks") + ")");
+                    completed++;
+                    if (!reply.outcome().valid()) failed++;
+                    onCompletion.accept(reply.job(), reply.outcome()).reversed().forEach(waiting::addFirst);
+                    progress.step(stage, stages, description + " (" + completed + " of "
+                            + (futures.size() + waiting.size()) + " complete"
+                            + (failed == 0 ? "" : "; " + failed + " failed checks") + ")");
                 }
-                var ordered = new LinkedHashMap<String, Outcome>();
-                tasks.forEach(task -> ordered.put(task.id(), replies.get(task.id())));
-                if (!isolateInvalidOutput && ordered.values().stream().anyMatch(outcome -> !outcome.valid())) {
-                    throw new ReviewStageException(description, ordered.entrySet().stream()
-                            .filter(entry -> !entry.getValue().valid())
-                            .map(entry -> new ReviewStageException.FailedTask(entry.getKey(), entry.getValue().failureKind(),
-                                    directory.resolve(entry.getKey() + "-state.properties"))).toList());
-                }
-                return ordered;
             } catch (ExecutionException failure) {
                 throw new IOException(description + " failed: " + failure.getCause().getMessage()
                         + ". See task artifacts in " + directory, failure.getCause());
@@ -129,9 +123,49 @@ final class ReviewTasks {
         } finally { agent.timings().stage(directory, batchStarted, System.nanoTime()); }
     }
 
-    private static Reply blocked(Path directory, Task task) throws IOException {
-        state(directory, task, "BLOCKED", "GLOBAL_FAILURE");
-        return new Reply(task.id(), new Outcome(null, "Blocked by a global failure", "GLOBAL_FAILURE"));
+    private static Reply execute(Job job, AgentRunner agent, int stage, boolean resume, AtomicBoolean globalFailure,
+                                 AdaptiveConcurrency admission)
+            throws IOException, InterruptedException {
+        Task task = job.task();
+        Path directory = job.directory();
+        try {
+            if (globalFailure.get()) return blocked(job);
+            try (var budget = agent.task(task.model(), task.schema(), stage, task.prompt(), admission)) {
+                if (globalFailure.get()) return blocked(job);
+                try {
+                    state(directory, task, "RUNNING", "");
+                    String response = invoke(task, agent, directory, resume);
+                    Files.deleteIfExists(directory.resolve(task.id() + "-error.txt"));
+                    state(directory, task, "SUCCEEDED", "");
+                    agent.timings().task(budget.calls() == 0, true);
+                    budget.accepted();
+                    return new Reply(job, new Outcome(response, null));
+                } catch (IOException failure) {
+                    // A task waiting for this permit must see a fatal failure before it can launch.
+                    if (!isolatedFailure(failure)) globalFailure.set(true);
+                    throw failure;
+                }
+            }
+        } catch (IOException failure) {
+            agent.timings().task(false, false);
+            AtomicFiles.write(directory.resolve(task.id() + "-error.txt"), failure.getMessage());
+            String kind = failure instanceof AgentCallException call ? call.kind().name()
+                    : failure instanceof InvalidReviewResponseException ? "INVALID_OUTPUT" : "IO_FAILURE";
+            state(directory, task, "FAILED", kind, failure);
+            if (isolatedFailure(failure)) return new Reply(job, new Outcome(null, failure.getMessage(), kind));
+            throw failure;
+        } catch (InterruptedException cancelled) {
+            agent.timings().task(false, false);
+            boolean interrupted = Thread.interrupted();
+            try { state(directory, task, "CANCELLED", "CANCELLED"); }
+            finally { if (interrupted) Thread.currentThread().interrupt(); }
+            throw cancelled;
+        }
+    }
+
+    private static Reply blocked(Job job) throws IOException {
+        state(job.directory(), job.task(), "BLOCKED", "GLOBAL_FAILURE");
+        return new Reply(job, new Outcome(null, "Blocked by a global failure", "GLOBAL_FAILURE"));
     }
 
     private static boolean isolatedFailure(IOException failure) {

@@ -4,11 +4,18 @@ import java.util.List;
 import java.util.Set;
 
 /** Prior model opinions and navigation outcomes are context only, never new proof or business rules. */
-record VerificationContinuation(ReviewOutput.Decision previous, String requests, String outcomes, Set<String> supplied) {
+record VerificationContinuation(ReviewOutput.Decision previous, String requests, String outcomes, Set<String> supplied,
+                                String question) {
     VerificationContinuation { supplied = Set.copyOf(supplied); }
 
+    VerificationContinuation(ReviewOutput.Decision previous, String requests, String outcomes, Set<String> supplied) {
+        this(previous, requests, outcomes, supplied, "");
+    }
+
     String markdown(VerificationEvidence view) {
-        String decision = previous.verdict().validationFailed() ? "The previous check did not produce a validated decision."
+        String decision = previous == null ? "The previous batch supplied only a usable evidence question. Remaining check: "
+                + ReportText.summary(question, 500)
+                : previous.verdict().validationFailed() ? "The previous check did not produce a validated decision."
                 : "Previous model opinion: " + previous.verdict().status() + ".\nReason: "
                     + ReportText.summary(previous.verdict().reason(), 600) + "\nOpen contract/context: "
                     + ReportText.summary(previous.contract(), 300) + "\nRemaining check: "

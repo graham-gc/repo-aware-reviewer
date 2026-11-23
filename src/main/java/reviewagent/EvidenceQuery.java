@@ -8,9 +8,13 @@ record EvidenceQuery(String command, String side, String language, String contex
                      String selector, String reason, String fallback) {
     private static final String FALLBACK = ";fallback=";
     static final Pattern LINES = Pattern.compile("[1-9][0-9]{0,6}:[1-9][0-9]{0,6}");
+    static final String SYMBOL = "symbol:";
+    static final String DECLARATION = "declaration:";
+    static final String NEAR = "near:";
     private static final String REFERENCES = "references:";
     private static final String REFERENCE_NAME = "[\\p{L}_$][\\p{L}\\p{N}_$-]*(?:\\.[\\p{L}_$][\\p{L}\\p{N}_$-]*)*";
     private static final Pattern NAME = Pattern.compile(REFERENCE_NAME);
+    private static final Pattern ANCHOR = Pattern.compile(REFERENCE_NAME + "\\(?");
     private static final Pattern CONSTRUCTION = Pattern.compile("new[ \\t]+(" + REFERENCE_NAME + ")[ \\t]*\\(?");
 
     enum Operation { READ_FILE, FIND_FILES, FIND_REFERENCES, LANGUAGE_RESOURCE }
@@ -43,10 +47,14 @@ record EvidenceQuery(String command, String side, String language, String contex
         if (alternative >= 0) {
             fallback = fields[3].substring(alternative + FALLBACK.length());
             fields[3] = fields[3].substring(0, alternative);
-            boolean narrower = fields[3].equals("all") && (symbol(fallback) || LINES.matcher(fallback).matches())
-                    || symbol(fields[3]) && LINES.matcher(fallback).matches();
+            boolean range = LINES.matcher(fallback).matches();
+            boolean near = fallback.startsWith(NEAR) && ANCHOR.matcher(fallback.substring(NEAR.length())).matches();
+            boolean narrower = fields[3].equals("all") && (range || named(fallback, SYMBOL) || named(fallback, DECLARATION))
+                    || named(fields[3], SYMBOL) && (range || near);
             if (!narrower) throw new IOException("Expected a narrower file selector after " + FALLBACK);
         }
+        if (file && fields[3].startsWith(DECLARATION) && !named(fields[3], DECLARATION))
+            throw new IOException("Expected a name after " + DECLARATION);
         if (file && fields[3].startsWith(REFERENCES)) {
             String reference = fields[3].substring(REFERENCES.length());
             if (!NAME.matcher(reference).matches() && !CONSTRUCTION.matcher(reference).matches())
@@ -57,8 +65,8 @@ record EvidenceQuery(String command, String side, String language, String contex
         return new EvidenceQuery(fields[0], fields[1], language, "", fields[2], fields[3], fields[4], fallback);
     }
 
-    private static boolean symbol(String selector) {
-        return selector.startsWith("symbol:") && !selector.substring("symbol:".length()).isBlank()
+    private static boolean named(String selector, String prefix) {
+        return selector.startsWith(prefix) && !selector.substring(prefix.length()).isBlank()
                 && !selector.contains(FALLBACK);
     }
 

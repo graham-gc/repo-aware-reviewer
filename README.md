@@ -75,7 +75,7 @@ flowchart TD
         DOC -->|A concrete issue needs implementation evidence| P3
         T -->|Ready| P8
         P3 --> P4["Provide additional evidence on request"]
-        P4 --> P5["Verify each proposed finding"]
+        P4 --> P5["Group proven duplicates and prepare candidate evidence<br/>Verify ready questions independently"]
         P5 --> P6["Assess supplied requirements"]
         P6 --> P7["Adjudicate and deduplicate findings"]
         P7 --> P8["Write the report, coverage and review status"]
@@ -164,7 +164,9 @@ java -jar build/code-review-agent.jar review \
 
 Replace `/path/to/previous-run` with the earlier run directory. Preserve any commit, branch, baseline, requirements, knowledge and other input settings from the original command. Keep the resolved target commit, document contents and evidence settings unchanged; if the original command used `HEAD`, it must still point to that commit. Saved tasks are revalidated; valid matches are reused, while invalid, missing or changed prompts continue.
 
-Concurrency can change: `--review-parallelism 1` runs independent reviewers sequentially; the default remains `3`. Resume reuses the pinned remote baseline without fetching again. Start a new review to fetch a newer baseline.
+Use `--review-parallelism 1` to run model requests sequentially. Resume reuses the pinned remote baseline without fetching again. Start a new review to fetch a newer baseline.
+
+Deep candidate verification defaults to one slot per ready task and adjusts to comparable recent observations and provider rate limits. Other stages retain a default concurrency of three. With `--review-parallelism auto`, those other stages start with up to two requests and can scale to six. Add `--review-max-parallelism 4` to cap automatic concurrency across stages. Use a fixed number for comparisons that need a fixed concurrency setting.
 
 ### 6. Inspect scope and evidence without calling a model
 
@@ -204,7 +206,11 @@ A grouped local review starts with complete diffs and nearby implementation line
 
 A small change limited to existing Markdown READMEs or files under `docs/` can also finish in one call. The CLI resolves cited lines to the pinned Git revision and lists model observations for human review. A specific issue that needs implementation or contract evidence can trigger deep review.
 
-For other multi-file changes or detected risk signals, the CLI gives related files and more source context to a scoped risk check, and reviews the remaining files with bounded diff excerpts. A scoped candidate can receive one citation correction using available source. For a requested follow-up, the CLI rechecks a candidate once every required excerpt is available and at least one adds evidence. The scoped report summarizes the final decisions. A confirmed finding needs target evidence for its stated impact, and high or critical severity also needs evidence of the material effect or affected scope. See `coverage.md` for evidence gaps and publishing decisions. Supplied review rules and explicit `--review-mode deep` use the full workflow.
+For other multi-file changes or detected risk signals, the CLI gives related files and more source context to a scoped risk check, and reviews the remaining files with bounded diff excerpts. A scoped candidate can receive one citation correction using available source. For a requested follow-up, the CLI rechecks a candidate once every required excerpt is available and at least one adds evidence. The scoped report summarizes the final decisions. A confirmed finding needs target evidence for its stated impact, and high or critical severity also needs evidence of the material effect or affected scope. See `coverage.md` for evidence gaps and publishing decisions.
+
+Trusted baseline repository rules, external requirements, and knowledge documents use the full deep workflow in automatic mode.
+
+Use `--review-mode scoped-rules` to try the experimental scoped path for repositories with trusted baseline rules. It reviews complete diff partitions, adds a narrow independent check for detected input parsing changes, and requests follow-up evidence per candidate. Keep the same option when resuming the experiment. A partition that cannot be assessed can fall back to deep review.
 
 When explicit Python sibling imports link changed durable state to a changed external-effect caller, the scoped request groups those implementations and their identified dependencies for the recovery check. Other changed code stays in scope. For verified additions in that request, the new-file diff header establishes attribution and complete target source supplies the added lines. Scopes without a recognized link use the regular file grouping.
 
@@ -216,7 +222,11 @@ If the default scoped plan would leave hunks for later requests, the CLI first t
 
 Use `--focused-json-schema` to pilot Claude Code's schema-constrained response for initial risk checks. Use the same flag when resuming that run. A custom agent command used with this flag must accept Claude Code's `--output-format json` and `--json-schema` flags and return its JSON envelope. [Structured output and failure handling](docs/structured-output.md#json-schema-pilot).
 
-Deep discovery keeps every available diff and contract in all three requests. The contract and boundary reviewers can omit a duplicate source block when its complete target body is already present in the diff. Deep candidate verification uses relevant complete evidence blocks by default. To compare verification evidence modes, use `--review-mode deep` on both sides and add `--verification-evidence full` on the full-input side.
+All three deep reviewers receive the repository rules and the complete textual diff. Discovery partitions changes when the prompt would exceed 320,000 UTF-8 bytes or a smaller configured evidence limit. Oversized optional source bodies can be requested by line range. Coverage records any changes that could not fit. The contract and boundary reviewers can omit duplicate source blocks when the diff contains the complete target body. Deep candidate verification uses relevant complete evidence blocks by default. To compare verification evidence modes, use `--review-mode deep` on both sides and add `--verification-evidence full` on the full-input side.
+
+Use `--batched-verification` to try sharing pinned evidence across up to three deep-verification candidates. The CLI validates each verdict independently and reruns missing or invalid members individually. Use the same flag when resuming. Deep review can publish eligible findings directly once their trigger, impact, and change attribution are verified. See [verification performance](docs/review-performance.md#additional-evidence-rounds).
+
+Initial and supplemental discovery can attach a question and exact source requests to each candidate. The CLI fetches the declared evidence from pinned revisions before verification, and groups identical claims with the same question and evidence plan when direct publication is allowed. The verifier checks evidence sufficiency first. When the CLI obtains missing evidence, only the affected candidate resumes, even while other verifiers are still running.
 
 Review-required findings can include a suggested check for the maintainer, covering the missing premise, a concrete action, and the observation that would resolve it. The CLI performs static review.
 

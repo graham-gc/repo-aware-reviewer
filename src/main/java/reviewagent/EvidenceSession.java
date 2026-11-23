@@ -103,10 +103,62 @@ final class EvidenceSession {
         return delivery(requests, supplied, true).sources();
     }
 
+    record VerificationBrief(String question, Map<String, Set<String>> sourcesByRequest) {
+        static final VerificationBrief EMPTY = new VerificationBrief("", Map.of());
+
+        Set<String> sources() {
+            return sourcesByRequest.values().stream().flatMap(Set::stream).collect(java.util.stream.Collectors.toSet());
+        }
+
+        String instructions(EvidenceCatalog supplied) {
+            StringBuilder text = new StringBuilder();
+            if (!question.isEmpty())
+                text.append("\n").append(EvidenceText.block("Discovery's question for independent verification", "text", question))
+                        .append("Treat it as a lead. Check all facts needed to decide the original candidate.\n");
+            var ids = supplied.sources().stream().map(EvidenceSource::id).collect(java.util.stream.Collectors.toSet());
+            var gaps = sourcesByRequest.entrySet().stream()
+                    .filter(entry -> entry.getValue().isEmpty() || !ids.containsAll(entry.getValue()))
+                    .map(Map.Entry::getKey).sorted().toList();
+            if (!gaps.isEmpty()) {
+                text.append("\nPLANNED EVIDENCE THAT IS NOT FULLY PRESENT IN THIS REQUEST\n");
+                gaps.forEach(gap -> text.append("- ").append(gap).append('\n'));
+                text.append("Check whether the supplied evidence already decides the claim. Request any still-decisive gap together.\n");
+            }
+            return text.toString();
+        }
+    }
+
+    Map<String, VerificationBrief> verificationBriefs(Map<String, String> questions, Map<String, List<EvidenceRequest>> requests) {
+        var byCandidate = new LinkedHashMap<String, VerificationBrief>();
+        questions.forEach((id, question) -> byCandidate.put(id, new VerificationBrief(question, Map.of())));
+        requests.forEach((candidate, lines) -> {
+            var byRequest = new LinkedHashMap<String, Set<String>>();
+            for (var request : lines) byRequest.put(request.key(), Set.copyOf(fulfilled.getOrDefault(request.key(), Set.of())));
+            byCandidate.put(candidate, new VerificationBrief(questions.getOrDefault(candidate, ""), Map.copyOf(byRequest)));
+        });
+        return byCandidate;
+    }
+
     Set<String> deliverScoped(String requester, String requests, EvidenceCatalog supplied) {
+        return deliverFollowup(requester, requests, supplied, false);
+    }
+
+    Set<String> deliverDecisive(String requester, String requests, EvidenceCatalog supplied) {
+        return deliverFollowup(requester, requests, supplied, true);
+    }
+
+    private Set<String> deliverFollowup(String requester, String requests, EvidenceCatalog supplied, boolean allowPartial) {
         var delivery = delivery(requests, supplied, false);
         if (delivery.missing().isEmpty()) {
             recordFollowup(requester, requests, delivery.sources());
+            return delivery.sources();
+        }
+        if (allowPartial && !delivery.sources().isEmpty()) {
+            recordFollowup(requester, requests, delivery.sources(),
+                    "Follow-up on newly supplied evidence; unresolved requests remain explicit gaps.");
+            for (String request : delivery.missing())
+                coverage.append("  - Unavailable evidence: ").append(EvidenceText.oneLine(request)).append('\n');
+            lastCoverage += "Unavailable evidence for this follow-up: " + String.join(", ", delivery.missing()) + ".\n";
             return delivery.sources();
         }
         recordFollowup(requester, requests, Set.of(), "Stopped; required evidence for this question is unavailable.");
@@ -195,6 +247,11 @@ final class EvidenceSession {
                 .append("-state.properties): ").append(String.join(", ", candidates)).append(". Validated in batch: ")
                 .append(accepted.isEmpty() ? "none" : String.join(", ", accepted))
                 .append(". Remaining candidates go to individual verification.\n");
+    }
+
+    void recordVerificationReuse(String candidate, String verified) {
+        coverage.append("- Verification reused for ").append(candidate).append(" from ").append(verified)
+                .append(" (identical candidate and evidence requests; verified proof covered the full claim).\n");
     }
 
     String coverage() { return coverage.toString(); }

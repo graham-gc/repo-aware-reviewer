@@ -132,15 +132,18 @@ final class CitationRangeTests {
                 "persist_current_claim()\n\n", scope, languages);
         var diff = EvidenceSource.diff("logic/queue.py", null,
                 "@@ -73 +156 @@\n-keep_previous_claim()\n+persist_current_claim()\n", scope, true);
-        var catalog = new EvidenceCatalog(List.of(diff, base, target), true);
+        var contract = EvidenceSources.contract("AGENTS.md at base", "AGENTS.md", "base", 1,
+                "Keep the previous claim until the queue is ready.");
+        var catalog = new EvidenceCatalog(List.of(diff, base, target, contract), true);
         var index = new EvidenceIndex(catalog);
-        String markdown = "# Review scope\n\n" + diff.markdown() + base.markdown() + target.markdown();
+        String markdown = "# Review scope\n\n" + diff.markdown() + base.markdown() + target.markdown() + contract.markdown();
         var evidence = new EvidenceBundle(scope, List.of(target.path()), markdown, "", 0, null, catalog);
         var finding = new ReviewFinding("R1-1", "Inspect claim", ReviewFinding.Severity.LOW, target.path(), 156, 156,
                 "An event arrives", "The claim is written", "Source evidence", "Target behavior");
+        String verification = new PromptFactory().verifyFinding(evidence, finding, "", index);
         for (String prompt : List.of(
                 AdaptiveReview.prompt(evidence, index, OutputLanguage.EN, "Inspect the supplied source."),
-                new PromptFactory().verifyFinding(evidence, finding, "", index),
+                verification,
                 new PromptFactory().assessRequirements(evidence, "", "", "", true, index))) {
             require(prompt.contains("# Review scope") && prompt.contains("SRC-1 — logic/queue.py (Kind: DIFF")
                     && prompt.contains("SRC-2 — logic/queue.py at base (Kind: BASE_SOURCE; revision: base")
@@ -151,6 +154,56 @@ final class CitationRangeTests {
         }
         require(evidence.markdown().equals(markdown) && !catalog.source("SRC-3").text().contains(" | "),
                 "display numbering does not alter raw evidence or the citation catalog");
+        int proofInstructions = verification.indexOf("REQUIRED CITATIONS FOR CONFIRMATION");
+        require(proofInstructions >= 0 && proofInstructions < verification.indexOf("```xml")
+                && verification.contains("DIFF, BASE_SOURCE, TARGET_SOURCE and CONTRACT identify block kinds.")
+                && verification.contains("Use CONTRACT as a premise basis only for a supplied CONTRACT block.")
+                && verification.contains("<source>SRC-4</source><lines>3:5</lines>")
+                && verification.contains("<source>SRC-17</source><lines>8:10</lines>")
+                && verification.contains("- SRC-1 (DIFF)\n- SRC-2 (BASE_SOURCE)\n- SRC-3 (TARGET_SOURCE)\n- SRC-4 (CONTRACT)"),
+                "the first verification request separates the proof roles and points to the included references");
+        var limitedCatalog = catalog.select(java.util.Set.of(diff.id(), target.id()));
+        String available = new EvidenceIndex(limitedCatalog, catalog).verificationReferences(target.path());
+        require(available.contains("- SRC-1 (DIFF)\n- SRC-3 (TARGET_SOURCE)")
+                && !available.contains("SRC-2") && !available.contains("SRC-4"),
+                "verification hints use only supplied evidence without renumbering stable references");
+        var renamed = EvidenceSource.diff("logic/new_queue.py", base.path(), diff.text(), scope, true);
+        var renameIndex = new EvidenceIndex(new EvidenceCatalog(List.of(renamed, base, target), true));
+        require(renameIndex.verificationReferences(renamed.path()).contains("- SRC-1 (DIFF)\n- SRC-2 (BASE_SOURCE)")
+                && !renameIndex.verificationReferences(renamed.path()).contains("TARGET_SOURCE"),
+                "the changed path's diff can link to pinned pre-rename baseline evidence");
+        var additionOnly = EvidenceSource.diff(target.path(), null, "@@ -73,0 +156 @@\n+persist_current_claim()\n", scope, true);
+        var additionIndex = new EvidenceIndex(new EvidenceCatalog(List.of(additionOnly, target), true));
+        String missingBase = "No supplied block can provide baseline evidence";
+        require(additionIndex.verificationReferences(target.path()).contains(missingBase)
+                && !index.verificationReferences(target.path()).contains(missingBase),
+                "an additions-only diff for an existing file does not advertise baseline proof");
+        var caller = EvidenceSources.file("base", "logic/caller.py", 1, "logic/caller.py at base",
+                "return keep_previous_claim()\n", scope, languages);
+        var withCaller = new EvidenceIndex(new EvidenceCatalog(List.of(additionOnly, target, caller), true));
+        require(!withCaller.verificationReferences(target.path()).contains(missingBase),
+                "other supplied files can provide relevant baseline evidence");
+        var newFile = EvidenceSource.diff(target.path(), null, "new file mode 100644\n@@ -0,0 +156 @@\n+persist_current_claim()\n", scope, true);
+        require(!new EvidenceIndex(new EvidenceCatalog(List.of(newFile, target), true))
+                .verificationReferences(target.path()).contains(missingBase),
+                "new-file metadata can establish absence from the base");
+        String attribution = "<citation><source>SRC-1</source><lines>2:2</lines></citation>";
+        String behavior = "<citation><source>SRC-3</source><lines>1:1</lines></citation>";
+        String verdict = """
+                <verification><status>CONFIRMED</status><reason>The old claim is replaced on arrival.</reason>
+                <relation>INTRODUCED</relation><baseline>The old call retained the previous claim.</baseline>
+                <contract>The previous claim should be retained while the queue is unavailable.</contract>
+                <support>REACHABLE_FAILURE</support>
+                <premises><premise><statement>The new claim is persisted.</statement><basis>IMPLEMENTATION</basis>
+                <citations>%s</citations></premise></premises>
+                <citations>%s%s</citations>
+                %s</verification>
+                """.formatted(behavior, attribution, behavior, ReviewOutput.findingXml(finding));
+        require(ReviewGrounding.verification(verdict, finding, evidence, index).verdict().status() == ReviewOutput.Status.CONFIRMED,
+                "separate diff attribution and target selectors form a valid first verification response");
+        fails(() -> ReviewGrounding.verification(verdict.replace(attribution, ""), finding, evidence, index));
+        fails(() -> ReviewGrounding.verification(verdict.replace("<source>SRC-3</source>", "<source>TARGET_SOURCE</source>"),
+                finding, evidence, index));
         var reference = index.bind(List.of(EvidenceIndex.Citation.lines("SRC-3", "1"))).getFirst();
         require(reference.locations().getFirst().firstLine() == 156, "printed block line resolves to the actual file location");
         fails(() -> index.bind(List.of(EvidenceIndex.Citation.lines("SRC-3", "1:156"))));

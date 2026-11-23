@@ -4,6 +4,42 @@ import java.util.List;
 import java.util.stream.Collectors;
 
 final class PromptFactory {
+    static final String DECISIVE_FOLLOWUP = """
+
+            Start by checking whether the supplied source blocks can establish or refute the trigger, outcome
+            and change attribution. If a decisive fact cannot be checked from this material and the available
+            source does not already settle the verdict, return INSUFFICIENT_EVIDENCE for that candidate immediately,
+            before broader analysis. In that reply, request all currently identifiable excerpts needed together
+            to decide the missing fact. Check each candidate separately when more than one verdict is requested.
+
+            The next automatic call must answer one question that can change this verdict. Always return a complete
+            verification verdict. Only an INSUFFICIENT_EVIDENCE verdict can request more evidence. Put the exact
+            missing premise in <nextCheck>, explain what each answer would change in <reason>, and request the
+            smallest set of pinned repository excerpts that can decide it. Resolve related guards and callers together
+            when the same premise requires both. Do not request a general survey, unavailable runtime observations,
+            or proof of external usage merely to decide what changed in source.
+            If source proves a concrete contract mismatch, decide that narrower claim using its own trigger
+            and impact. For a public API change, report the verified interface mismatch and state downstream
+            adoption or migration impact as unknown when no evidence establishes it.
+            After receiving evidence, report <previousPremise> as SUPPORTED, REFUTED, or UNRESOLVED and cite any new
+            implementation that resolves or narrows it. If you cannot make progress on that premise, preserve the
+            evidenced behavior and state what remains unknown for the maintainer. Omit further requests in that case.
+            """ + EvidenceRequest.SCOPED_GUIDANCE;
+    private static final String GROUNDED_PUBLICATION = """
+
+            For a confirmed reachable failure, place the pinned target excerpts proving the full finding trigger in
+            <triggerCitations> and those proving the full finding impact in <outcomeCitations>. These are direct children
+            of <verification>, alongside <finding>. Write the trigger and impact only in <finding>. Include the entry
+            point's accepted input conditions, early-return guards and reachable state in the trigger whenever the
+            failure depends on them. Use optional <premises> for additional facts. Each <premise> has <statement>,
+            <basis>, and <citations>, with every <citation> inside that <citations> container. Include base or diff
+            evidence for change attribution in the top-level <citations>. Omit both linked citation fields when there
+            is no confirmed finding. Keep the outcome within what the cited code proves.
+            Ask only for evidence needed for the specific unresolved fact. Treat broader policy and external usage
+            as separate questions. REQUEST_KNOWLEDGE searches only a configured scoped knowledge base.
+            When a follow-up provides only part of the requested evidence, resolve whatever the supplied source
+            establishes. Any genuinely necessary missing fact remains unresolved. Do not request it again.
+            """;
     private static final String SCOPED_OUTCOME = """
             For each CONFIRMED scoped finding, add a premise with %s. Copy the exact finding impact
             into its statement and cite the target code or configuration that proves the last observable effect.
@@ -118,8 +154,22 @@ final class PromptFactory {
                 output language. XML tags and status values are protocol keywords. Escape XML special characters
                 or use CDATA for descriptive values. Use the exact repository-relative path of a changed file and
                 positive inclusive source line numbers. Include each distinct candidate only once.
+                Put every plausible, actionable failure found in this assignment into a structured finding,
+                including failures noticed while checking requirements. Include a candidate with a missing premise
+                when the failure has a concrete trigger and location, then state what needs verification. The checklist
+                may refer to it by its one-based finding number but must not be the only place it appears.
+                Keep general observations and requirements with no concrete defect in the checklist.
                 If there are no candidates, return a fenced xml block containing <findings/>.
                 Keep all evidence-request lines outside the XML block.
+                For each candidate, add VERIFY_QUESTION|N|Exact question for independent verification on one
+                plain line outside the XML. Name the specific guard, relationship or behavior the verifier
+                needs to check. List all source locations you can identify as necessary to settle that question.
+                When a file request serves a specific finding, start its reason with [finding:N],
+                where N is its one-based position in this reply's findings. For example:
+                REQUEST_FILE|target|src/Config.java|12:24|[finding:2] Check whether the mode is allowed
+                Use a symbol or declaration selector only when supported by that file's language module.
+                Otherwise use a known exact line range or all for a small, known file.
+                Leave general requests unmarked. A finding number does not require any additional requests.
 
                 ```xml
                 <findings>
@@ -154,9 +204,74 @@ final class PromptFactory {
     }
 
     String verifyFinding(EvidenceBundle evidence, ReviewFinding candidate, String supplemental, EvidenceIndex index) {
+        return verifyFinding(evidence, candidate, supplemental, index, "");
+    }
+
+    String verifyFinding(EvidenceBundle evidence, ReviewFinding candidate, String supplemental, EvidenceIndex index,
+                         String verificationInstructions) {
+        return verifyFinding(evidence, candidate, supplemental, index, verificationInstructions, false);
+    }
+
+    String verifyFinding(EvidenceBundle evidence, ReviewFinding candidate, String supplemental, EvidenceIndex index,
+                         String verificationInstructions, boolean groundedPublication) {
+        return verificationRules(candidate.id(), false, groundedPublication) + ReviewSchema.VERIFICATION_REQUESTS
+                + languageInstructions() + acceptanceInstructions() + evidenceRequestInstructions(evidence)
+                + verificationInstructions
+                + "For the XML response, severity and status values always use the canonical English protocol keywords.\n\n"
+                + "CANDIDATE TO VERIFY\n" + ReviewOutput.findingXml(candidate)
+                + verificationSources(evidence, index, candidate.path(), supplemental);
+    }
+
+    String verifyBatch(VerificationEvidence view, List<ReviewFinding> candidates,
+                       java.util.function.Function<ReviewFinding, String> context, String instructions) {
+        var first = candidates.getFirst();
+        var bundle = view.bundle();
+        String ids = candidates.stream().map(ReviewFinding::id).collect(Collectors.joining(", "));
+        return verificationRules(first.id(), true, true) + """
+                Return exactly one <verifications> document with one direct <verification id="..."> per supplied ID.
+                VERDICT IDS: %s
+                Each CANDIDATE section contains its allegation and any prior verdicts relevant to that ID.
+                Apply publication instructions within each section when prior verdicts are supplied.
+                A verdict, its finding ID, and its citations belong to that candidate alone. Never combine candidates.
+                For INSUFFICIENT_EVIDENCE, put a named premise in <nextCheck> and any necessary raw request lines in
+                a single <requests> child of its own <verification>. Omit <requests> for all other statuses.
+                A pending member uses this shape inside the same <verifications> document, with its actual ID and source:
+                <verification id="%s">
+                  <status>INSUFFICIENT_EVIDENCE</status>
+                  <reason>A guard would refute the trigger; the caller has not been read.</reason>
+                  <nextCheck>Does the caller's guard block this input?</nextCheck>
+                  <requests>REQUEST_FILE|target|src/Caller.java|all|Inspect the caller guard</requests>
+                </verification>
+                Keep the entire response inside <verifications>.
+                """.formatted(ids, first.id()) + languageInstructions() + acceptanceInstructions() + evidenceRequestInstructions(bundle)
+                + DECISIVE_FOLLOWUP + instructions
+                + "CANDIDATES TO VERIFY\n"
+                + candidates.stream().map(candidate -> "BEGIN CANDIDATE " + candidate.id() + "\n"
+                        + ReviewOutput.findingXml(candidate) + context.apply(candidate)
+                        + "\nEND CANDIDATE " + candidate.id())
+                        .collect(Collectors.joining("\n\n"))
+                + verificationSources(bundle, view.index(), first.path(), "");
+    }
+
+    private static String verificationRules(String id, boolean batch, boolean groundedPublication) {
+        String proofExample = (groundedPublication ? """
+                <triggerCitations><citation><source>SRC-17</source><lines>8:10</lines></citation></triggerCitations>
+                <outcomeCitations><citation><source>SRC-17</source><lines>11:13</lines></citation></outcomeCitations>
+                <premises><premise>
+                  <statement>Additional necessary implementation fact, if needed</statement>
+                  <basis>IMPLEMENTATION</basis>
+                  <citations><citation><source>SRC-18</source><lines>4:6</lines></citation></citations>
+                </premise></premises>
+                """ : """
+                <premises><premise>
+                  <statement>One necessary trigger or failure premise, including its actual preconditions</statement>
+                  <basis>IMPLEMENTATION</basis>
+                  <citations><citation><source>SRC-17</source><lines>8:10</lines></citation></citations>
+                </premise></premises>
+                """).indent(2).stripTrailing();
         return """
-                You are the independent candidate verification stage of a read-only code review.
-                Verify only the supplied candidate. Trace its trigger, impact, existing guards, callers and
+                %s
+                %s Trace its trigger, impact, existing guards, callers and
                 relationship to the diff. Actively search for evidence that disproves it. An unreachable trigger,
                 speculative impact or style preference must be rejected. Missing decisive
                 evidence requires INSUFFICIENT_EVIDENCE. A class signature alone does not establish library semantics.
@@ -189,27 +304,46 @@ final class PromptFactory {
                 Request more evidence for a specific unresolved factual premise; do not repeatedly seek policy
                 documents merely to re-prove a local behavior already established by base and target source.
                 Determine the verdict from the evidence before formatting it.
+
+                REQUIRED CITATIONS FOR CONFIRMATION
+                1. Change attribution. For INTRODUCED and EXPOSED_BY_CHANGE, put a BASE_SOURCE citation, a
+                   removed-line DIFF citation, or the DIFF new-file header in the top-level citations. Choose
+                   the excerpt that establishes the relevant prior behavior or absence. For EXPOSED_BY_CHANGE,
+                   also cite the changed caller or input that makes the existing defect reachable.
+                2. Target failure. Cite TARGET_SOURCE or added-line DIFF evidence for the chosen location, trigger,
+                   and observable failure. Attach citations to the claims they prove. A target citation alone
+                   does not satisfy change attribution.
+                3. Requirement violations. For UNMET_REQUIREMENT, use a CONTRACT citation for the exact
+                   applicable clause in addition to target evidence. Use that citation in a CONTRACT premise
+                   when the claim depends on an explicit defensive requirement.
+                Use CONTRACT as a premise basis only for a supplied CONTRACT block. An API contract established
+                by implementation, docstrings or tests belongs in an IMPLEMENTATION premise. The narrative
+                <contract> field may still describe that local invariant.
+                If any required proof is missing, use INSUFFICIENT_EVIDENCE and name the exact missing premise.
+                In <source>, copy the actual reference printed before an included block's title, such as SRC-17.
+                DIFF, BASE_SOURCE, TARGET_SOURCE and CONTRACT identify block kinds. In <lines>, copy the block-relative
+                numbers printed next to the selected code. Select the smallest contiguous excerpt that proves the
+                claim and contains at least 12 normalized characters of source text.
+
                 For CONFIRMED, use the complete structure below, replacing the example descriptions with verified
-                values. The finding element is a direct child of verification and contains the individual fields.
+                values. The SRC references and ranges in this example are illustrative. Copy the actual references
+                and printed line ranges from this request. Use the citation requirements above for the actual relationship.
+                The finding element is a direct child of verification and contains the individual fields.
                 ```xml
-                <verification>
+                %s
                   <status>CONFIRMED</status>
                   <reason>Evidence-based decision</reason>
                   <relation>INTRODUCED</relation>
                   <baseline>What the base/diff shows and why this is in scope</baseline>
                   <contract>Exact applicable requirement/rule, or intrinsic correctness invariant</contract>
                   <support>REACHABLE_FAILURE</support>
-                  <premises><premise>
-                    <statement>One necessary trigger or failure premise, including its actual preconditions</statement>
-                    <basis>IMPLEMENTATION</basis>
-                    <citations><citation><source>Exact evidence ID or block title</source>
-                      <quote>Verbatim excerpt proving this premise</quote></citation></citations>
-                  </premise></premises>
-                  <citations><citation><source>Exact evidence block title</source>
-                    <quote>Verbatim decisive excerpt from that block</quote></citation></citations>
+                %s
+                  <citations>
+                    <citation><source>SRC-4</source><lines>3:5</lines></citation>
+                  </citations>
                   <finding id="%s">
                     <title>Verified issue title</title>
-                    <severity>HIGH</severity>
+                    <severity>%s</severity>
                     <path>Repository-relative changed-file path</path>
                     <line>1</line>
                     <endLine>1</endLine>
@@ -218,7 +352,7 @@ final class PromptFactory {
                     <evidence>Code locations and verified reasoning</evidence>
                     <diffRelation>How the diff introduced the failure</diffRelation>
                   </finding>
-                </verification>
+                %s
                 ```
                 For REJECTED or INSUFFICIENT_EVIDENCE, omit the finding element and explain the reason.
                 For INSUFFICIENT_EVIDENCE, optionally add a direct child <nextCheck> when a maintainer can resolve
@@ -227,26 +361,18 @@ final class PromptFactory {
                 Write a short instruction in the report language. Describe the action in prose, without shell
                 commands. Do not invent entry points, test results or access. This check is proposed, not performed,
                 and is not evidence for the verdict. Omit the field when no concrete check is known.
-                Citations use the short SRC-number references from the inventory or exact block titles, with excerpts of at least 12 characters
-                (whitespace differences are allowed). Include every decisive link, not just a signature or call site.
-                Prefer SRC-number references (for example SRC-17); full EV hashes are legacy identifiers, not text to retype.
-                The inventory identifies DIFF, TARGET_SOURCE and BASE_SOURCE separately.
                 Diff headers, new-file metadata and +/- patch markers belong to DIFF evidence, not full source files.
                 An unchanged line may be present in TARGET_SOURCE but absent from the truncated-context diff.
                 Cite the block actually containing the quote; do not mix a source-file ID with a patch excerpt.
-                For a numbered evidence block or supplied correction excerpt, use
-                <citation><source>SRC-17</source><lines>first:last</lines></citation> with the printed block line numbers.
-                Use exactly one of quote or lines. The CLI extracts the actual source text and validates its spans.
+                For unnumbered blocks, copy a verbatim excerpt into <quote> with the published source reference.
+                Use exactly one of quote or lines. The CLI extracts the cited text and validates its spans.
                 A selector is a source reference, not proof that your reasoning is correct: re-evaluate the claim
                 against the actual excerpt, particularly changed method names, arguments and returned values.
-                Confirmation requires target implementation quotations; INTRODUCED/EXPOSED_BY_CHANGE also require
-                base or diff quotations; UNMET_REQUIREMENT additionally requires a trusted contract quotation.
-                For baseline support from a diff, quote the removed lines (a new file's diff establishes absence
-                from the base). For target support, quote added lines or target source. Request unchanged base
-                methods explicitly when needed. Include separate citations for the relevant sides of the diff.
+                For the old and new sides of the same DIFF block, use separate citations with that block's
+                reference and the actual line range for each side. Request unchanged base methods when needed.
                 Classify support as REACHABLE_FAILURE, EXPLICIT_DEFENSIVE_REQUIREMENT, HARDENING or UNRESOLVED.
                 For a reachable failure, enumerate EVERY necessary premise and trace its producer, caller and consumer.
-                Prove each premise using IMPLEMENTATION or CONTRACT quotations; unproved premises use ASSUMPTION.
+                %s
                 A CONFIRMED verdict cannot contain an ASSUMPTION, HARDENING or UNRESOLVED support.
                 For example, a consumer lacking an expected-node count does not prove that its producer can return
                 a successful partial snapshot. Read the producer's loop, persistence order and success transition.
@@ -256,15 +382,24 @@ final class PromptFactory {
                 cannot emit it; quote that requirement in a CONTRACT premise. Do not dismiss required defenses.
                 Match severity and impact to the proved preconditions. Record hardening and policy questions as
                 unconfirmed candidates, rather than inventing reachable inputs or business rules.
-                Use these canonical status values and English severity values in XML. Descriptive values use the
-                selected output language. Escape XML special characters or use CDATA for descriptive values.
+                Use canonical English protocol values for status, severity, relation, support, basis, and previousPremise.
+                Write descriptive fields in the selected output language. Escape XML special characters or use CDATA.
                 Preserve a changed-file location with positive inclusive line numbers for a confirmed finding.
 
-                """.formatted(candidate.id()) + ReviewSchema.VERIFICATION_REQUESTS
-                + languageInstructions() + acceptanceInstructions() + evidenceRequestInstructions(evidence)
-                + "For the XML response, severity and status values always use the canonical English protocol keywords.\n\n"
-                + "CANDIDATE TO VERIFY\n" + ReviewOutput.findingXml(candidate)
-                + "\n\n" + EvidenceIndex.LINE_CITATION_GUIDANCE
+                """.formatted(
+                batch ? "You are the independent candidate verification batch of a read-only code review."
+                        : "You are the independent candidate verification stage of a read-only code review.",
+                batch ? "Decide each supplied candidate independently." : "Decide the supplied candidate.",
+                batch ? "<verifications><verification id=\"" + id + "\">" : "<verification>",
+                proofExample, id, groundedPublication ? "MEDIUM" : "HIGH",
+                batch ? "</verification></verifications>" : "</verification>",
+                groundedPublication ? GROUNDED_PUBLICATION.strip()
+                        : "Prove each premise using IMPLEMENTATION or CONTRACT quotations; unproved premises use ASSUMPTION.");
+    }
+
+    private static String verificationSources(EvidenceBundle evidence, EvidenceIndex index, String path, String supplemental) {
+        return "\n\n" + EvidenceIndex.LINE_CITATION_GUIDANCE
+                + index.verificationReferences(path)
                 + "EVIDENCE CITATION SOURCE NAMES\n" + index.inventory()
                 + "\n\nEVIDENCE FOLLOWS\n=================\n" + index.numberedMarkdown(evidence.markdown() + supplemental);
     }
@@ -309,7 +444,17 @@ final class PromptFactory {
 
     String adjudicate(EvidenceBundle evidence, ReviewFinding representative, List<ReviewOutput.Decision> group,
                       String supplemental, EvidenceIndex index) {
-        return """
+        return adjudicate(evidence, representative, group, supplemental, index, false);
+    }
+
+    String adjudicate(EvidenceBundle evidence, ReviewFinding representative, List<ReviewOutput.Decision> group,
+                      String supplemental, EvidenceIndex index, boolean groundedPublication) {
+        return PUBLICATION_INSTRUCTIONS + publicationContext(group, index)
+                + "\nREPRESENTATIVE VERIFICATION INSTRUCTIONS\n"
+                + verifyFinding(evidence, representative, supplemental, index, DECISIVE_FOLLOWUP, groundedPublication);
+    }
+
+    static final String PUBLICATION_INSTRUCTIONS = """
                 You are the independent publication adjudication stage of a read-only code review.
                 Reconsider this issue using all grouped candidates and ALL verdicts, including negative verdicts.
                 Resolve contradictions explicitly in your reason; do not vote or prefer a positive conclusion.
@@ -319,14 +464,18 @@ final class PromptFactory {
                 INSUFFICIENT_EVIDENCE. A quoted call to an unread implementation does not prove its behavior.
                 State whether a disagreement concerns the source-level behavior, its required contract, or its
                 downstream impact. An unknown product intention does not refute an observed behavior change.
+                Confirm a narrower, source-proved public-interface mismatch when the documented or tested contract
+                establishes it. Keep the unknown downstream usage or runtime effect separate in the explanation.
                 Source-supported compatibility risks remain visible as review-required items when policy is
                 unresolved; do not describe the evidence as absent merely because its defect status is disputed.
                 You may request missing evidence before deciding. Zero published findings is a valid outcome.
                 Your verdict supersedes preliminary verification for the representative issue.
 
-                GROUPED CANDIDATES AND PRELIMINARY VERDICTS
-                """ + group.stream().map(decision -> decisionSummary(decision, index)).collect(Collectors.joining())
-                + "\nREPRESENTATIVE VERIFICATION INSTRUCTIONS\n" + verifyFinding(evidence, representative, supplemental, index);
+                """;
+
+    static String publicationContext(List<ReviewOutput.Decision> group, EvidenceIndex index) {
+        return "GROUPED CANDIDATES AND PRELIMINARY VERDICTS\n"
+                + group.stream().map(decision -> decisionSummary(decision, index)).collect(Collectors.joining());
     }
 
     static String decisionSummary(ReviewOutput.Decision decision) {

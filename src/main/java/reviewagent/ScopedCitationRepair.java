@@ -48,7 +48,7 @@ final class ScopedCitationRepair {
                 }
             }
             var repaired = new ReviewOutput.Decision(proposed.verdict(), proposed.relation(), proposed.baseline(),
-                    proposed.contract(), citations, new ReviewSupport(proposed.support().kind(), premises), proposed.sharedCandidates());
+                    proposed.contract(), citations, new ReviewSupport(proposed.support().kind(), premises));
             return ReviewGrounding.verification(repaired, index, false);
         }
 

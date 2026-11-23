@@ -274,9 +274,11 @@ final class ReviewQualityTests {
                           *'class Limits { static int limit() { return 0; } }'*)
                             printf '%s\\n' 'POSITIVE' | sed 's/ID/R1-2/g;s/TITLE/Deep failure/g' ;;
                           *'class Helper { static int parse() { return Limits.limit(); } }'*)
-                            printf '%s\\n' '<verification><status>INSUFFICIENT_EVIDENCE</status><reason>Need the transitive method.</reason></verification>' \\
+                            ref=$(printf '%s\\n' "$prompt" | sed -n 's/^- \\(SRC-[0-9]*\\): Helper.java at .*/\\1/p' | head -n 1)
+                            printf '<verification><status>INSUFFICIENT_EVIDENCE</status><reason>The helper delegates to Limits; its actual return is needed.</reason><previousPremise>SUPPORTED</previousPremise><nextCheck>Does Limits.limit return zero on this path?</nextCheck><citations><citation><source>%s</source><lines>1:1</lines></citation></citations></verification>\\n' "$ref"
+                            printf '%s\\n' \\
                               'REQUEST_FILE|target|Limits.java|symbol:limit|Trace the next decisive method' ;;
-                          *) printf '%s\\n' '<verification><status>INSUFFICIENT_EVIDENCE</status><reason>Need the called implementation.</reason></verification>' \\
+                          *) printf '%s\\n' '<verification><status>INSUFFICIENT_EVIDENCE</status><reason>Need the called implementation.</reason><nextCheck>Which method decides the value returned by Helper.parse?</nextCheck></verification>' \\
                               'REQUEST_FILE|target|Helper.java|symbol:parse|Read the missing implementation' ;;
                         esac ;;
                       *) printf '%s\\n' 'EXPLICIT' ;;

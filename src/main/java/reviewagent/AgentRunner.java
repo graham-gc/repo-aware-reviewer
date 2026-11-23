@@ -11,14 +11,19 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Pattern;
 
 final class AgentRunner {
+    private static final Pattern RATE_LIMIT = Pattern.compile(
+            "(?:\\b(?:http(?:/[0-9.]+| status)?|status(?: code)?|api error)[ :=]+429\\b|\\brate_limit_error\\b)");
+    private static final Pattern RETRY_AFTER = Pattern.compile("(?m)^\\s*retry-after\\s*:\\s*([0-9]{1,8})\\b");
     private final ProcessExecutor executor;
     private final List<String> command;
     private final Path workingDirectory;
     private final Duration timeout;
     private final AgentPolicy policy;
     private final Semaphore taskSlots;
+    private final AdaptiveConcurrency adaptive;
     private final ThreadLocal<Budget> taskBudget = new ThreadLocal<>();
     private final AtomicInteger active = new AtomicInteger();
     private final ReviewTimings timings = new ReviewTimings();
@@ -35,6 +40,11 @@ final class AgentRunner {
 
     AgentRunner(ProcessExecutor executor, String executable, List<String> args, Path workingDirectory,
                 Duration timeout, AgentPolicy policy, int taskParallelism) {
+        this(executor, executable, args, workingDirectory, timeout, policy, taskParallelism, false, null);
+    }
+
+    AgentRunner(ProcessExecutor executor, String executable, List<String> args, Path workingDirectory,
+                Duration timeout, AgentPolicy policy, int taskParallelism, boolean automatic, Path concurrencyHistory) {
         this.executor = executor;
         this.command = new ArrayList<>();
         this.command.add(executable);
@@ -43,26 +53,46 @@ final class AgentRunner {
         this.timeout = timeout;
         this.policy = policy;
         taskSlots = new Semaphore(taskParallelism, true);
+        adaptive = automatic ? new AdaptiveConcurrency(taskParallelism, concurrencyHistory, timings) : null;
     }
 
     final class TaskScope implements AutoCloseable {
-        private TaskScope(String model, String schema) throws InterruptedException {
+        private boolean accepted;
+
+        private TaskScope(String model, String schema, int stage, String prompt, AdaptiveConcurrency admission) throws InterruptedException {
             if (taskBudget.get() != null) throw new IllegalStateException("Nested agent task");
             var selected = commandForModel(model);
             if (schema != null) {
                 selected = new ArrayList<>(selected);
                 selected.addAll(List.of("--output-format", "json", "--json-schema", schema));
             }
-            taskSlots.acquire();
-            taskBudget.set(new Budget(selected));
+            var controller = admission == null ? adaptive : admission;
+            var profile = controller == null ? null : workload(selected, stage, EvidenceText.bytes(prompt));
+            if (admission == null) taskSlots.acquire();
+            taskBudget.set(new Budget(selected, profile, controller, admission == null));
         }
         @Override public void close() {
-            taskBudget.remove();
-            taskSlots.release();
+            var budget = taskBudget.get();
+            try {
+                if (budget.firstAdmission != null) budget.adaptive.finished(budget.firstAdmission, accepted);
+            } finally {
+                taskBudget.remove();
+                if (budget.sharedSlot) taskSlots.release();
+            }
         }
         int calls() { return taskBudget.get().calls; }
+        void accepted() { accepted = true; }
     }
-    TaskScope task(String model, String schema) throws InterruptedException { return new TaskScope(model, schema); }
+    TaskScope task(String model, String schema, int stage, String prompt, AdaptiveConcurrency admission) throws InterruptedException {
+        return new TaskScope(model, schema, stage, prompt, admission);
+    }
+
+    AdaptiveConcurrency verificationAdmission(List<ReviewTasks.Job> jobs, int parallelism, int stage, Path history) {
+        var ready = jobs.stream().map(ReviewTasks.Job::task).map(task ->
+                workload(commandForModel(task.model()), stage, EvidenceText.bytes(task.prompt()))).toList();
+        return AdaptiveConcurrency.forReadyWork(parallelism, history, timings, ready);
+    }
+    void saveConcurrencyHistory() { if (adaptive != null) adaptive.saveHistory(); }
 
     private List<String> commandForModel(String model) {
         if (model == null) return command;
@@ -83,10 +113,19 @@ final class AgentRunner {
 
     private final class Budget {
         final List<String> command;
-        final long started = System.nanoTime();
+        final AdaptiveConcurrency.Workload workload;
+        final AdaptiveConcurrency adaptive;
+        final boolean sharedSlot;
+        long started = System.nanoTime();
+        AdaptiveConcurrency.Admission firstAdmission;
         int calls;
         int retries;
-        Budget(List<String> command) { this.command = command; }
+        Budget(List<String> command, AdaptiveConcurrency.Workload workload, AdaptiveConcurrency adaptive, boolean sharedSlot) {
+            this.command = command;
+            this.workload = workload;
+            this.adaptive = adaptive;
+            this.sharedSlot = sharedSlot;
+        }
         Duration remaining() throws AgentCallException {
             long remaining = policy.taskTimeout().toNanos() - (System.nanoTime() - started);
             if (remaining <= 0) throw new AgentCallException(AgentCallException.Kind.BUDGET_EXHAUSTED, "Agent task elapsed-time budget exhausted");
@@ -109,11 +148,11 @@ final class AgentRunner {
 
     String invoke(String prompt, Path logPrefix) throws IOException, InterruptedException {
         Budget budget = taskBudget.get();
-        if (budget == null) budget = new Budget(command);
+        if (budget == null) budget = new Budget(command,
+                adaptive == null ? null : workload(command, 0, EvidenceText.bytes(prompt)), adaptive, false);
         while (true) {
-            Duration allowed = budget.acquire();
             try {
-                return once(prompt, logPrefix, allowed, budget.calls, budget.command);
+                return request(prompt, logPrefix, budget);
             } catch (AgentCallException failure) {
                 if (!failure.retryable() || budget.retries >= policy.retries() || budget.calls >= policy.maxCalls()) throw failure;
                 if (!executor.cleanupStatus().equals("OBSERVED_PROCESSES_TERMINATED")) {
@@ -126,6 +165,46 @@ final class AgentRunner {
                 Thread.sleep(policy.retryDelay());
             }
         }
+    }
+
+    private String request(String prompt, Path prefix, Budget budget) throws IOException, InterruptedException {
+        var adaptive = budget.adaptive;
+        if (adaptive == null) {
+            Duration allowed = budget.acquire();
+            return once(prompt, prefix, allowed, budget.calls, budget.command);
+        }
+        boolean first = budget.calls == 0;
+        long waitBudget = (first ? policy.taskTimeout() : budget.remaining()).toNanos();
+        var admission = adaptive.acquire(budget.workload, waitBudget);
+        try {
+            if (first) {
+                budget.started = System.nanoTime();
+                budget.firstAdmission = admission;
+            }
+            Duration allowed = budget.acquire();
+            return once(prompt, prefix, allowed, budget.calls, budget.command);
+        } catch (AgentCallException failure) {
+            if (failure.kind() == AgentCallException.Kind.RATE_LIMIT) adaptive.throttled(admission, failure.retryAfter());
+            if (failure.fatal()) adaptive.abort(failure);
+            throw failure;
+        } finally {
+            adaptive.release(admission);
+        }
+    }
+
+    private static AdaptiveConcurrency.Workload workload(List<String> invocation, int stage, int inputBytes) {
+        boolean claude = Path.of(invocation.getFirst()).getFileName().toString().equals("claude");
+        String endpoint = claude ? System.getenv("ANTHROPIC_BASE_URL") : null;
+        String model = claude ? System.getenv("ANTHROPIC_MODEL") : null;
+        for (int i = 1; i < invocation.size(); i++) {
+            String argument = invocation.get(i);
+            if (argument.equals("--model") && i + 1 < invocation.size()) model = invocation.get(++i);
+            else if (argument.startsWith("--model=")) model = argument.substring("--model=".length());
+        }
+        boolean knownRoute = endpoint != null && !endpoint.isBlank() && model != null && !model.isBlank();
+        String route = invocation.getFirst() + "\0" + endpoint + "\0" + model + "\0" + stage + "\0";
+        String key = InputDocument.sha256((route + Integer.highestOneBit(inputBytes)).getBytes(StandardCharsets.UTF_8));
+        return new AdaptiveConcurrency.Workload(key, InputDocument.sha256(route.getBytes(StandardCharsets.UTF_8)), knownRoute);
     }
 
     private String once(String prompt, Path prefix, Duration allowed, int callNumber, List<String> command)
@@ -236,6 +315,12 @@ final class AgentRunner {
             kind = AgentCallException.Kind.CONFIGURATION;
         else if (text.matches("(?s).*(?:prompt is too long|maximum context length|context window exceeded|input too long).*"))
             kind = AgentCallException.Kind.INPUT_LIMIT;
+        else if (RATE_LIMIT.matcher(text).find()) {
+            var after = RETRY_AFTER.matcher(text);
+            Duration delay = after.find() ? Duration.ofSeconds(Long.parseLong(after.group(1))) : Duration.ZERO;
+            return new AgentCallException(AgentCallException.Kind.RATE_LIMIT,
+                    "Agent command was rate limited (exit code " + result.exitCode() + "); see stderr log", null, delay);
+        }
         else if (text.matches("(?s).*(?:\\b(?:http(?: status)?|status(?: code)?)[ :=]+(?:429|502|503|504)\\b|econnreset|eai_again|connection reset by peer|temporarily unavailable).*"))
             kind = AgentCallException.Kind.TRANSIENT;
         else kind = AgentCallException.Kind.COMMAND_EXIT;

@@ -89,6 +89,14 @@ final class EvidenceDeliveryTests {
                 "exact and differently spelled covered requests resolve to the original source for an unseen recipient");
         require(session.delivery(range, catalog).isEmpty() && session.coverage().contains("REUSED (already collected; no repository read)"),
                 "a recipient that already saw the covered source does not receive a duplicate alias");
+        String mixed = all + "\nREQUEST_KNOWLEDGE|Unavailable policy|Check whether the behavior is required";
+        session.load(mixed, "Read local behavior and policy");
+        require(session.deliverDecisive("verification/R1-1", mixed, EvidenceCatalog.empty()).equals(Set.of(document.id()))
+                && session.lastCoverage().contains("Unavailable evidence for this follow-up: REQUEST_KNOWLEDGE|unavailable policy"),
+                "deep follow-up delivers decisive local evidence and records the unavailable premise");
+        require(session.deliverDecisive("verification/R1-1", mixed, catalog).isEmpty()
+                && session.deliverScoped("focused/R1-1", mixed, EvidenceCatalog.empty()).isEmpty(),
+                "an unavailable request without new material stops, and scoped checks retain their full request gate");
         var scoped = new ScopedKnowledge(new InputDocument(Path.of(PATH), "hash", "# Main rules\nPrimary business knowledge."), Set.of(PATH));
         var protectedBundle = new EvidenceBundle(SCOPE, List.of("runner.py"), "", "", 0, scoped, catalog);
         var protectedSession = new EvidenceSession(protectedBundle, new SupplementalEvidence(git, new ProcessExecutor(), java.util.Map.of()), 0, 0);
@@ -254,7 +262,8 @@ final class EvidenceDeliveryTests {
                     """.formatted(source.id(), source.id());
             }
             String pendingReply = requestOnly ? request : "<verification><status>INSUFFICIENT_EVIDENCE</status>"
-                    + "<reason>Inspect the interface reference.</reason></verification>\n" + request;
+                    + "<reason>Inspect the interface reference.</reason>"
+                    + "<nextCheck>Does the pinned reference allow the change?</nextCheck></verification>\n" + request;
             String unavailableReply = mode.equals("repeat-unavailable") ? request
                     : "<verification><status>INSUFFICIENT_EVIDENCE</status><reason>The requested reference is unavailable.</reason></verification>";
             String script = """

@@ -93,7 +93,7 @@ final class ReviewGrounding {
             index.validateLocation(verdict.confirmed(), citations);
             validateSupport(support, index);
         }
-        return new Decision(verdict, relation, baseline, contract, citations, support, parsed.sharedCandidates());
+        return new Decision(verdict, relation, baseline, contract, citations, support);
     }
 
     static Decision scopedPublication(Decision grounded, OutputLanguage language) {
@@ -107,8 +107,7 @@ final class ReviewGrounding {
             String gap = language.text("The stated impact has no explicit supporting outcome citation. Check how far the effect proceeds.",
                     "所述影响缺少明确的结果证据，需核对该影响实际发生到哪一步。");
             var pending = new Verification(verdict.candidate(), Status.INSUFFICIENT_EVIDENCE, gap, null);
-            return new Decision(pending, grounded.relation(), grounded.baseline(), "", grounded.citations(),
-                    grounded.support(), grounded.sharedCandidates());
+            return new Decision(pending, grounded.relation(), grounded.baseline(), "", grounded.citations(), grounded.support());
         }
         if (finding.severity().compareTo(ReviewFinding.Severity.MEDIUM) >= 0
                 || premises.stream().anyMatch(premise -> premise.basis() == ReviewSupport.Basis.SEVERITY)) return grounded;
@@ -118,8 +117,7 @@ final class ReviewGrounding {
         String note = language.text("Severity limited to MEDIUM because material impact or scope was not separately supported.",
                 "缺少支持更高等级的实际影响或范围证据，严重性限定为中。");
         var revised = new Verification(verdict.candidate(), Status.CONFIRMED, verdict.reason() + " " + note, limited);
-        return new Decision(revised, grounded.relation(), grounded.baseline(), grounded.contract(), grounded.citations(),
-                grounded.support(), grounded.sharedCandidates());
+        return new Decision(revised, grounded.relation(), grounded.baseline(), grounded.contract(), grounded.citations(), grounded.support());
     }
 
     private static void validateSupport(ReviewSupport support, EvidenceIndex index) throws IOException {

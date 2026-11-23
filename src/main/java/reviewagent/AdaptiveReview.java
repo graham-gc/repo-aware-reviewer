@@ -28,15 +28,15 @@ final class AdaptiveReview {
     private static final Pattern INTERFACE_TYPE = Pattern.compile("\\binterface\\s+[\\w$]+");
     private static final Pattern SOURCE = Pattern.compile("(?i).+\\.(?:py|java|kt|go|rs|[cm]?[jt]sx?|rb|cs|c|cc|cpp|h|swift|php)");
 
-    enum Route { DOCUMENTATION, LOCAL, FOCUSED, DEEP }
+    enum Route { DOCUMENTATION, LOCAL, FOCUSED, REPOSITORY_RULES, DEEP }
 
     record Selection(Route route, EvidenceBundle evidence, String reason) {
         static Selection deep(String reason) { return new Selection(Route.DEEP, null, reason); }
         static Selection focused(String reason) { return new Selection(Route.FOCUSED, null, reason); }
     }
 
-    record Candidate(ReviewOutput.Decision decision, String requests, ReviewOutput.Decision citationRepair) {
-        Candidate(ReviewOutput.Decision decision, String requests) { this(decision, requests, null); }
+    record Candidate(ReviewOutput.Decision decision, String requests, ReviewOutput.Decision citationRepair, boolean unprovedConfirmation) {
+        Candidate(ReviewOutput.Decision decision, String requests) { this(decision, requests, null, false); }
     }
     record MisplacedCandidate(String id, Element decision) { }
     record Response(String summary, boolean deep, boolean requestedDeep, List<Candidate> candidates,
@@ -47,9 +47,13 @@ final class AdaptiveReview {
         if (options.reviewMode() == CliOptions.ReviewMode.DEEP) return Selection.deep("Requested deep review");
         if (!options.discoveryModels().isEmpty() || options.verificationEvidence() == CliOptions.VerificationEvidenceMode.FULL)
             return Selection.deep("Explicit deep-review evidence or reviewer configuration");
-        if (options.requirement() != null || options.knowledge() != null
-                || evidence.catalog().sources().stream().anyMatch(source -> source.role(EvidenceSource.Role.CONTRACT)))
-            return Selection.deep("Requirements, knowledge, or trusted repository review rules supplied");
+        if (options.requirement() != null || options.knowledge() != null)
+            return Selection.deep("External requirements or knowledge supplied");
+        if (evidence.catalog().sources().stream().anyMatch(source -> source.role(EvidenceSource.Role.CONTRACT))) {
+            if (options.reviewMode() == CliOptions.ReviewMode.SCOPED_RULES && !options.focusedJsonSchema())
+                return new Selection(Route.REPOSITORY_RULES, null, "Experimental scoped review with trusted repository rules");
+            return Selection.deep("Trusted repository review rules supplied");
+        }
         var documentation = allowNewRoutes ? DocumentationReview.select(evidence, options.maxEvidenceBytes()) : null;
         if (documentation != null) return new Selection(Route.DOCUMENTATION, documentation, "Complete Markdown diffs");
         boolean multipleFiles = evidence.changedFiles().size() != 1;
@@ -273,7 +277,7 @@ final class AdaptiveReview {
             var unresolved = new ReviewOutput.Decision(pending, ReviewOutput.Relation.UNRESOLVED, "", "", List.of());
             var repair = unsupported instanceof SourceQuotationException && verdict.status() == ReviewOutput.Status.CONFIRMED
                     ? parsed : null;
-            return new Candidate(unresolved, requests, repair);
+            return new Candidate(unresolved, requests, repair, verdict.status() == ReviewOutput.Status.CONFIRMED);
         }
     }
 

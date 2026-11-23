@@ -1,85 +1,47 @@
 package reviewagent;
 
-import java.util.LinkedHashSet;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Set;
 
-/** One independently confirmed verdict may cover duplicates of the same local failure. */
-record SharedAdjudication(List<String> candidateIds, ReviewFinding anchor,
-                          Set<EvidenceSource.Location> baselineEvidence, Set<EvidenceSource.Location> targetEvidence) {
-    static SharedAdjudication eligible(List<ReviewOutput.Decision> members, ReviewScope scope, EvidenceCatalog catalog) {
-        if (members.size() < 2 || members.stream().anyMatch(member -> !localFailure(member))) return null;
+/** Reuse publication tasks only for identical independently verified claims and proofs. */
+final class SharedAdjudication {
+    private SharedAdjudication() { }
 
-        var first = members.getFirst();
-        var anchor = first.verdict().confirmed();
-        var baseline = citedLocations(first, anchor, scope.baseCommit(), false, catalog);
-        var target = citedLocations(first, anchor, scope.targetCommit(), true, catalog);
-        for (var member : members.subList(1, members.size())) {
-            var finding = member.verdict().confirmed();
-            if (!sameLocation(anchor, finding)) return null;
-            baseline.retainAll(citedLocations(member, anchor, scope.baseCommit(), false, catalog));
-            target.retainAll(citedLocations(member, anchor, scope.targetCommit(), true, catalog));
+    private record Claim(String title, String path, int line, int endLine, String trigger, String impact,
+                         String evidence, String diffRelation) {
+        Claim(ReviewFinding finding) {
+            this(finding.title(), finding.path(), finding.line(), finding.endLine(), finding.trigger(), finding.impact(),
+                    finding.evidence(), finding.diffRelation());
         }
-        if (baseline.isEmpty() || target.isEmpty()) return null;
-        return new SharedAdjudication(members.stream().map(member -> member.verdict().candidate().id()).toList(),
-                anchor, Set.copyOf(baseline), Set.copyOf(target));
     }
 
-    boolean accepts(ReviewOutput.Decision decision, ReviewScope scope, EvidenceCatalog catalog) {
-        return localFailure(decision) && sameLocation(anchor, decision.verdict().confirmed())
-                && decision.sharedCandidates().size() == candidateIds.size()
-                && new LinkedHashSet<>(decision.sharedCandidates()).equals(new LinkedHashSet<>(candidateIds))
-                && overlaps(baselineEvidence, citedLocations(decision, anchor, scope.baseCommit(), false, catalog))
-                && overlaps(targetEvidence, citedLocations(decision, anchor, scope.targetCommit(), true, catalog));
+    private record Proof(Claim allegation, Claim confirmed, String reason, String baseline, String contract,
+                         Set<EvidenceIndex.Citation> citations, ReviewSupport support) {
+        Proof(ReviewOutput.Decision decision) {
+            this(new Claim(decision.verdict().candidate()), new Claim(decision.verdict().confirmed()),
+                    decision.verdict().reason(), decision.baseline(), decision.contract(), Set.copyOf(decision.citations()),
+                    decision.support());
+        }
     }
 
-    String instructions() {
-        return """
-                SHARING THIS PUBLICATION VERDICT
-                Compare each preliminary finding's trigger, observable result and justification. When all
-                listed candidates describe the same local failure, and one CONFIRMED verdict with the same
-                proven scope applies to every candidate, add this field directly inside <verification>:
-                <sharedCandidates>%s</sharedCandidates>
-                If preliminary severity differs, assign one severity based on the proved impact and preconditions.
-                Cite the shared baseline and target code evidence when it supports the group. Otherwise,
-                decide only the representative and omit this field. In particular, keep findings
-                with different affected inputs, failure behavior, or a different governing rule separate.
-                """.formatted(String.join(",", candidateIds));
+    static List<List<String>> equivalentGroups(List<ReviewOutput.Decision> members) {
+        if (members.size() < 2 || members.stream().anyMatch(member -> !introducedFailure(member))) return List.of();
+
+        var groups = new LinkedHashMap<Proof, List<String>>();
+        for (var member : members) {
+            // Severity is reassessed by the publication judge from the shared proof.
+            groups.computeIfAbsent(new Proof(member), unused -> new ArrayList<>()).add(member.verdict().candidate().id());
+        }
+        return groups.values().stream().filter(group -> group.size() > 1).map(List::copyOf).toList();
     }
 
-    private static boolean localFailure(ReviewOutput.Decision decision) {
+    private static boolean introducedFailure(ReviewOutput.Decision decision) {
         var verdict = decision.verdict();
-        if (verdict.status() != ReviewOutput.Status.CONFIRMED || verdict.validationFailed() || verdict.confirmed() == null
-                || decision.relation() != ReviewOutput.Relation.INTRODUCED
-                || decision.support().kind() != ReviewSupport.Kind.REACHABLE_FAILURE) return false;
-        String path = verdict.confirmed().path();
-        return !decision.support().premises().isEmpty() && decision.support().premises().stream().allMatch(
-                premise -> premise.basis() == ReviewSupport.Basis.IMPLEMENTATION && !premise.citations().isEmpty()
-                        && premise.citations().stream().allMatch(citation -> !citation.locations().isEmpty()
-                            && citation.locations().stream().allMatch(location -> location.path().equals(path))));
-    }
-
-    private static boolean sameLocation(ReviewFinding first, ReviewFinding second) {
-        return first.path().equals(second.path()) && first.line() == second.line() && first.endLine() == second.endLine();
-    }
-
-    private static Set<EvidenceSource.Location> citedLocations(ReviewOutput.Decision decision, ReviewFinding anchor,
-                                                              String revision, boolean requireAnchor, EvidenceCatalog catalog) {
-        Set<EvidenceSource.Location> locations = new LinkedHashSet<>();
-        for (var citation : decision.citations()) {
-            var source = catalog.source(citation.sourceId());
-            if (source == null || !source.authoritative() || !source.role(EvidenceSource.Role.IMPLEMENTATION)) continue;
-            citation.locations().stream()
-                    .filter(location -> location.path().equals(anchor.path()) && location.revision().equals(revision))
-                    .filter(location -> !requireAnchor || location.firstLine() <= anchor.line() && location.lastLine() >= anchor.endLine())
-                    .forEach(locations::add);
-        }
-        return locations;
-    }
-
-    private static boolean overlaps(Set<EvidenceSource.Location> shared, Set<EvidenceSource.Location> cited) {
-        return shared.stream().anyMatch(first -> cited.stream().anyMatch(second -> first.sourceId().equals(second.sourceId())
-                && first.side() == second.side()
-                && first.firstLine() <= second.lastLine() && second.firstLine() <= first.lastLine()));
+        return verdict.status() == ReviewOutput.Status.CONFIRMED && !verdict.validationFailed()
+                && verdict.confirmed() != null && decision.relation() == ReviewOutput.Relation.INTRODUCED
+                && decision.support().kind() == ReviewSupport.Kind.REACHABLE_FAILURE
+                && !decision.support().premises().isEmpty() && !decision.citations().isEmpty();
     }
 }

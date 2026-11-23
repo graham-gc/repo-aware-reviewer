@@ -34,6 +34,41 @@ final class EvidenceIndex {
     }
     String inventory() { return catalog.inventory(); }
     String numberedMarkdown(String markdown) { return catalog.numberedMarkdown(markdown); }
+
+    String verificationReferences(String path) {
+        var sources = catalog.sources();
+        var patches = sources.stream().filter(source -> source.role(EvidenceSource.Role.IMPLEMENTATION)
+                && source.role(EvidenceSource.Role.DIFF) && path.equals(source.path())).toList();
+        var baselinePaths = new java.util.HashSet<String>();
+        baselinePaths.add(path);
+        patches.forEach(source -> baselinePaths.add(source.baselinePath()));
+        var standalone = sources.stream().filter(source -> source.role(EvidenceSource.Role.IMPLEMENTATION)
+                && !source.role(EvidenceSource.Role.DIFF)).toList();
+        var baseline = standalone.stream().filter(source -> source.role(EvidenceSource.Role.BASELINE)
+                && baselinePaths.contains(source.path())).toList();
+        var hints = new StringBuilder();
+        appendReferences(hints, "DIFF", patches, EvidenceSource.Role.DIFF);
+        appendReferences(hints, "BASE_SOURCE", baseline, EvidenceSource.Role.BASELINE);
+        appendReferences(hints, "TARGET_SOURCE", standalone.stream()
+                .filter(source -> path.equals(source.path())).toList(), EvidenceSource.Role.TARGET);
+        appendReferences(hints, "CONTRACT", sources, EvidenceSource.Role.CONTRACT);
+        if (!hints.isEmpty() && sources.stream().noneMatch(EvidenceIndex::hasBaselineMaterial)) {
+            hints.append("No supplied block can provide baseline evidence for change attribution. ")
+                    .append("For INTRODUCED or EXPOSED_BY_CHANGE, request the necessary BASE_SOURCE excerpt before confirming. ")
+                    .append("UNMET_REQUIREMENT uses the applicable CONTRACT clause and target evidence.\n");
+        }
+        if (hints.isEmpty()) return "";
+        return "CITATION REFERENCES FOR THIS CANDIDATE\n"
+                + "Copy the reference before the parentheses into <source>. Inspect the actual lines and use the full inventory for related files.\n"
+                + hints + "\n";
+    }
+
+    private void appendReferences(StringBuilder hints, String label, List<EvidenceSource> sources, EvidenceSource.Role role) {
+        String references = sources.stream().filter(source -> source.role(role)).limit(5)
+                .map(catalog::reference).collect(java.util.stream.Collectors.joining(", "));
+        if (!references.isEmpty()) hints.append("- ").append(references).append(" (").append(label).append(")\n");
+    }
+
     String reference(String id) {
         EvidenceSource source = catalog.source(id);
         return source == null ? id : catalog.reference(source);
@@ -152,8 +187,7 @@ final class EvidenceIndex {
             EvidenceSource source = source(c);
             return source != null && source.role(EvidenceSource.Role.BASELINE) && source.role(EvidenceSource.Role.IMPLEMENTATION)
                     && (!source.role(EvidenceSource.Role.DIFF)
-                        || source.text().lines().anyMatch(line -> line.matches("new file mode [0-7]{6}"))
-                        || quotesDiffSide(c, source, '-'));
+                        || newFileDiff(source) || quotesDiffSide(c, source, '-'));
         });
     }
     boolean hasTarget(List<Citation> citations) {
@@ -172,10 +206,24 @@ final class EvidenceIndex {
     private static boolean quotesDiffSide(Citation citation, EvidenceSource source, char marker) {
         String quote = normalize(citation.quote());
         if (quote.length() < 12) return false;
+        return diffSide(source, marker).anyMatch(line -> line.contains(quote) || quote.contains(line));
+    }
+
+    private static boolean newFileDiff(EvidenceSource source) {
+        return source.text().lines().anyMatch(line -> line.matches("new file mode [0-7]{6}"));
+    }
+
+    private static boolean hasBaselineMaterial(EvidenceSource source) {
+        return source.role(EvidenceSource.Role.BASELINE) && source.role(EvidenceSource.Role.IMPLEMENTATION)
+                && (source.role(EvidenceSource.Role.DIFF)
+                        ? newFileDiff(source) || diffSide(source, '-').findAny().isPresent()
+                        : normalize(source.text()).length() >= 12);
+    }
+
+    private static java.util.stream.Stream<String> diffSide(EvidenceSource source, char marker) {
         return source.text().lines().filter(line -> line.length() > 1 && line.charAt(0) == marker
                         && !line.startsWith("" + marker + marker + marker))
-                .map(line -> normalize(line.substring(1))).filter(line -> line.length() >= 12)
-                .anyMatch(line -> line.contains(quote) || quote.contains(line));
+                .map(line -> normalize(line.substring(1))).filter(line -> line.length() >= 12);
     }
 
     void validateLocation(ReviewFinding finding, List<Citation> citations) throws IOException {

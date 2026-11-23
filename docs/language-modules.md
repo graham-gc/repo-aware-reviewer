@@ -67,7 +67,7 @@ To upgrade a profile, register a specialized provider with the same ID. A subcla
 
 | Capability | Module method | Framework behavior |
 | --- | --- | --- |
-| Identify source | `supports(path)` | Dispatches `symbol:` requests to one matching provider. |
+| Identify source | `supports(path)` | Dispatches `symbol:` and `declaration:` requests to one matching provider. |
 | Resolve shared source suffixes | `sourcePriority(path)` | Prioritizes explicit filenames over broad suffix matches; equal priorities remain ambiguous. |
 | Classify implementation evidence | `implementationEvidence(path)` | Separates documentation from implementation; explicit build filenames can override generic text classification. |
 | Declare capabilities | `capabilities()` | Records text, file-index, declaration and dependency support without inferring runtime validation. |
@@ -75,7 +75,8 @@ To upgrade a profile, register a specialized provider with the same ID. A subcla
 | Activate review guidance | `reviewAppliesTo(path)` | Separates source recognition from ambiguous/shared manifest ownership. |
 | Select manifests | `manifests(repository, revision, changedPaths)` | Loads eligible tracked manifests under the common byte budget. |
 | Supply navigation context | `context(...)` | Includes bounded package/file metadata and records inclusion. |
-| Locate declarations | `locate(source, symbol)` | Reads the selected pinned file and enforces the 200-line excerpt limit. |
+| Locate a symbol body | `locate(source, symbol)` | Identifies a source range in the pinned file. |
+| Locate exact declarations | `declarations(source, name)` | Identifies the matching declaration ranges in the pinned file. The collector supplies the complete result within its budget. |
 | Supply dependency/package evidence | `load(request, environment, maxBytes)` | Dispatches a generic `REQUEST_LANGUAGE` and enforces the shared request count and byte budget. |
 | Reuse parsing within a run | `open(environment)` | Creates a collector-local session returning `LanguageModule.Evidence` (Markdown and coverage status). Its default wraps `load` as `INCLUDED`; Go reuses workspace and module-graph metadata and distinguishes `INDEX_ONLY`. |
 | Explain source review | `instructions()` | Adds guidance only for relevant source/configuration modules, including mixed-language changes. |
@@ -94,10 +95,16 @@ The common protocol is:
 
 ```text
 REQUEST_FILE|target|src/file.ext|symbol:Name|Why the declaration is needed
+REQUEST_FILE|target|src/Worker.java|declaration:Worker#run|Check the declared overloads
+REQUEST_FILE|target|src/Worker.java|symbol:run;fallback=near:dispatch(|Read the deciding call inside run
 REQUEST_LANGUAGE|target|language-id|tracked/context/file|resource|selector|Why the evidence is needed
 ```
 
 `base` and `target` are resolved by the framework. The provider defines its resource and selector syntax. All file and language requests share `--max-supplemental-requests` and the supplemental byte budget across stages and rounds. Repeated requests are not retried merely because their reason changes. Unavailable material remains a recorded gap. Java retains `REQUEST_MAVEN` as a legacy alias.
+
+Java `declaration:Type` requests the type declaration within the file. `declaration:Type#method` requests the matching method signatures on the named type, including its overloads. Use enclosing type names when a simple type name is ambiguous. Go accepts `declaration:Name` and `declaration:Receiver.Method` with its lexical declaration locator. These excerpts provide syntax evidence. Verifying compilation or runtime behavior requires the applicable evidence.
+
+When a symbol body exceeds the line or byte budget, `fallback=near:name` reads a bounded context around a unique literal occurrence inside that symbol. Add an opening parenthesis to anchor to call-shaped syntax, as in `near:dispatch(`. Missing or ambiguous anchors remain unresolved. The excerpt keeps the same pinned file and original line numbers.
 
 ## Java caller evidence
 

@@ -40,7 +40,9 @@ public final class AllTests {
         AssessmentCorrectionTests.run();
         CitationRangeTests.run();
         ReviewTaskIsolationTests.run();
+        BatchedVerificationTests.run();
         AgentStabilityTests.run();
+        AdaptiveConcurrencyTests.run();
         VerificationEvidenceTests.run();
         EvidenceDeliveryTests.run();
         RepositoryNavigationTests.run();

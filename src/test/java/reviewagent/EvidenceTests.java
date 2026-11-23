@@ -8,6 +8,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Set;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -16,6 +17,7 @@ final class EvidenceTests {
         Path fixture = Files.createTempDirectory("review-evidence-test-");
         try {
             checkEvidence(fixture);
+            checkDecisiveEvidence(fixture);
             checkMultiAgentReview(fixture);
             checkRequestLimits(fixture);
             checkKnowledgeSnapshot(fixture);
@@ -27,6 +29,88 @@ final class EvidenceTests {
                 }
             }
         }
+    }
+
+    private static void checkDecisiveEvidence(Path fixture) throws Exception {
+        Path repo = Files.createDirectory(fixture.resolve("decisive-source"));
+        var executor = new ProcessExecutor();
+        git(executor, repo, "init", "-q");
+        String padding = "        count++;\n".repeat(210);
+        String workerSource = """
+                class Worker {
+                    record Task(String schema) {
+                        Task() { this(""); }
+                    }
+                    void dispatch(String model) {
+                        System.out.println(model);
+                    }
+                    void dispatch(String model, String schema) {
+                        System.out.println(model + schema);
+                    }
+                    void run() {
+                        int count = 0;
+                        int dispatch = 0;
+                """ + padding + """
+                        dispatch("PINNED_DECIDING_CALL", "schema");
+                    }
+                    void other() { dispatch("UNRELATED_CALL"); }
+                    void repeated() {
+                        int count = 0;
+                """ + padding + """
+                        dispatch("first");
+                        dispatch("second");
+                    }
+                }
+                class Other {
+                    void dispatch(int wrongOwner) {}
+                }
+                """;
+        Files.writeString(repo.resolve("Worker.java"), workerSource);
+        Files.writeString(repo.resolve("worker.go"), "package worker\ntype Policy struct { Enabled bool }\n");
+        git(executor, repo, "add", ".");
+        git(executor, repo, "commit", "-qm", "pinned evidence");
+        Files.writeString(repo.resolve("Worker.java"), workerSource.replace("PINNED_DECIDING_CALL", "DIRTY_WORKTREE"));
+        var git = new GitClient(repo, executor);
+        var options = CliOptions.parse(new String[]{"review", "--repo", repo.toString(), "--base", "HEAD", "--branch", "HEAD"});
+        ReviewScope scope = git.resolve(options);
+        var evidence = new EvidenceBundle(scope, List.of("Worker.java"), "", "", 12_000, null, EvidenceCatalog.empty());
+        var collector = new SupplementalEvidence(git, executor, java.util.Map.of());
+        String overload = "REQUEST_FILE|target|Worker.java|declaration:Worker#dispatch|Check all overload signatures";
+        String requests = """
+                REQUEST_FILE|target|Worker.java|declaration:Worker.Task|Read the record components
+                REQUEST_FILE|target|Worker.java|symbol:run;fallback=near:dispatch(|Read the deciding call in run
+                REQUEST_FILE|target|worker.go|declaration:Policy|Read the Go type declaration
+                """ + overload + "\n";
+        var session = new EvidenceSession(evidence, collector, 0, 0);
+        require(session.load(requests, "Decisive evidence"), "collect exact declarations and the smaller call excerpt");
+        Set<String> supplied = session.deliverScoped("candidate", requests, evidence.catalog());
+        var sources = session.catalog().select(supplied).sources();
+        require(sources.size() == 5 && sources.stream().allMatch(source -> source.revision().equals(scope.targetCommit()))
+                && sources.stream().anyMatch(source -> source.text().contains("record Task(String schema)"))
+                && sources.stream().anyMatch(source -> source.text().contains("type Policy struct"))
+                && sources.stream().filter(source -> source.text().contains("void dispatch(String model")).count() == 2
+                && sources.stream().anyMatch(source -> source.text().contains("PINNED_DECIDING_CALL"))
+                && sources.stream().noneMatch(source -> source.text().contains("UNRELATED_CALL")
+                    || source.text().contains("wrongOwner") || source.text().contains("DIRTY_WORKTREE")),
+                "the complete group contains the actual declarations, both overloads and a pinned in-symbol call");
+        require(session.coverage().contains("INCLUDED (fallback near:dispatch( within symbol:run"),
+                "coverage identifies the bounded call evidence and its fallback");
+
+        String ambiguous = "REQUEST_FILE|target|Worker.java|symbol:repeated;fallback=near:dispatch(|Find one deciding call";
+        String missing = "REQUEST_FILE|target|Worker.java|declaration:Worker#missing|Read the missing declaration";
+        String partial = overload + "\n" + ambiguous + "\n" + missing + "\n";
+        session.load(partial, "Lookups that cannot establish the requested scope");
+        require(session.deliverScoped("blocked", partial, evidence.catalog()).isEmpty()
+                && session.coverage().contains("Fallback reference matches more than once within the symbol")
+                && session.coverage().contains("Missing required evidence: REQUEST_FILE|target|Worker.java|declaration:Worker#missing"),
+                "a real overload cannot substitute for a missing declaration or an ambiguous anchor in the same group");
+
+        var oneOverloadBytes = sources.stream().filter(source -> source.text().contains("void dispatch(String model"))
+                .mapToInt(source -> EvidenceText.bytes(source.markdown())).max().orElseThrow();
+        var limited = new EvidenceBundle(scope, List.of("Worker.java"), "", "", oneOverloadBytes + 320, null, EvidenceCatalog.empty());
+        var rejected = collector.collect(limited, overload, 0, 0);
+        require(rejected.resolvedSources().isEmpty() && rejected.catalog().sources().isEmpty(),
+                "a byte budget that cannot hold the complete declaration set never returns just one overload");
     }
 
     private static void checkEvidence(Path fixture) throws Exception {
@@ -150,13 +234,14 @@ final class EvidenceTests {
     private static void checkMultiAgentReview(Path fixture) throws Exception {
         Path repo = fixture.resolve("repo");
         Path signals = Files.createDirectory(fixture.resolve("parallel-signals"));
-        var finding = new ReviewFinding("unused", "Confirmed defect", ReviewFinding.Severity.HIGH, "Z-small.java", 1, 1,
+        var finding = new ReviewFinding("unused", "Confirmed defect for ZSmall", ReviewFinding.Severity.HIGH, "Z-small.java", 1, 1,
                 "A concrete input", "The operation fails", "Z-small.java:1 shows the failure", "The diff introduces the failing operation");
         String first = ReviewOutput.findingXml(finding);
         String duplicate = first.replace("Confirmed defect", "Duplicate defect").replace("HIGH", "MEDIUM");
         String rejected = first.replace("Confirmed defect", "Rejected defect");
         String insufficient = first.replace("Confirmed defect", "Unproven defect");
-        String separate = first.replace("Confirmed defect", "Independent defect").replace("HIGH", "LOW");
+        String separate = first.replace("Confirmed defect", "Independent defect").replace("HIGH", "LOW")
+                .replace("A concrete input", "A different input").replace("The operation fails", "The operation returns the wrong value");
         String stub = """
                 set -eu
                 prompt=$(cat)
@@ -178,7 +263,8 @@ final class EvidenceTests {
                         printf '%s\\n' '</findings>' '```'
                         ;;
                     'You are the independent candidate verification'*|'You are the independent publication adjudication'*)
-                        case "$prompt" in
+                        finding=$(printf '%s\\n' "$prompt" | sed -n '/^CANDIDATE TO VERIFY$/{n;p;}')
+                        case "$finding" in
                             *'<finding id="R1-2">'*)
                                 printf '%s\\n' '```xml' '<verification><status>REJECTED</status><reason>An existing guard disproves the candidate.</reason></verification>' '```'
                                 ;;
@@ -186,7 +272,6 @@ final class EvidenceTests {
                                 printf '%s\\n' '```xml' '<verification><status>INSUFFICIENT_EVIDENCE</status><reason>The required library semantics are unavailable.</reason></verification>' '```'
                                 ;;
                             *)
-                                finding=$(printf '%s\\n' "$prompt" | sed -n '/^CANDIDATE TO VERIFY$/{n;p;}')
                                 printf '%s\\n' '```xml' '<verification><status>CONFIRMED</status><reason>Code supports the trigger and impact.</reason>' 'GROUNDING_XML' "$finding" '</verification>' '```'
                                 ;;
                         esac
@@ -217,6 +302,10 @@ final class EvidenceTests {
                 "a source gap remains visible without becoming a confirmed defect");
         require(coverage.contains("R1-2 — REJECTED") && coverage.contains("R2-2 — INSUFFICIENT_EVIDENCE")
                 && coverage.contains("Candidates: 5. Confirmed before deduplication: 3."), "individual verification outcomes are recorded");
+        require(List.of("R1-1", "R1-2", "R2-1", "R2-2", "R3-1").stream()
+                        .allMatch(id -> Files.exists(run.resolve("verification/" + id + "-response.md")))
+                && Files.readString(run.resolve("timings.md")).contains("|verification|5|0|"),
+                "each discovery candidate gets its own evidence-backed verdict");
         require(Files.exists(run.resolve("discovery/R3-response.md")) && Files.exists(run.resolve("verification/R3-1-response.md")),
                 "independent reviews and individual verification artifacts are saved");
 

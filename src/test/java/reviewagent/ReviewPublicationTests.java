@@ -19,6 +19,7 @@ final class ReviewPublicationTests {
 
     static void run() throws Exception {
         renderingAndProof();
+        publishFromVerification();
         workflow();
     }
 
@@ -51,27 +52,104 @@ final class ReviewPublicationTests {
                 + "<citations>" + citation(target, EXPRESSION) + citation(baseline, removed) + "</citations></verification>";
     }
 
+    private static String linkedProof(String trigger, String outcome) {
+        return "<triggerCitations>" + trigger + "</triggerCitations><outcomeCitations>" + outcome + "</outcomeCitations>";
+    }
+
     private static void renderingAndProof() throws Exception {
         var scope = new ReviewScope(ReviewScope.Mode.BRANCH, "base", "target", "base", "target", "base..target");
         var base = EvidenceSources.file("base", "calculator.py", 1, "calculator.py at base", BASE, scope, LanguageRegistry.defaults());
         var target = EvidenceSources.file("target", "calculator.py", 1, "calculator.py at target", TARGET, scope, LanguageRegistry.defaults());
-        var catalog = new EvidenceCatalog(List.of(base, target), true);
+        String callerSource = "def summarize(): return average([])";
+        var caller = EvidenceSources.file("target", "caller.py", 1, "caller.py at target", callerSource,
+                scope, LanguageRegistry.defaults());
+        var catalog = new EvidenceCatalog(List.of(base, target, caller), true);
         var evidence = new EvidenceBundle(scope, List.of("calculator.py"), "", "", 20_000, null, catalog);
         var index = new EvidenceIndex(catalog);
+        var prompts = new PromptFactory();
+        String directPrompt = prompts.verifyFinding(evidence, candidate("R1-1"), "", index,
+                PromptFactory.DECISIVE_FOLLOWUP, true);
+        require(directPrompt.contains("<triggerCitations><citation>")
+                && directPrompt.contains("<outcomeCitations><citation>")
+                && directPrompt.contains("<statement>Additional necessary implementation fact, if needed</statement>")
+                && directPrompt.contains("<citations><citation><source>SRC-18</source><lines>4:6</lines></citation></citations>")
+                && directPrompt.contains("<nextCheck>Does the caller return early on empty input?</nextCheck>")
+                && !directPrompt.contains("<statement>Concrete failure</statement>"),
+                "the primary XML example links citations to the finding instead of repeating its claims");
         String originalGuard = "    if not values:\n        return 0";
         var r1 = ReviewGrounding.verification(uncertain(target.id(), base.id(), originalGuard), candidate("R1-1"), evidence, index);
         var r2 = ReviewGrounding.verification(positive("R2-1", target.id(), base.id(), originalGuard), candidate("R2-1"), evidence, index);
         var r3 = ReviewGrounding.verification(positive("R3-1", target.id(), base.id(), originalGuard), candidate("R3-1"), evidence, index);
         require(r2.verdict().status() == ReviewOutput.Status.CONFIRMED, "a locally proved failure needs no external requirement document");
-        require(SharedAdjudication.eligible(List.of(r1, r2, r3), scope, catalog) == null,
+        String reference = citation(target.id(), EXPRESSION);
+        String linked = positive("R2-1", target.id(), base.id(), originalGuard)
+                .replace("</verification>", linkedProof(reference, reference) + "</verification>");
+        var direct = ReviewGrounding.verification(linked, candidate("R2-1"), evidence, index);
+        require(PublicationGate.ready(direct, index, scope.targetCommit())
+                && direct.verdict().confirmed().equals(r2.verdict().confirmed())
+                && direct.citations().equals(r2.citations()),
+                "cited trigger and outcome publish the same claim without duplicating its text");
+        var pending = ReviewGrounding.verification(linked.replace("</verification>",
+                "<nextCheck>Check whether an upstream guard blocks the trigger.</nextCheck></verification>"),
+                candidate("R2-1"), evidence, index);
+        require(!PublicationGate.ready(pending, index, scope.targetCommit()), "an explicit open check keeps adjudication");
+        try {
+            ReviewGrounding.verification(linked.replace("<outcomeCitations>" + reference,
+                    "<outcomeCitations>" + citation(base.id(), originalGuard)), candidate("R2-1"), evidence, index);
+            throw new AssertionError("Base-only evidence was accepted as proof of a target outcome");
+        } catch (ReviewDecisionException expected) {
+            require(expected.getMessage().contains("Unproved finding premise"), "linked proof retains target evidence validation");
+        }
+        require(SharedAdjudication.equivalentGroups(List.of(r1, r2, r3)).isEmpty(),
                 "an unresolved peer keeps publication decisions independent");
-        var shared = SharedAdjudication.eligible(List.of(r2, r3), scope, catalog);
-        require(shared != null && !shared.accepts(r2, scope, catalog),
-                "matching source locations still require an explicit independently validated shared verdict");
+        require(SharedAdjudication.equivalentGroups(List.of(r2, r3)).equals(List.of(List.of("R2-1", "R3-1"))),
+                "identical independently verified claims and proofs can share a publication task");
         var differentBaseline = ReviewGrounding.verification(positive("R3-1", target.id(), base.id(), "def average(values):"),
                 candidate("R3-1"), evidence, index);
-        require(SharedAdjudication.eligible(List.of(r2, differentBaseline), scope, catalog) == null,
-                "sharing needs matching cited baseline spans, even when the changed location and source block agree");
+        require(SharedAdjudication.equivalentGroups(List.of(r2, differentBaseline)).isEmpty(),
+                "different baseline proof stays independent even when the changed location and source block agree");
+        var callerProof = index.bind(List.of(new EvidenceIndex.Citation(caller.id(), callerSource)));
+        var premises = new ArrayList<>(r3.support().premises());
+        premises.add(new ReviewSupport.Premise("The caller passes an empty list.", ReviewSupport.Basis.IMPLEMENTATION, callerProof));
+        var citations = new ArrayList<>(r3.citations());
+        citations.addAll(callerProof);
+        var wider = new ReviewFinding("S1-1", "Empty summary fails", ReviewFinding.Severity.MEDIUM,
+                "calculator.py", 1, 2, "The caller requests an empty summary.",
+                "An exception prevents an empty summary.", "Compare the caller with the changed guard.", "The fix removed the guard.");
+        var crossFile = new ReviewOutput.Decision(new ReviewOutput.Verification(candidate("S1-1"),
+                ReviewOutput.Status.CONFIRMED, "The caller reaches the changed code.", wider),
+                r3.relation(), r3.baseline(), r3.contract(), List.copyOf(citations),
+                new ReviewSupport(r3.support().kind(), List.copyOf(premises)));
+        require(SharedAdjudication.equivalentGroups(List.of(r2, crossFile, r3)).equals(List.of(List.of("R2-1", "R3-1"))),
+                "a wider, cross-file claim is judged separately from identical proofs in the same candidate group");
+        var proved = withPinnedOutcome(r2, r2.verdict().confirmed(), r2.support().premises().getFirst().citations());
+        var reworded = new ReviewFinding("R3-1", "Averaging an empty list throws", ReviewFinding.Severity.MEDIUM,
+                "calculator.py", 2, 2, "An empty list reaches the division.", "The division raises ZeroDivisionError.",
+                "The denominator is zero.", "The early return was removed.");
+        var sameFailure = withPinnedOutcome(r3, reworded, r3.support().premises().getFirst().citations());
+        var differentOutcome = withPinnedOutcome(r3, reworded, callerProof);
+        require(PublicationGate.representative(List.of(proved, sameFailure), index, scope.targetCommit()) == proved,
+                "reconciliation plus pinned trigger and outcome can publish a paraphrased duplicate once");
+        var paraphrasedOutcome = new ReviewOutput.Decision(sameFailure.verdict(), sameFailure.relation(), sameFailure.baseline(),
+                sameFailure.contract(), sameFailure.citations(), new ReviewSupport(sameFailure.support().kind(),
+                sameFailure.support().premises().stream().map(premise -> premise.basis() == ReviewSupport.Basis.OUTCOME
+                        ? new ReviewSupport.Premise("The call ends with an exception for this input.", premise.basis(), premise.citations())
+                        : premise).toList()));
+        var sameGroup = List.of(List.of("R2-1", "R3-1"));
+        require(PublicationGate.ready(proved, index, scope.targetCommit())
+                && !PublicationGate.ready(paraphrasedOutcome, index, scope.targetCommit())
+                && PublicationGate.reportDecisions(List.of(proved, paraphrasedOutcome), sameGroup, index, scope.targetCommit())
+                        .equals(List.of(proved)),
+                "a weaker member requires adjudication while a grounded peer can publish and share the final entry");
+        require(PublicationGate.representative(List.of(proved, r1), index, scope.targetCommit()) == null
+                && PublicationGate.representative(List.of(proved, differentOutcome), index, scope.targetCommit()) == null
+                && PublicationGate.representative(List.of(r2), index, scope.targetCommit()) == null,
+                "unresolved peers, distinct outcome evidence and missing explicit outcome all retain independent adjudication");
+        var highImpact = new ReviewFinding(reworded.id(), reworded.title(), ReviewFinding.Severity.HIGH,
+                reworded.path(), reworded.line(), reworded.endLine(), reworded.trigger(), reworded.impact(),
+                reworded.evidence(), reworded.diffRelation());
+        require(PublicationGate.representative(List.of(withPinnedOutcome(r3, highImpact, callerProof)),
+                index, scope.targetCommit()) == null, "high impact still requires a publication verdict");
         var opposite = ReviewGrounding.verification(uncertain(target.id(), base.id(), originalGuard), candidate("R3-1"), evidence, index);
         var groups = List.of(List.of("R1-1", "R2-1", "R3-1"));
         var adjudicated = ReviewQuality.resolveConflicts(List.of(r2, opposite), groups, OutputLanguage.EN);
@@ -139,6 +217,106 @@ final class ReviewPublicationTests {
         require(longReason.length() < 2_000 && longReason.contains("…") && longReason.contains("coverage.md"), "the risk summary is bounded and links to complete reasoning");
     }
 
+    private static ReviewOutput.Decision withPinnedOutcome(ReviewOutput.Decision verified, ReviewFinding confirmed,
+                                                           List<EvidenceIndex.Citation> outcome) {
+        var premises = new ArrayList<>(verified.support().premises());
+        premises.add(new ReviewSupport.Premise(confirmed.trigger(), ReviewSupport.Basis.IMPLEMENTATION,
+                verified.support().premises().getFirst().citations()));
+        premises.add(new ReviewSupport.Premise(confirmed.impact(), ReviewSupport.Basis.OUTCOME, outcome));
+        return new ReviewOutput.Decision(new ReviewOutput.Verification(verified.verdict().candidate(),
+                ReviewOutput.Status.CONFIRMED, verified.verdict().reason(), confirmed), verified.relation(),
+                verified.baseline(), verified.contract(), verified.citations(),
+                new ReviewSupport(verified.support().kind(), List.copyOf(premises)));
+    }
+
+    private static void publishFromVerification() throws Exception {
+        Path fixture = Files.createTempDirectory("review-terminal-verdict-");
+        try {
+            Path repo = Files.createDirectory(fixture.resolve("repo"));
+            git(repo, "init", "-q");
+            Files.writeString(repo.resolve("calculator.py"), BASE);
+            git(repo, "add", "--all"); git(repo, "commit", "-qm", "base");
+            Files.writeString(repo.resolve("calculator.py"), TARGET);
+            git(repo, "add", "--all"); git(repo, "commit", "-qm", "target");
+            Path stub = fixture.resolve("agent.sh");
+            var command = List.of("review", "--repo", repo.toString(), "--review-mode", "deep", "--agent-command", "/bin/sh",
+                    "--agent-arg", stub.toString(), "--agent-arg", fixture.toString(), "--output-dir", fixture.resolve("runs").toString());
+            var options = options(command);
+            var executor = new ProcessExecutor();
+            var git = new GitClient(repo, executor);
+            var evidence = new EvidenceCollector(git).collect(git.resolve(options), null, null, CliOptions.KnowledgeMode.FULL, options.maxEvidenceBytes());
+            var diff = evidence.catalog().sources().stream().filter(source -> source.role(EvidenceSource.Role.DIFF)).findFirst().orElseThrow();
+            var target = evidence.catalog().sources().stream().filter(source -> source.path().equals("calculator.py")
+                    && !source.role(EvidenceSource.Role.DIFF) && source.role(EvidenceSource.Role.TARGET)).findFirst().orElseThrow();
+            var candidate = candidate("R1-1");
+            Path discoveries = fixture.resolve("findings.xml");
+            String finding = ReviewOutput.findingXml(candidate);
+            Files.writeString(discoveries, "<findings>" + finding + "</findings>");
+            String positive = positive(candidate.id(), target.id(), diff.id(), REMOVED);
+            String excerpt = citation(target.id(), EXPRESSION);
+            Path response = fixture.resolve("verification.xml");
+            Files.writeString(response, positive);
+            Files.writeString(fixture.resolve("adjudicated.xml"), positive);
+            Files.writeString(stub, """
+                    fixture=$1
+                    prompt=$(cat)
+                    case "$prompt" in
+                      'You are the discovery stage'*'Correctness and regressions.'*) cat "$fixture/findings.xml" ;;
+                      'You are the discovery stage'*) printf '<findings/>' ;;
+                      'You are the independent candidate verification stage'*)
+                        case "$prompt" in
+                          *'<trigger>average([None])</trigger>'*) printf '<verification><status>REJECTED</status><reason>The proposed condition is different.</reason></verification>' ;;
+                          *'<triggerCitations>'*'<outcomeCitations>'*) cat "$fixture/verification.xml" ;;
+                          *) exit 91 ;;
+                        esac ;;
+                      'You are the candidate reconciliation'*)
+                        printf '<candidate-groups><group><id>R1-1</id></group>'
+                        case "$prompt" in *'<finding id="R1-2">'*) printf '<group><id>R1-2</id></group>' ;; esac
+                        printf '</candidate-groups>' ;;
+                      'You are the independent publication adjudication'*) cat "$fixture/adjudicated.xml" ;;
+                      *) exit 92 ;;
+                    esac
+                    """);
+            var pipeline = new ReviewPipeline(executor, Clock.systemUTC());
+            Path legacy = pipeline.run(options);
+            require(Main.reviewExitCode(legacy) == 0 && Files.exists(legacy.resolve("adjudication/R1-1-response.md"))
+                    && Files.readString(legacy.resolve("timings.md")).contains("Actual launched attempts: 6\n"),
+                    "an otherwise valid legacy decision without linked trigger and outcome gets independent adjudication");
+            Files.writeString(response, positive.replace("</verification>", linkedProof(excerpt, excerpt) + "</verification>"));
+            Path direct = pipeline.run(options);
+            require(Main.reviewExitCode(direct) == 0 && !Files.exists(direct.resolve("adjudication"))
+                    && Files.readString(direct.resolve("timings.md")).contains("Actual launched attempts: 4\n")
+                    && Files.readString(direct.resolve("verified-findings.md")).equals(Files.readString(legacy.resolve("verified-findings.md"))),
+                    "default deep verification saves grouping and adjudication and preserves the published claim and citations");
+
+            Files.writeString(discoveries, "<findings>" + finding.repeat(2) + "</findings>");
+            Path duplicate = pipeline.run(options);
+            require(Main.reviewExitCode(duplicate) == 0 && !Files.exists(duplicate.resolve("adjudication"))
+                    && Files.readString(duplicate.resolve("timings.md")).contains("Actual launched attempts: 4\n")
+                    && Files.readString(duplicate.resolve("coverage.md")).contains("Verification reused for R1-2 from R1-1")
+                    && Files.readString(duplicate.resolve("verified-findings.md")).equals(Files.readString(direct.resolve("verified-findings.md"))),
+                    "two identical claims reuse validated source proof and publish a single finding without another request");
+
+            Files.writeString(discoveries, "<findings>" + finding
+                    + finding.replace("<trigger>average([])</trigger>", "<trigger>average([None])</trigger>") + "</findings>");
+            Path different = pipeline.run(options);
+            require(Main.reviewExitCode(different) == 0 && Files.exists(different.resolve("verification/R1-2-response.md"))
+                    && Files.readString(different.resolve("coverage.md")).contains("R1-2 — REJECTED"),
+                    "a different trigger at the same location with the same repository sources is independently verified");
+
+            Files.writeString(discoveries, "<findings>" + finding + "</findings>");
+            Files.writeString(response, Files.readString(response).replace("</verification>",
+                    "<nextCheck>Check whether a caller blocks empty input.</nextCheck></verification>"));
+            Path pending = pipeline.run(options);
+            require(Main.reviewExitCode(pending) == 0 && Files.exists(pending.resolve("adjudication/R1-1-response.md")),
+                    "a linked verdict with an open premise still runs adjudication");
+        } finally {
+            try (var paths = Files.walk(fixture)) {
+                for (Path path : paths.sorted(Comparator.reverseOrder()).toList()) Files.delete(path);
+            }
+        }
+    }
+
     private static void workflow() throws Exception {
         Path fixture = Files.createTempDirectory("review-publication-playground-");
         try {
@@ -166,6 +344,13 @@ final class ReviewPublicationTests {
                     + ReviewOutput.findingXml(different) + "</findings>");
             Files.writeString(fixture.resolve("duplicate-findings.xml"),
                     "<findings>" + ReviewOutput.findingXml(candidate("unused")).repeat(2) + "</findings>");
+            var nullFinding = new ReviewFinding("CANDIDATE_ID", "Null-input behavior changed", ReviewFinding.Severity.MEDIUM, "calculator.py", 2, 2,
+                    "average(None)", "The baseline returns 0; the target raises TypeError.", "Compare the pinned implementations.",
+                    "The diff removes the null-input guard.");
+            Files.writeString(fixture.resolve("null-finding.xml"), "<findings>" + ReviewOutput.findingXml(nullFinding) + "</findings>");
+            Files.writeString(fixture.resolve("null-positive.xml"), positive("CANDIDATE_ID", source.id(), diff.id(), REMOVED)
+                    .replace(ReviewOutput.findingXml(candidate("CANDIDATE_ID")), ReviewOutput.findingXml(nullFinding))
+                    .replace("The target divides by len(values), which is zero for an empty list.", "The target calls sum(None), which raises TypeError."));
             Files.writeString(fixture.resolve("report.txt"), String.join("\n\n", ReviewReport.headings(OutputLanguage.EN)) + "\n<finding-groups/>");
             Files.writeString(stub, """
                     set -eu
@@ -195,6 +380,7 @@ final class ReviewPublicationTests {
                       'You are the discovery stage'*)
                         if [ "$2" = alpha ]; then printf 'initial malformed discovery'
                         elif [ "$2" = beta ] && [ -f "$root/shared-publication" ]; then cat "$root/duplicate-findings.xml"
+                        elif [ "$2" = gamma ] && [ -f "$root/different-claim" ]; then cat "$root/null-finding.xml"
                         elif [ -f "$root/pending-only" ]; then
                           if [ "$2" = gamma ]; then printf '<findings><finding>'
                           else cat "$root/two-findings.xml"; fi
@@ -205,10 +391,9 @@ final class ReviewPublicationTests {
                           id=$(printf '%s\\n' "$candidate" | sed -n 's/.*<finding id="\\(R[123]-[12]\\)".*/\\1/p')
                           [ -n "$id" ] || exit 98
                           case "$id:$prompt" in
-                            *'SHARING THIS PUBLICATION VERDICT'*)
-                              ids=R3-1,R2-2,R2-1,R1-1
-                              if [ -f "$root/decline-sharing" ]; then ids=R1-1,R2-1; fi
-                              sed -e "s/CANDIDATE_ID/$id/g" -e "s|<verification>|<verification><sharedCandidates>$ids</sharedCandidates>|" "$root/positive.xml" ;;
+                            'R3-1:'*)
+                              if [ -f "$root/different-claim" ]; then sed "s/CANDIDATE_ID/$id/g" "$root/null-positive.xml"
+                              else sed "s/CANDIDATE_ID/$id/g" "$root/positive.xml"; fi ;;
                             'R2-2:You are the independent candidate verification'*)
                               sed -e "s/CANDIDATE_ID/$id/g" -e 's|<severity>MEDIUM</severity>|<severity>LOW</severity>|' "$root/positive.xml" ;;
                             *) sed "s/CANDIDATE_ID/$id/g" "$root/positive.xml";;
@@ -340,7 +525,7 @@ final class ReviewPublicationTests {
         String timings = Files.readString(shared.resolve("timings.md"));
         require(Main.reviewExitCode(shared) == 0 && report.contains("ZeroDivisionError")
                 && timings.contains("|adjudication|2|")
-                && coverage.contains("R1-1 covers R1-1, R2-1, R2-2, R3-1 in one validated publication verdict."),
+                && coverage.contains("R1-1 is the publication task for R1-1, R2-1, R2-2, R3-1"),
                 "four equivalent verifications with different provisional severities share one publication call plus grouping");
         require(List.of("R1-1", "R2-1", "R2-2", "R3-1").stream()
                 .allMatch(id -> coverage.contains(id + " — CONFIRMED")
@@ -355,23 +540,32 @@ final class ReviewPublicationTests {
                 && Files.readString(shared.resolve("report.md")).equals(report),
                 "resume revalidates and reuses a shared verdict without another model call");
 
-        Files.createFile(fixture.resolve("decline-sharing"));
-        Files.writeString(reportReply, headings + "\n<finding-groups><group><id>R1-1</id><id>R2-1</id><id>R2-2</id>"
-                + "<id>R3-1</id></group></finding-groups>");
+        Path automated = new ReviewPipeline(new ProcessExecutor(), Clock.systemUTC()).run(options(command,
+                "--output-dir", fixture.resolve("automatic").toString(),
+                "--review-parallelism", "auto", "--review-max-parallelism", "4"));
+        require(Main.reviewExitCode(automated) == 0
+                && Files.mismatch(shared.resolve("candidates.md"), automated.resolve("candidates.md")) == -1
+                && Files.mismatch(shared.resolve("evidence.md"), automated.resolve("evidence.md")) == -1
+                && Files.mismatch(shared.resolve("report.md"), automated.resolve("report.md")) == -1
+                && Files.readString(automated.resolve("timings.md")).contains("COLD_START (maximum 4)"),
+                "auto scheduling preserves identical discovery, evidence and publication for fixed replies");
+
+        Files.createFile(fixture.resolve("different-claim"));
         Path separate = new ReviewPipeline(new ProcessExecutor(), Clock.systemUTC()).run(options);
         require(Main.reviewExitCode(separate) == 0
-                && Files.readString(separate.resolve("timings.md")).contains("|adjudication|5|")
+                && Files.readString(separate.resolve("timings.md")).contains("|adjudication|3|")
                 && Files.exists(separate.resolve("adjudication/R3-1-prompt.md"))
-                && !Files.readString(separate.resolve("coverage.md")).contains("Shared publication adjudication"),
-                "partial coverage falls back to the remaining individual adjudications without rerunning the representative");
+                && Files.readString(separate.resolve("coverage.md")).contains("R1-1 is the publication task for R1-1, R2-1, R2-2 ("),
+                "the exact duplicates share one task and the neighboring claim is adjudicated in its own task");
         String separateReport = Files.readString(separate.resolve("report.md"));
-        require(separateReport.lines().filter(line -> line.startsWith("### [MEDIUM]")).count() == 1
+        require(separateReport.lines().filter(line -> line.startsWith("### [MEDIUM]")).count() == 2
+                && separateReport.contains("average([])") && separateReport.contains("average(None)")
                 && separateReport.contains("`calculator.py:2")
                 && !Files.exists(separate.resolve("report-prompt.md")),
-                "local report lists one published defect for the group and preserves grounded source locations");
+                "the report shows both distinct defects once, with their grounded source locations");
 
         Files.delete(fixture.resolve("shared-publication"));
-        Files.delete(fixture.resolve("decline-sharing"));
+        Files.delete(fixture.resolve("different-claim"));
         Files.writeString(reportReply, headings + "\n<finding-groups/>");
     }
 
