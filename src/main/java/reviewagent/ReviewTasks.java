@@ -22,6 +22,7 @@ final class ReviewTasks {
         default String corrected(String response, IOException failure) throws IOException { return response; }
         default String correctionInstructions(IOException failure) { return ""; }
         default boolean allowOutputCorrection() { return true; }
+        default boolean restartOnInvalidReply(String response, IOException failure) { return false; }
 
         static Validator singleResponse(Validator validator) {
             return new Validator() {
@@ -161,7 +162,7 @@ final class ReviewTasks {
                 if (globalFailure.get()) return blocked(job);
                 try {
                     state(directory, task, "RUNNING", "");
-                    String response = invoke(task, agent, directory, resume);
+                    String response = invoke(task, agent, budget, directory, resume);
                     Files.deleteIfExists(directory.resolve(task.id() + "-error.txt"));
                     state(directory, task, "SUCCEEDED", "");
                     agent.timings().task(budget.calls() == 0, true);
@@ -211,9 +212,10 @@ final class ReviewTasks {
                 + FailureDiagnostics.properties(cause, failure));
     }
 
-    private static String invoke(Task task, AgentRunner agent, Path directory, boolean resume)
+    private static String invoke(Task task, AgentRunner agent, AgentRunner.TaskScope budget, Path directory, boolean resume)
             throws IOException, InterruptedException {
         Path responseFile = directory.resolve(task.id() + "-response.md");
+        Path restartFile = directory.resolve(task.id() + "-restart-response.md");
         Path repairFile = directory.resolve(task.id() + "-repair-response.md");
         Path quoteRepairFile = directory.resolve(task.id() + "-quote-repair-response.md");
         Path decisionRepairFile = directory.resolve(task.id() + "-decision-repair-response.md");
@@ -224,7 +226,7 @@ final class ReviewTasks {
                 && Files.readString(promptFile, StandardCharsets.UTF_8).equals(task.prompt());
         // A valid old verdict is not reusable when its instructions or supplied evidence have changed.
         if (resume && samePrompt) {
-            for (Path saved : List.of(responseFile, repairFile, quoteRepairFile, decisionRepairFile)) {
+            for (Path saved : List.of(responseFile, restartFile, repairFile, quoteRepairFile, decisionRepairFile)) {
                 if (!Files.isRegularFile(saved)) {
                     continue;
                 }
@@ -255,7 +257,7 @@ final class ReviewTasks {
             // Invalidate before recording the new prompt: an interrupted invocation must not associate an
             // old response (or repair) with the new evidence on the next resume.
             if (!samePrompt) {
-                for (Path old : List.of(responseFile, repairFile, quoteRepairFile, decisionRepairFile, promptFile)) {
+                for (Path old : List.of(responseFile, restartFile, repairFile, quoteRepairFile, decisionRepairFile, promptFile)) {
                     if (Files.isRegularFile(old)) Files.move(old,
                             old.resolveSibling(old.getFileName().toString().replace(task.id() + "-", task.id() + "-superseded-" + java.util.UUID.randomUUID() + "-")),
                             java.nio.file.StandardCopyOption.REPLACE_EXISTING);
@@ -271,6 +273,13 @@ final class ReviewTasks {
                 validate(task, response, directory, agent.timings(), responseFromCache);
             } catch (IOException invalid) {
                 if (invalid instanceof ArtifactIOException) throw invalid;
+                if (!responseFromCache && budget.canRestart() && task.validator().restartOnInvalidReply(response, invalid)
+                        && attempted.add("restart")) {
+                    // There is no review to fix. Start a fresh request without feeding the invalid text back to the model.
+                    response = agent.invoke(task.prompt(), directory.resolve(task.id() + "-restart"));
+                    AtomicFiles.write(restartFile, response);
+                    continue;
+                }
                 boolean quotation = invalid instanceof SourceQuotationException;
                 boolean decision = invalid instanceof ReviewDecisionException;
                 String kind = quotation ? "quote-repair" : decision ? "decision-repair" : "repair";

@@ -95,6 +95,11 @@ final class AgentRunner {
             }
         }
         int calls() { return taskBudget.get().calls; }
+        boolean canRestart() {
+            var budget = taskBudget.get();
+            return budget.calls < policy.maxCalls() && System.nanoTime() - budget.started < policy.taskTimeout().toNanos()
+                    && executor.cleanupStatus().equals("OBSERVED_PROCESSES_TERMINATED");
+        }
         void accepted() { accepted = true; }
     }
     TaskScope task(String model, String schema, int stage, String prompt, AdaptiveConcurrency admission,

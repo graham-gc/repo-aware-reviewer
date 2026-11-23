@@ -6,11 +6,34 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /** Restart only the initial reviewer whose material check identified a decisive gap. */
 final class InitialDiscovery {
+    private static final Pattern TOOL_REPLY = Pattern.compile(
+            "(?i)<tool_(?:call|use)(?=[\\s/>])|\"type\"\\s*:\\s*\"(?:tool_use|function_call)\"|\"tool_calls\"\\s*:\\s*\\[");
+
     private InitialDiscovery() { }
+
+    static ReviewTasks.Validator validator(String id, List<String> changedFiles) {
+        return new ReviewTasks.Validator() {
+            private boolean restarted;
+
+            @Override public void validate(String response) throws IOException {
+                ReviewOutput.initialDiscovery(response, id, changedFiles);
+            }
+
+            @Override public boolean allowOutputCorrection() { return false; }
+
+            @Override public boolean restartOnInvalidReply(String response, IOException failure) {
+                if (restarted || !ReviewXml.missingResponseBlock(failure, "findings") || !TOOL_REPLY.matcher(response).find())
+                    return false;
+                restarted = true;
+                return true;
+            }
+        };
+    }
 
     record Request(ReviewTasks.Task task, EvidenceBundle view, EvidenceCatalog partition,
                    DiscoveryEvidence.Focus focus, boolean summarize) { }

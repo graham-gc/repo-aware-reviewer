@@ -443,8 +443,7 @@ final class ReviewPipeline {
                     if (!saved.equals(prompt) && (view != batch && saved.equals(prompts.independentDiscovery(batch, focus,
                             requestSummary)) || requestSummary && saved.equals(prompts.independentDiscovery(batch, focus, false)))) prompt = saved;
                 }
-                var task = new ReviewTasks.Task(id, prompt,
-                        ReviewTasks.Validator.singleResponse(reply -> ReviewOutput.initialDiscovery(reply, id, batch.changedFiles())), model);
+                var task = new ReviewTasks.Task(id, prompt, InitialDiscovery.validator(id, batch.changedFiles()), model);
                 tasks.add(new InitialDiscovery.Request(task, view, batch.catalog(), focus, requestSummary));
             }
         }

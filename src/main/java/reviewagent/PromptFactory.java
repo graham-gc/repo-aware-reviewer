@@ -127,6 +127,12 @@ final class PromptFactory {
         return """
                 You are the discovery stage of a read-only code review.
 
+                TOOL BOUNDARY
+                Work only from the evidence in this request. You have no tools. Do not call tools, emit tool calls,
+                or produce shell or Git commands. Ask the CLI for missing sources using only the evidence request
+                protocol below. An empty findings result without an evidence-needed notice means you completed the
+                assigned review and found no candidates.
+
                 REQUIRED RESPONSE
                 Start with exactly one fenced XML block rooted at <findings>. Close every element.
                 If there are no candidates yet, return the fenced <findings/> block even when

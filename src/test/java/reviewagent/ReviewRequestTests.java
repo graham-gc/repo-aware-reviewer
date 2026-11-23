@@ -345,6 +345,54 @@ final class ReviewRequestTests {
                 && Files.readString(repeated.resolve("review-status.md")).contains("evidence already supplied")
                 && !Files.exists(repeated.resolve("discovery/round-3")),
                 "a repeated material request without new evidence stops the affected reviewer");
+
+        Files.writeString(root.resolve("tool-reply.txt"), "]<]provider[>[<tool_call>\n<invoke>UNTRUSTED_TOOL_REPLY</invoke>\n</tool_call>\n");
+        Files.writeString(model, """
+                fixture=$1
+                prompt=$(cat)
+                case "$prompt" in
+                  *UNTRUSTED_TOOL_REPLY*) exit 90 ;;
+                  'You are the discovery stage'*'Boundary conditions and error handling.'*)
+                    case "$prompt" in *'You have no tools. Do not call tools, emit tool calls,'*) ;; *) exit 91 ;; esac
+                    if [ -f "$fixture/always-tool" ] || [ ! -f "$fixture/returned-tool" ]; then
+                      touch "$fixture/returned-tool"
+                      cat "$fixture/tool-reply.txt"
+                    else
+                      case "$prompt" in
+                        *'PINNED_PREFLIGHT_GUARD'*) printf '<findings/>' ;;
+                        *) printf '%s\\n' '<findings/>' 'DISCOVERY_NEEDS_EVIDENCE|Does the worker guard reject the input?' \\
+                           'REQUEST_FILE|target|policy/guard.txt|all|Read the pinned guard' ;;
+                      esac
+                    fi ;;
+                  'You are the discovery stage'*) printf '<findings/>' ;;
+                  *) exit 92 ;;
+                esac
+                """);
+        var recovered = pipeline.run(options(false, "--review-mode", "deep"));
+        Path first = recovered.resolve("discovery");
+        check(Main.reviewExitCode(recovered) == 0 && calls(recovered, 6)
+                && Files.readString(first.resolve("R3-stdout.log")).contains("UNTRUSTED_TOOL_REPLY")
+                && Files.readString(first.resolve("R3-restart-attempts/attempt-0001/call-prompt.md"))
+                        .equals(Files.readString(first.resolve("R3-prompt.md")))
+                && Files.readString(first.resolve("R3-response.md")).contains("DISCOVERY_NEEDS_EVIDENCE|")
+                && Files.readString(first.resolve("round-2/R3-prompt.md")).contains("PINNED_PREFLIGHT_GUARD")
+                && !Files.exists(first.resolve("R1-restart-attempts")),
+                "only the role that returned a tool reply restarts, then uses the normal pinned evidence handoff");
+        pipeline.run(options(false, "--review-mode", "deep", "--resume", recovered.toString()));
+        check(Main.reviewExitCode(recovered) == 0 && calls(recovered, 0),
+                "a validated restarted reviewer and its evidence round are reusable on resume");
+
+        Files.createFile(root.resolve("always-tool"));
+        var persistent = review("--review-mode", "deep");
+        check(Main.reviewExitCode(persistent) == 3 && calls(persistent, 5)
+                && Files.readString(persistent.resolve("review-status.md")).contains("discovery/R3 [INVALID_OUTPUT]")
+                && Files.isRegularFile(persistent.resolve("discovery/R3-restart-response.md")),
+                "a repeated tool reply gets one restart and leaves that reviewer incomplete");
+        var atBudget = review("--review-mode", "deep", "--agent-max-calls-per-task", "1");
+        check(Main.reviewExitCode(atBudget) == 3 && calls(atBudget, 4)
+                && Files.readString(atBudget.resolve("review-status.md")).contains("discovery/R3 [INVALID_OUTPUT]")
+                && !Files.exists(atBudget.resolve("discovery/R3-restart-attempts")),
+                "the restart uses the original task call budget");
     }
 
     private void discoveryHandoff() throws Exception {
