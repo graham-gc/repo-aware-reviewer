@@ -22,6 +22,13 @@ final class ReviewTasks {
         default String corrected(String response, IOException failure) throws IOException { return response; }
         default String correctionInstructions(IOException failure) { return ""; }
         default boolean allowOutputCorrection() { return true; }
+
+        static Validator singleResponse(Validator validator) {
+            return new Validator() {
+                @Override public void validate(String response) throws IOException { validator.validate(response); }
+                @Override public boolean allowOutputCorrection() { return false; }
+            };
+        }
     }
 
     record Task(String id, String prompt, Validator validator, String model, String schema) {
@@ -130,7 +137,8 @@ final class ReviewTasks {
         Path directory = job.directory();
         try {
             if (globalFailure.get()) return blocked(job);
-            try (var budget = agent.task(task.model(), task.schema(), stage, task.prompt(), admission)) {
+            try (var budget = agent.task(task.model(), task.schema(), stage, task.prompt(), admission,
+                    task.validator().allowOutputCorrection())) {
                 if (globalFailure.get()) return blocked(job);
                 try {
                     state(directory, task, "RUNNING", "");
@@ -219,6 +227,9 @@ final class ReviewTasks {
                 }
                 return cached;
             }
+            // An explicit resume may execute a failed task again. It still uses the original prompt
+            // and the same validation policy, without turning a cached failure into a repair request.
+            if (!task.validator().allowOutputCorrection()) response = null;
         }
         boolean responseFromCache = response != null;
         if (response == null) {
@@ -274,18 +285,7 @@ final class ReviewTasks {
                             + "The previous response failed structural validation. Correct only its serialization and comply with the response schema above. "
                             + "Preserve the evidence-based decisions and reasoning. Do not invent facts or promote an unconfirmed finding. ";
                 String repairPrompt;
-                if (ReviewXml.missingResponseBlock(invalid, "findings")) {
-                    repairPrompt = retryDiscoveryPrompt(task.prompt());
-                } else if (ReviewXml.missingResponseBlock(invalid, "documentation-review")) {
-                    repairPrompt = """
-                            DOCUMENTATION RESPONSE RECOVERY
-                            Review the supplied diff again. Start with one complete <documentation-review> XML
-                            document. Include a summary and use <doc-findings/> if the diff supports no finding.
-                            Do not call or request any tools.
-
-                            ORIGINAL REVIEW
-                            """ + task.prompt();
-                } else if (ReviewXml.missingResponseBlock(invalid, "adaptive-review")) {
+                if (ReviewXml.missingResponseBlock(invalid, "adaptive-review")) {
                     repairPrompt = """
                             ADAPTIVE RESPONSE RECOVERY
                             Review the assigned scope again using the supplied Git evidence.
@@ -306,18 +306,6 @@ final class ReviewTasks {
             AtomicFiles.write(responseFile, response);
             return response;
         }
-    }
-
-    private static String retryDiscoveryPrompt(String originalPrompt) {
-        return """
-                DISCOVERY RESPONSE RECOVERY
-                Run the original review again using the evidence below. Start the reply with exactly one complete
-                fenced XML block with the root <findings>. Close every element. If the review yields no candidates,
-                return <findings/> in that block. Put any necessary evidence requests or review notes after the block,
-                using the original request syntax. Include any evidence-supported candidates you find.
-
-                ORIGINAL REVIEW
-                """ + originalPrompt;
     }
 
     private static void validate(Task task, String response, Path directory, ReviewTimings timings, boolean cached)

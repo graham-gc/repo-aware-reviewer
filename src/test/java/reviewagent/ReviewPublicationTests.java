@@ -280,19 +280,19 @@ final class ReviewPublicationTests {
             var pipeline = new ReviewPipeline(executor, Clock.systemUTC());
             Path legacy = pipeline.run(options);
             require(Main.reviewExitCode(legacy) == 0 && Files.exists(legacy.resolve("adjudication/R1-1-response.md"))
-                    && Files.readString(legacy.resolve("timings.md")).contains("Actual launched attempts: 6\n"),
+                    && Files.readString(legacy.resolve("timings.md")).contains("Actual launched attempts: 7\n"),
                     "an otherwise valid legacy decision without linked trigger and outcome gets independent adjudication");
             Files.writeString(response, positive.replace("</verification>", linkedProof(excerpt, excerpt) + "</verification>"));
             Path direct = pipeline.run(options);
             require(Main.reviewExitCode(direct) == 0 && !Files.exists(direct.resolve("adjudication"))
-                    && Files.readString(direct.resolve("timings.md")).contains("Actual launched attempts: 4\n")
+                    && Files.readString(direct.resolve("timings.md")).contains("Actual launched attempts: 5\n")
                     && Files.readString(direct.resolve("verified-findings.md")).equals(Files.readString(legacy.resolve("verified-findings.md"))),
                     "default deep verification saves grouping and adjudication and preserves the published claim and citations");
 
             Files.writeString(discoveries, "<findings>" + finding.repeat(2) + "</findings>");
             Path duplicate = pipeline.run(options);
             require(Main.reviewExitCode(duplicate) == 0 && !Files.exists(duplicate.resolve("adjudication"))
-                    && Files.readString(duplicate.resolve("timings.md")).contains("Actual launched attempts: 4\n")
+                    && Files.readString(duplicate.resolve("timings.md")).contains("Actual launched attempts: 5\n")
                     && Files.readString(duplicate.resolve("coverage.md")).contains("Verification reused for R1-2 from R1-1")
                     && Files.readString(duplicate.resolve("verified-findings.md")).equals(Files.readString(direct.resolve("verified-findings.md"))),
                     "two identical claims reuse validated source proof and publish a single finding without another request");
@@ -357,34 +357,37 @@ final class ReviewPublicationTests {
                     root=$(dirname "$0")
                     prompt=$(cat)
                     case "$prompt" in
-                      'You are the discovery stage'*|'DISCOVERY RESPONSE RECOVERY'*)
+                      'You are the discovery stage'*)
                         [ "$#" -eq 2 ] && [ "$1" = '--model' ] || exit 93
                         case "$prompt" in
                           *'Correctness and regressions.'*) [ "$2" = alpha ] || exit 94 ;;
-                          *'Requirements and business contracts.'*) [ "$2" = beta ] || exit 95 ;;
-                          *'Boundary conditions and security.'*) [ "$2" = gamma ] || exit 96 ;;
+                          *'Business contracts and compatibility.'*) [ "$2" = beta ] || exit 95 ;;
+                          *'Requirements compliance.'*) [ "$2" = beta ] || exit 95 ;;
+                          *'Boundary conditions and error handling.'*|*'Security and isolation.'*) [ "$2" = gamma ] || exit 96 ;;
+                          *) exit 93 ;;
                         esac ;;
                       *) [ "$#" -eq 1 ] && [ "$1" = '--model=judge' ] || exit 97 ;;
                     esac
                     printf 'call\\n' >> "$root/calls"
                     case "$prompt" in
-                      'DISCOVERY RESPONSE RECOVERY'*)
-                        if [ "$2" = gamma ] && [ -f "$root/fail-discovery" ]; then printf 'Still no findings block.'
-                        elif [ "$2" = gamma ] && [ -f "$root/empty-discovery" ]; then printf '<findings/>'
-                        else
-                          cat "$root/discovery.xml"
-                          case "$prompt" in
-                            *'CHANGE_SUMMARY|'*) printf '\\nCHANGE_SUMMARY|The empty-input guard is removed.\\n' ;;
-                          esac
-                        fi ;;
                       'You are the discovery stage'*)
-                        if [ "$2" = alpha ]; then printf 'initial malformed discovery'
+                        case "$prompt" in
+                          *'Requirements compliance.'*|*'Security and isolation.'*) printf '<findings/>'; exit ;;
+                        esac
+                        if [ "$2" = gamma ] && [ -f "$root/fail-discovery" ]; then
+                          printf 'REQUEST_FILE|target|calculator.py|all|Check the input guard.\n'
+                        elif [ "$2" = gamma ] && [ -f "$root/empty-discovery" ]; then printf '<findings/>'
                         elif [ "$2" = beta ] && [ -f "$root/shared-publication" ]; then cat "$root/duplicate-findings.xml"
                         elif [ "$2" = gamma ] && [ -f "$root/different-claim" ]; then cat "$root/null-finding.xml"
                         elif [ -f "$root/pending-only" ]; then
-                          if [ "$2" = gamma ]; then printf '<findings><finding>'
-                          else cat "$root/two-findings.xml"; fi
-                        else cat "$root/discovery.xml"; fi ;;
+                          if [ "$2" = beta ]; then cat "$root/two-findings.xml"
+                          else cat "$root/discovery.xml"; fi
+                        else
+                          cat "$root/discovery.xml"
+                          case "$prompt" in
+                            *'CHANGE_SUMMARY|'*) printf '\nCHANGE_SUMMARY|The empty-input guard is removed.\n' ;;
+                          esac
+                        fi ;;
                       'You are the independent candidate verification'*|'You are the independent publication adjudication'*)
                         candidate=$(printf '%s\\n' "$prompt" | sed -n '/^CANDIDATE TO VERIFY$/{n;p;}')
                         if [ -f "$root/shared-publication" ]; then
@@ -437,9 +440,9 @@ final class ReviewPublicationTests {
                     && report.contains("The empty-input guard is removed.")
                     && !Files.exists(run.resolve("report-prompt.md")),
                     "the full pipeline surfaces the playground compatibility risk in its main findings");
-            require(Files.isRegularFile(run.resolve("discovery/R1-repair-response.md"))
+            require(!Files.exists(run.resolve("discovery/R1-repair-response.md"))
                     && Files.readString(run.resolve("scope.md")).contains("Discovery models (R1, R2, R3): alpha, beta, gamma"),
-                    "discovery model assignment is recorded and stays in effect during format correction");
+                    "discovery model assignment is recorded for the original request");
             require(Files.readString(run.resolve("coverage.md")).contains("R2-1 — DISPUTED")
                     && Files.readString(run.resolve("review-status.md")).contains("Status: COMPLETE"),
                     "audit retains the disagreement and complete describes execution, not approval");
@@ -582,19 +585,15 @@ final class ReviewPublicationTests {
                 .allMatch(id -> coverage.contains(id + " — INSUFFICIENT_EVIDENCE"))
                 && !Files.exists(recovered.resolve("adjudication/R1-1-prompt.md")),
                 "grouping preserves each grounded verdict without another candidate adjudication");
-        String retry = Files.readString(recovered.resolve("discovery/R3-repair-prompt.md"));
-        require(retry.startsWith("DISCOVERY RESPONSE RECOVERY") && retry.contains("Boundary conditions and security.")
-                && retry.contains("<findings/>") && !retry.contains("PREVIOUS RESPONSE")
-                && Files.readString(recovered.resolve("discovery/R3-validation.log")).contains("MISSING_RESPONSE_BLOCK"),
-                "truncated discovery gets one fresh structure-first request with the original focus and audit record");
-
         Files.createFile(fixture.resolve("fail-discovery"));
         Path incomplete = new ReviewPipeline(new ProcessExecutor(), Clock.systemUTC()).run(options);
         require(Main.reviewExitCode(incomplete) == 3
                 && Files.readString(incomplete.resolve("review-status.md")).contains("discovery/R3 [INVALID_OUTPUT]")
-                && Files.readString(incomplete.resolve("discovery/R3-validation.log")).split("event=VALIDATION_REJECTED", -1).length == 3
+                && Files.readString(incomplete.resolve("discovery/R3-validation.log")).contains("MISSING_RESPONSE_BLOCK")
+                && Files.readString(incomplete.resolve("discovery/R3-validation.log")).split("event=VALIDATION_REJECTED", -1).length == 2
+                && !Files.exists(incomplete.resolve("discovery/R3-repair-prompt.md"))
                 && Files.readString(incomplete.resolve("report.md")).contains("R1-1, R2-1"),
-                "two missing blocks leave the review incomplete while valid peers remain grouped");
+                "a request-only discovery response fails once without discarding valid peers or calling for format repair");
         Files.delete(fixture.resolve("fail-discovery"));
         Files.createFile(fixture.resolve("empty-discovery"));
         new ReviewPipeline(new ProcessExecutor(), Clock.systemUTC()).run(options(command, "--resume", incomplete.toString()));

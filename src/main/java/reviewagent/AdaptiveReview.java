@@ -113,14 +113,13 @@ final class AdaptiveReview {
                       AgentRunner agent, Path directory, CommandProgress progress, int stages, String routeReason)
             throws IOException, InterruptedException {
         var index = new EvidenceIndex(evidence.catalog());
-        var task = new ReviewTasks.Task("local", prompt(evidence, index, OutputLanguage.parse(options.language())),
-                reply -> parse(reply, evidence, index, "L"));
+        var task = new ReviewTasks.Task("local", prompt(evidence, index, OutputLanguage.EN),
+                ReviewTasks.Validator.singleResponse(reply -> parse(reply, evidence, index, "L")));
         Path adaptive = directory.resolve("adaptive");
         progress.step(2, stages, "Reviewing the local change (0 of 1 complete)");
         var reply = ReviewTasks.runIsolated(List.of(task), agent, adaptive, 1, progress, 2, stages,
                 "Reviewing the local change", options.resumeDirectory() != null).get(task.id());
         if (!reply.valid()) {
-            if (reply.failureKind().equals("INVALID_OUTPUT")) return "Local response failed validation";
             throw new ReviewStageException("adaptive", List.of(new ReviewStageException.FailedTask(
                     task.id(), reply.failureKind(), adaptive.resolve("local-state.properties"))));
         }
@@ -137,7 +136,7 @@ final class AdaptiveReview {
                 "adaptive/verification", "", false);
         if (refined.stream().anyMatch(AdaptiveReview::requiresDeep)) return "Follow-up evidence identified broader impact";
         var latest = ReviewQuality.latest(preliminary, refined);
-        var language = OutputLanguage.parse(options.language());
+        var language = OutputLanguage.EN;
         var confirmed = latest.stream().filter(decision -> decision.verdict().status() == ReviewOutput.Status.CONFIRMED)
                 .map(decision -> ReviewQuality.publishedFinding(decision, language)).toList();
         var concerns = ReviewConcerns.collect(preliminary, refined, List.of());
@@ -151,7 +150,6 @@ final class AdaptiveReview {
         AtomicFiles.write(directory.resolve("report.md"), completion.notice() + ReviewReport.adaptiveReport(
                 evidence, response.summary(), confirmed, concerns, language));
         AtomicFiles.write(directory.resolve("review-status.md"), completion.markdown());
-        progress.finish(stages, completion.complete() ? "Wrote report.md" : "Wrote incomplete report.md");
         return null;
     }
 

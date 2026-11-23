@@ -10,21 +10,54 @@ import java.util.regex.Pattern;
 /** Keep all changes and contract material in every independent discovery request. */
 final class DiscoveryEvidence {
     enum Focus {
-        CORRECTNESS("Correctness and regressions. Trace control flow, state changes, and compatibility with the base revision."),
-        CONTRACT("Requirements and business contracts. Check observable behavior, consumers, and supplied business rules."),
-        BOUNDARY("Boundary conditions and security. Check malformed inputs, error paths, resource lifetime, and data isolation.");
+        CORRECTNESS("R1", 0, """
+                Correctness and regressions. Trace control flow and state changes on normal execution paths.
+                For each candidate, identify the deciding implementation and the incorrect result or state.
+                """),
+        CONTRACT("R2", 1, """
+                Business contracts and compatibility. Compare observable behavior with the pinned baseline,
+                public interfaces, established business rules, and consumers. For each candidate, identify
+                the specific behavior the consumer relies on and what the change breaks.
+                """),
+        BOUNDARY("R3", 2, """
+                Boundary conditions and error handling. Check edge inputs, failure paths, fallbacks, and resource cleanup.
+                For each candidate, identify the boundary condition and the observable failure that follows.
+                """),
+        REQUIREMENTS("R4", 1, """
+                Requirements compliance. Compare target behavior with the supplied requirements or business knowledge.
+                For each candidate, identify the explicit rule and the changed implementation that fails to meet it.
+                Leave general policy questions and full acceptance assessment outside this task.
+                """),
+        SECURITY("R5", 2, """
+                Security and isolation. Trace trust boundaries, authorization, user and tenant isolation, and sensitive data handling.
+                For each candidate, identify the affected control, the changed behavior, and the security consequence.
+                """);
 
+        static final int MODEL_SLOTS = 3;
+
+        final String id;
+        final int modelSlot;
         final String instructions;
 
-        Focus(String instructions) { this.instructions = instructions; }
+        Focus(String id, int modelSlot, String instructions) {
+            this.id = id;
+            this.modelSlot = modelSlot;
+            this.instructions = instructions;
+        }
+
+        static List<Focus> active(CliOptions options) {
+            return java.util.Arrays.stream(values())
+                    .filter(focus -> focus != REQUIREMENTS || options.requirement() != null || options.knowledge() != null)
+                    .toList();
+        }
 
         boolean keepSource(EvidenceSource source) {
             String path = "/" + source.path().toLowerCase(Locale.ROOT);
             return switch (this) {
                 case CORRECTNESS -> true;
-                case CONTRACT -> path.contains("/tests/") || path.contains("/test/") || path.contains("/docs/")
+                case CONTRACT, REQUIREMENTS -> path.contains("/tests/") || path.contains("/test/") || path.contains("/docs/")
                         || path.endsWith(".md") || path.endsWith("_test.go");
-                case BOUNDARY -> FocusedReview.hasRiskSignal(source.path()) || FocusedReview.hasRiskSignal(source.text());
+                case BOUNDARY, SECURITY -> FocusedReview.hasRiskSignal(source.path()) || FocusedReview.hasRiskSignal(source.text());
             };
         }
     }

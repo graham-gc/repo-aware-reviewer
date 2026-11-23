@@ -38,7 +38,7 @@ java -jar build/code-review-agent.jar review \
 
 This minimal command reviews **`HEAD` against its first parent**. It does not review uncommitted changes, fetch remote code, or automatically generate or load a business knowledge base. Without a supplied requirements document, it does not perform external requirement-by-requirement acceptance assessment.
 
-Reviews are static: the tool does not run the target project's build or tests. English is the default output language; use `--language zh-CN` for Simplified Chinese or `--language en` for English. This option selects the report language, not a programming language.
+Reviews are static: the tool does not run the target project's build or tests. English is the default output language; use `--language zh-CN` for Simplified Chinese or `--language en` for English. Review prompts, model decisions and intermediate artifacts use English. The reviewer reads requirements and knowledge in their original language. A Chinese report is translated from the completed English report as the final step.
 
 The command prints its run directory. Open `report.md` and check `review-status.md`. You can review code immediately; for business review without an existing approved knowledge base, start with scenario 1 below.
 
@@ -222,7 +222,7 @@ If the default scoped plan would leave hunks for later requests, the CLI first t
 
 Use `--focused-json-schema` to pilot Claude Code's schema-constrained response for initial risk checks. Use the same flag when resuming that run. A custom agent command used with this flag must accept Claude Code's `--output-format json` and `--json-schema` flags and return its JSON envelope. [Structured output and failure handling](docs/structured-output.md#json-schema-pilot).
 
-All three deep reviewers receive the repository rules and the complete textual diff. Discovery partitions changes when the prompt would exceed 320,000 UTF-8 bytes or a smaller configured evidence limit. Oversized optional source bodies can be requested by line range. Coverage records any changes that could not fit. The contract and boundary reviewers can omit duplicate source blocks when the diff contains the complete target body. Deep candidate verification uses relevant complete evidence blocks by default. To compare verification evidence modes, use `--review-mode deep` on both sides and add `--verification-evidence full` on the full-input side.
+Deep discovery checks correctness (R1), contract compatibility (R2), failure boundaries (R3), and security (R5) in separate tasks. R4 checks explicit requirements when a requirement or knowledge document is supplied. Each role receives the repository rules and the complete textual diff. By default one discovery task per active role can run concurrently. A configured concurrency limit still applies. Discovery partitions changes when the prompt would exceed 320,000 UTF-8 bytes or a smaller configured evidence limit. Oversized optional source bodies can be requested by line range. Coverage records any changes that could not fit. The contract and boundary reviewers can omit duplicate source blocks when the diff contains the complete target body. Deep candidate verification uses relevant complete evidence blocks by default. To compare verification evidence modes, use `--review-mode deep` on both sides and add `--verification-evidence full` on the full-input side.
 
 Use `--batched-verification` to try sharing pinned evidence across up to three deep-verification candidates. The CLI validates each verdict independently and reruns missing or invalid members individually. Use the same flag when resuming. Deep review can publish eligible findings directly once their trigger, impact, and change attribution are verified. See [verification performance](docs/review-performance.md#additional-evidence-rounds).
 
@@ -230,7 +230,7 @@ Initial and supplemental discovery can attach a question and exact source reques
 
 Review-required findings can include a suggested check for the maintainer, covering the missing premise, a concrete action, and the observation that would resolve it. The CLI performs static review.
 
-To compare model assignments, pass `--discovery-model` three times in R1, R2, R3 order, for example `--discovery-model sonnet --discovery-model opus --discovery-model haiku`. These models apply to the three initial reviewers, including their retries and corrections. Resume with the same assignments.
+To compare model assignments, pass `--discovery-model` three times in R1, R2, R3 order, for example `--discovery-model sonnet --discovery-model opus --discovery-model haiku`. R4 uses the R2 model and R5 uses the R3 model. The assignments also apply to transport retries. Resume with the same assignments.
 
 ## Blind evaluation
 

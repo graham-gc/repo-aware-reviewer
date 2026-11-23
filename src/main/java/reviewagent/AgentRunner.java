@@ -59,7 +59,8 @@ final class AgentRunner {
     final class TaskScope implements AutoCloseable {
         private boolean accepted;
 
-        private TaskScope(String model, String schema, int stage, String prompt, AdaptiveConcurrency admission) throws InterruptedException {
+        private TaskScope(String model, String schema, int stage, String prompt, AdaptiveConcurrency admission,
+                          boolean retryEmptyResponse) throws InterruptedException {
             if (taskBudget.get() != null) throw new IllegalStateException("Nested agent task");
             var selected = commandForModel(model);
             if (schema != null) {
@@ -69,7 +70,7 @@ final class AgentRunner {
             var controller = admission == null ? adaptive : admission;
             var profile = controller == null ? null : workload(selected, stage, EvidenceText.bytes(prompt));
             if (admission == null) taskSlots.acquire();
-            taskBudget.set(new Budget(selected, profile, controller, admission == null));
+            taskBudget.set(new Budget(selected, profile, controller, admission == null, retryEmptyResponse));
         }
         @Override public void close() {
             var budget = taskBudget.get();
@@ -83,8 +84,9 @@ final class AgentRunner {
         int calls() { return taskBudget.get().calls; }
         void accepted() { accepted = true; }
     }
-    TaskScope task(String model, String schema, int stage, String prompt, AdaptiveConcurrency admission) throws InterruptedException {
-        return new TaskScope(model, schema, stage, prompt, admission);
+    TaskScope task(String model, String schema, int stage, String prompt, AdaptiveConcurrency admission,
+                   boolean retryEmptyResponse) throws InterruptedException {
+        return new TaskScope(model, schema, stage, prompt, admission, retryEmptyResponse);
     }
 
     AdaptiveConcurrency verificationAdmission(List<ReviewTasks.Job> jobs, int parallelism, int stage, Path history) {
@@ -116,15 +118,18 @@ final class AgentRunner {
         final AdaptiveConcurrency.Workload workload;
         final AdaptiveConcurrency adaptive;
         final boolean sharedSlot;
+        final boolean retryEmptyResponse;
         long started = System.nanoTime();
         AdaptiveConcurrency.Admission firstAdmission;
         int calls;
         int retries;
-        Budget(List<String> command, AdaptiveConcurrency.Workload workload, AdaptiveConcurrency adaptive, boolean sharedSlot) {
+        Budget(List<String> command, AdaptiveConcurrency.Workload workload, AdaptiveConcurrency adaptive, boolean sharedSlot,
+               boolean retryEmptyResponse) {
             this.command = command;
             this.workload = workload;
             this.adaptive = adaptive;
             this.sharedSlot = sharedSlot;
+            this.retryEmptyResponse = retryEmptyResponse;
         }
         Duration remaining() throws AgentCallException {
             long remaining = policy.taskTimeout().toNanos() - (System.nanoTime() - started);
@@ -149,11 +154,12 @@ final class AgentRunner {
     String invoke(String prompt, Path logPrefix) throws IOException, InterruptedException {
         Budget budget = taskBudget.get();
         if (budget == null) budget = new Budget(command,
-                adaptive == null ? null : workload(command, 0, EvidenceText.bytes(prompt)), adaptive, false);
+                adaptive == null ? null : workload(command, 0, EvidenceText.bytes(prompt)), adaptive, false, true);
         while (true) {
             try {
                 return request(prompt, logPrefix, budget);
             } catch (AgentCallException failure) {
+                if (failure.kind() == AgentCallException.Kind.EMPTY_RESPONSE && !budget.retryEmptyResponse) throw failure;
                 if (!failure.retryable() || budget.retries >= policy.retries() || budget.calls >= policy.maxCalls()) throw failure;
                 if (!executor.cleanupStatus().equals("OBSERVED_PROCESSES_TERMINATED")) {
                     throw new AgentCallException(failure.kind(), failure.getMessage()

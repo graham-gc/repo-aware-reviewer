@@ -108,7 +108,7 @@ final class FocusedReview {
 
     static void run(EvidenceBundle original, CliOptions options, GitClient git, ProcessExecutor executor, PromptFactory prompts,
                     AgentRunner agent, Path directory, CommandProgress progress, int stages) throws IOException, InterruptedException {
-        var language = OutputLanguage.parse(options.language());
+        var language = OutputLanguage.EN;
         Path focused = directory.resolve("focused");
         boolean resume = options.resumeDirectory() != null;
         boolean useCompleteDiff = !options.focusedJsonSchema() && (!resume || !Files.isDirectory(focused)
@@ -130,7 +130,7 @@ final class FocusedReview {
                                                Path directory) throws IOException, InterruptedException {
         var selected = repositoryRulePlan(evidence, options, git, prompts);
         if (selected.fallback() != null) return false;
-        var language = OutputLanguage.parse(options.language());
+        var language = OutputLanguage.EN;
         var focused = Files.createDirectories(directory.resolve("focused"));
         for (var area : selected.plan().areas()) {
             AtomicFiles.write(focused.resolve(area.id() + "-prompt.md"), repositoryRulePrompt(area, language));
@@ -145,7 +145,7 @@ final class FocusedReview {
         var partitions = DeepDiscovery.plan(original, options, git, prompts, Set.of(), RULES_DIFF_PLAN_BYTES);
         if (partitions.batches().isEmpty() || !partitions.gaps().isEmpty())
             return new RepositoryRulePlan(null, "", "The bounded repository-rule review could not cover all changes");
-        var language = OutputLanguage.parse(options.language());
+        var language = OutputLanguage.EN;
         int limit = Math.min(options.maxEvidenceBytes(), COMPLETE_DIFF_PROMPT_BYTES);
         var areas = new ArrayList<Area>();
         var boundaryChecks = new ArrayList<Area>();
@@ -203,7 +203,7 @@ final class FocusedReview {
     private static String runPlan(EvidenceBundle original, CliOptions options, GitClient git, ProcessExecutor executor,
                                   PromptFactory prompts, AgentRunner agent, Path directory, CommandProgress progress, int stages,
                                   Plan plan, boolean repositoryRules, String partitionCoverage) throws IOException, InterruptedException {
-        var language = OutputLanguage.parse(options.language());
+        var language = OutputLanguage.EN;
         Path focused = directory.resolve("focused");
         boolean resume = options.resumeDirectory() != null;
         var areas = plan.areas();
@@ -227,7 +227,8 @@ final class FocusedReview {
                     : AdaptiveReview.prompt(area.evidence(), index, language,
                             assignment + (riskScope ? RISK_PROOF_RULES : "") + instructions, true);
             tasks.add(new ReviewTasks.Task(area.id(), prompt,
-                    reply -> parse(area, reply, index, structured), null, structured ? schema : null));
+                    ReviewTasks.Validator.singleResponse(reply -> parse(area, reply, index, structured)),
+                    null, structured ? schema : null));
             AtomicFiles.write(focused.resolve(area.id() + "-evidence.md"), area.evidence().catalog().manifest());
             coverage.append("\n### ").append(area.id()).append(" — ").append(area.name()).append("\n\n")
                     .append("- Question: ").append(area.question()).append("\n").append(area.coverage());
@@ -242,6 +243,7 @@ final class FocusedReview {
             // Deep review remains available when any initial partition could not be assessed.
             for (var area : areas) {
                 var outcome = replies.get(area.id());
+                if (outcome.failureKind().equals("INVALID_OUTPUT")) continue;
                 if (!outcome.valid()) return "Repository-rule partition " + area.id() + " failed: " + outcome.failureKind();
                 var response = parse(area, outcome.response(), new EvidenceIndex(area.evidence().catalog()), false);
                 if (response.requestedDeep() && response.candidates().isEmpty() && response.misplaced().isEmpty())
@@ -310,7 +312,6 @@ final class FocusedReview {
                 : ReviewReport.focusedReport(original, confirmed, concerns, completion.failedTasks(), language);
         AtomicFiles.write(directory.resolve("report.md"), completion.notice() + report + unreviewed);
         AtomicFiles.write(directory.resolve("review-status.md"), completion.markdown());
-        progress.finish(stages, completion.complete() ? "Wrote report.md" : "Wrote incomplete report.md");
         return null;
     }
 

@@ -168,10 +168,10 @@ record CliOptions(Path repo, String commit, String branch, String base, String b
         if (fetchTimeout.isZero() || fetchTimeout.isNegative()) {
             throw new IllegalArgumentException("--fetch-timeout-seconds must be positive");
         }
-        int discoveryCount = DiscoveryEvidence.Focus.values().length;
+        int discoveryCount = DiscoveryEvidence.Focus.MODEL_SLOTS;
         if (!discoveryModels.isEmpty() && discoveryModels.size() != discoveryCount)
             throw new IllegalArgumentException("Specify --discovery-model once for each of the "
-                    + discoveryCount + " initial reviewers, in order");
+                    + discoveryCount + " model slots (R1, R2, R3), in order");
         if (focusedJsonSchema && agentArgs.stream().anyMatch(arg -> arg.equals("--output-format") || arg.equals("--json-schema")
                 || arg.startsWith("--output-format=") || arg.startsWith("--json-schema=")))
             throw new IllegalArgumentException("--focused-json-schema supplies --output-format and --json-schema to the agent command");

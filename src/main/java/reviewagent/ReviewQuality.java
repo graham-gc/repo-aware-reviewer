@@ -229,7 +229,7 @@ final class ReviewQuality {
                 "adjudication", 7, "Adjudicating findings before publication", false, Map.of()));
         String note = (directNotes.isEmpty() ? "" : "\n## Publication from independent verification\n\n" + directNotes)
                 + (sharingNotes.isEmpty() ? "" : "\n## Shared publication adjudication\n\n" + sharingNotes);
-        return new Adjudication(resolveConflicts(published, groups, OutputLanguage.parse(options.language())), groups, note);
+        return new Adjudication(resolveConflicts(published, groups, OutputLanguage.EN), groups, note);
     }
 
     private static String directPublicationNote(ReviewOutput.Decision decision, List<String> ids) {
@@ -360,7 +360,7 @@ final class ReviewQuality {
         }
 
         var refined = new LinkedHashSet<String>();
-        OutputLanguage language = OutputLanguage.parse(options.language());
+        OutputLanguage language = OutputLanguage.EN;
         try {
             ReviewTasks.runReady(initial, agent, root, parallelism, progress, stage, stages, description,
                     options.resumeDirectory() != null, admission, (job, outcome) -> {
@@ -573,7 +573,7 @@ final class ReviewQuality {
         var awaitingVerdicts = new LinkedHashSet<String>();
         var refinedPremises = new LinkedHashSet<String>();
         Map<String, Set<String>> lastDelivery = initialDelivery;
-        OutputLanguage language = OutputLanguage.parse(options.language());
+        OutputLanguage language = OutputLanguage.EN;
         List<ReviewFinding> pending = findings;
         int round = 1;
         while (!pending.isEmpty()) {
@@ -802,8 +802,8 @@ final class ReviewQuality {
     }
 
     AssessmentFindings.Plan planAssessment(AssessmentResult assessed) throws IOException {
-        var plan = AssessmentFindings.plan(assessed.items(), evidence, session.index(), OutputLanguage.parse(options.language()));
-        AtomicFiles.write(directory.resolve("assessment-findings.md"), AssessmentFindings.markdown(plan, List.of(), OutputLanguage.parse(options.language())));
+        var plan = AssessmentFindings.plan(assessed.items(), evidence, session.index(), OutputLanguage.EN);
+        AtomicFiles.write(directory.resolve("assessment-findings.md"), AssessmentFindings.markdown(plan, List.of(), OutputLanguage.EN));
         return plan;
     }
 
@@ -816,7 +816,7 @@ final class ReviewQuality {
     AssessmentResult reconcileAssessment(AssessmentResult initial, AssessmentFindings.Plan plan,
                                          List<ReviewOutput.Decision> preliminary, List<ReviewOutput.Decision> adjudicated) throws IOException {
         if (initial.items().isEmpty()) return initial;
-        OutputLanguage language = OutputLanguage.parse(options.language());
+        OutputLanguage language = OutputLanguage.EN;
         var decisions = latest(preliminary, adjudicated);
         var items = AssessmentFindings.reconcile(initial.items(), plan, decisions, language);
         String details = ReviewReport.assessmentMarkdown(items, language);
@@ -832,7 +832,7 @@ final class ReviewQuality {
     }
 
     AssessmentResult assess(InputDocument requirement, String decisions) throws IOException, InterruptedException {
-        OutputLanguage language = OutputLanguage.parse(options.language());
+        OutputLanguage language = OutputLanguage.EN;
         if (requirement == null) {
             String text = ReviewReport.assessmentMarkdown(List.of(), language);
             return new AssessmentResult(text, text);

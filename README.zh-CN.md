@@ -38,7 +38,7 @@ java -jar build/code-review-agent.jar review \
 
 这条最小命令会审查 **`HEAD` 相对第一父提交的改动**，生成中文报告。它不审查未提交改动，不自动拉取远端代码，也不自动生成或加载主知识库。没有传入需求文档时，不做针对外部需求的逐条验收。
 
-所有审查均为静态阅读，不执行目标项目的构建或测试。报告默认语言是英语；`--language zh-CN` 指定中文，`--language en` 指定英语。该参数选择报告语言，不是编程语言。
+所有审查均为静态阅读，不执行目标项目的构建或测试。报告默认语言是英语；`--language zh-CN` 指定中文，`--language en` 指定英语。审查提示词、模型裁决和中间产物使用英文。模型按原语言阅读需求和知识库。指定中文时，最后一步把英文报告翻译为中文。
 
 运行结束后，终端输出本次目录。打开其中的 `report.md`，并检查 `review-status.md`。第一次运行即可做代码审查；需要业务审查但还没有主知识库时，先使用下面的场景 1。
 
@@ -224,13 +224,13 @@ java -jar build/code-review-agent.jar review \
 
 使用 `--focused-json-schema` 可以试用 Claude Code 在风险分区首轮调用中的 Schema 约束。续跑时保留相同参数。启用该选项时，自定义模型命令需接受 Claude Code 的 `--output-format json` 和 `--json-schema` 参数并返回其 JSON 封装。[结构化输出和失败处理](docs/structured-output.md#json-schema-pilot)。
 
-深审的三位初审者都会收到仓库规则和完整文本 diff。提示词超过 320,000 个 UTF-8 字节或更小的配置上限时，CLI 会分批提交改动。较大的可选源码可按行补读，无法放入请求的改动会记入覆盖报告。契约和边界审查可在 diff 已完整包含目标源码时省去重复的源码块。候选复核默认按相关完整证据块提供上下文。对照复核输入量和质量时，两边都用 `--review-mode deep`，全量输入的一边再加 `--verification-evidence full`。
+深审把实现正确性（R1）、契约兼容性（R2）、边界及错误处理（R3）和安全隔离（R5）分成独立任务。提供需求或知识库文档时，再启用明确要求审查（R4）。每个角色都会收到仓库规则和完整文本 diff。默认每个启用的角色可同时运行一项初审任务，显式配置的并发限制仍然生效。提示词超过 320,000 个 UTF-8 字节或更小的配置上限时，CLI 会分批提交改动。较大的可选源码可按行补读，无法放入请求的改动会记入覆盖报告。契约和边界审查可在 diff 已完整包含目标源码时省去重复的源码块。候选复核默认按相关完整证据块提供上下文。对照复核输入量和质量时，两边都用 `--review-mode deep`，全量输入的一边再加 `--verification-evidence full`。
 
 可用 `--batched-verification` 试验深审合批复核。同一文件中使用完全相同证据的候选，每次最多合批三条。CLI 逐条校验结论，缺失或无效的成员单独重跑。续跑时使用同一选项。深审中，触发条件、实际后果和变更归因均已证实且符合发布条件的问题，可直接写入报告。详见[复核性能说明](docs/review-performance.md#additional-evidence-rounds)。
 
 初审和补充初审可为每条候选附上待核实的问题和具体源码请求。CLI 在复核前从固定版本取证，并在允许直接发布时归并主张、待核实问题和取证计划均相同的候选。复核先判断材料是否足够。取得缺失证据后，对应候选立即续审，其他复核可继续独立运行。
 
-多模型初审可用于对照实验。在 `review` 命令上按 R1、R2、R3 的顺序传三次 `--discovery-model`，例如 `--discovery-model sonnet --discovery-model opus --discovery-model haiku`。仅这三个初审任务及其重试和纠错使用指定模型，续跑需保留同一顺序和模型。
+多模型初审可用于对照实验。在 `review` 命令上按 R1、R2、R3 的顺序传三次 `--discovery-model`，例如 `--discovery-model sonnet --discovery-model opus --discovery-model haiku`。R4 使用 R2 的模型，R5 使用 R3 的模型。传输重试沿用对应模型，续跑需保留同一顺序和模型。
 
 ## 盲评审查器
 

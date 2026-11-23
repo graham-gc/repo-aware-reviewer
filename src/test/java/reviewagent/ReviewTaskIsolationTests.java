@@ -19,6 +19,8 @@ final class ReviewTaskIsolationTests {
     static void run() throws Exception {
         batchIsolation();
         incompleteReportAndResume();
+        translationPreservesSourceText();
+        initialSilenceDoesNotRetry();
         completionUsesLatestVerdict();
         fallbackRetainsMixedResults();
         sharedFailureReferences();
@@ -62,6 +64,47 @@ final class ReviewTaskIsolationTests {
         }
     }
 
+    private static void translationPreservesSourceText() throws Exception {
+        String source = """
+                # Review scope
+
+                - Trace `Runner.run()` at src/runner.py:18 using [coverage](coverage.md).
+                - Evidence: "return approved"
+
+                ```python
+                return approved
+                ```
+                """;
+        var translator = new ReportTranslation(source);
+        String reply = translator.prompt().lines().filter(line -> line.startsWith("LINE|"))
+                .map(line -> line.replaceFirst("^LINE", "TRANSLATION").replace("Trace", "检查")
+                        .replace("using", "参考").replace("coverage", "覆盖记录").replace("Evidence", "证据"))
+                .collect(java.util.stream.Collectors.joining("\n"));
+        String chinese = translator.apply(reply);
+        require(chinese.startsWith("# 审查范围\n")
+                && chinese.contains("`Runner.run()`") && chinese.contains("src/runner.py:18")
+                && chinese.contains("[覆盖记录](coverage.md)") && chinese.contains("\"return approved\"")
+                && chinese.contains("```python\nreturn approved\n```"), "translation preserves locations, links, code and quotations");
+        fails(() -> translator.apply(reply.replace("[KEEP_1]", "other/file.py:9")));
+        fails(() -> translator.apply(reply.lines().findFirst().orElseThrow()));
+    }
+
+    private static void initialSilenceDoesNotRetry() throws Exception {
+        Path directory = Files.createTempDirectory("initial-review-no-empty-retry-");
+        var agent = shell(directory, "cat >/dev/null");
+        var task = new ReviewTasks.Task("initial", "initial review", ReviewTasks.Validator.singleResponse(reply -> {}));
+        try (var progress = new CommandProgress("initial", new java.io.PrintStream(java.io.OutputStream.nullOutputStream()))) {
+            var result = ReviewTasks.runIsolated(List.of(task), agent, directory, 1, progress, 1, 2, "Initial review", false);
+            require(result.get(task.id()).failureKind().equals("EMPTY_RESPONSE")
+                    && agent.timings().markdown(directory, OutputLanguage.EN).contains("Actual launched attempts: 1"),
+                    "an empty initial response leaves one failure without another model call");
+        } finally {
+            try (var paths = Files.walk(directory)) {
+                for (Path path : paths.sorted(java.util.Comparator.reverseOrder()).toList()) Files.delete(path);
+            }
+        }
+    }
+
     private static void incompleteReportAndResume() throws Exception {
         Path dir = Files.createTempDirectory("review-incomplete-report-");
         Path repo = Files.createDirectory(dir.resolve("repo"));
@@ -70,9 +113,11 @@ final class ReviewTaskIsolationTests {
         git(repo, "add", "--all"); git(repo, "commit", "-qm", "base");
         Files.writeString(repo.resolve("runner.py"), "print('target')\n");
         git(repo, "add", "--all"); git(repo, "commit", "-qm", "target");
+        Path knowledge = dir.resolve("knowledge.md");
+        Files.writeString(knowledge, "现有调用方依赖原有的返回值。\n");
         String discoveries = "<findings>" + ReviewOutput.findingXml(finding("unused", "Invalid output candidate"))
                 + ReviewOutput.findingXml(finding("unused", "Disproved candidate")) + "</findings>";
-        String finalReport = "<finding-groups/>\n" + String.join("\n\n", ReviewReport.headings(OutputLanguage.ZH_CN));
+        String finalReport = "<finding-groups/>\n" + String.join("\n\n", ReviewReport.headings(OutputLanguage.EN));
         String script = """
                 prompt=$(cat)
                 case "$prompt" in
@@ -99,15 +144,26 @@ final class ReviewTaskIsolationTests {
                 FINAL_REPORT
                 REPORT
                     ;;
+                  'Translate the final review report'*) printf '%s\\n' "$prompt" | sed -n \
+                    's/^LINE|/TRANSLATION|/p' | sed -e 's/Review incomplete:/审查未完成：/' \
+                     -e 's/Check not completed/检查未完成/' -e 's/did not complete verification/未完成复核/'
+                    ;;
                   *) exit 88 ;;
                 esac
                 """.replace("DISCOVERIES", discoveries).replace("INVALID_REPLY", MALFORMED)
                 .replace("REJECTED_REPLY", REJECTED).replace("FINAL_REPORT", finalReport);
         var args = new ArrayList<>(List.of("review", "--repo", repo.toString(), "--language", "zh-CN", "--output-dir", dir.resolve("runs").toString(),
+                "--knowledge", knowledge.toString(),
                 "--review-mode", "deep", "--agent-command", "/bin/sh", "--agent-arg", "-c", "--agent-arg", script));
         Path run = new ReviewPipeline(new ProcessExecutor(), Clock.systemUTC()).run(CliOptions.parse(args.toArray(String[]::new)));
         String report = Files.readString(run.resolve("report.md"));
-        require(report.startsWith("> **审查未完成：**") && report.contains("R1-1") && report.contains("未完成复核")
+        String discoveryPrompt = Files.readString(run.resolve("discovery/R1-prompt.md"));
+        require(discoveryPrompt.contains("Output language: English (en)") && discoveryPrompt.contains("现有调用方依赖原有的返回值。")
+                && Files.readString(run.resolve("verification/R1-1-prompt.md")).contains("Output language: English (en)")
+                && Files.readString(run.resolve("report-en.md")).startsWith("> **Review incomplete:**")
+                && Files.readString(run.resolve("review-status.md")).startsWith("# Review status"),
+                "the requested report language applies only after English review decisions and audit artifacts are written");
+        require(report.startsWith("> **审查未完成：**") && report.contains("R1-1") && report.contains("检查未完成")
                 && !report.contains("minimax"), "the reader sees an incomplete review, not malformed model conclusions");
         require(Files.readString(run.resolve("review-status.md")).contains("Status: INCOMPLETE")
                 && Files.readString(run.resolve("verified-findings.md")).isEmpty(), "failed candidates cannot become published findings");
@@ -121,7 +177,7 @@ final class ReviewTaskIsolationTests {
                 + "<finding id=\"R1-1\">'*) cat <<'FIXED'\n" + REJECTED + "\nFIXED\n;; "
                 + "'You are the report consolidation'*) cat <<'REPORT'\n" + finalReport + "\nREPORT\n;; *) exit 89;; esac";
         args.set(args.size() - 1, resumeScript);
-        args.addAll(List.of("--resume", run.toString()));
+        args.addAll(List.of("--resume", run.toString(), "--language", "en"));
         new ReviewPipeline(new ProcessExecutor(), Clock.systemUTC()).run(CliOptions.parse(args.toArray(String[]::new)));
         require(Files.readString(run.resolve("review-status.md")).contains("Status: COMPLETE")
                 && !Files.readString(run.resolve("report.md")).contains("审查未完成")

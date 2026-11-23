@@ -46,7 +46,7 @@ final class DocumentationReview {
 
     static String run(EvidenceBundle evidence, CliOptions options, AgentRunner agent, Path directory,
                       CommandProgress progress, int stages) throws IOException, InterruptedException {
-        var language = OutputLanguage.parse(options.language());
+        var language = OutputLanguage.EN;
         String coverage = evidence.coverage() + "\n## Review route\n\n- documentation — complete Markdown diffs.\n";
         AtomicFiles.write(directory.resolve("coverage.md"), coverage);
         AtomicFiles.write(directory.resolve("evidence-index.md"), evidence.catalog().manifest());
@@ -58,7 +58,8 @@ final class DocumentationReview {
             // The stronger output instructions do not invalidate evidence or citations from earlier runs.
             if (!saved.equals(taskPrompt) && saved.equals(prompt(evidence, language, false))) taskPrompt = saved;
         }
-        var task = new ReviewTasks.Task("review", taskPrompt, reply -> parse(reply, evidence, language));
+        var task = new ReviewTasks.Task("review", taskPrompt,
+                ReviewTasks.Validator.singleResponse(reply -> parse(reply, evidence, language)));
         var result = ReviewTasks.runIsolated(List.of(task), agent, stage, 1, progress, 2, stages,
                 "Reviewing the Markdown changes", options.resumeDirectory() != null).get(task.id());
         if (!result.valid()) throw new ReviewStageException("documentation", List.of(new ReviewStageException.FailedTask(
@@ -74,7 +75,6 @@ final class DocumentationReview {
         AtomicFiles.write(directory.resolve("report.md"),
                 ReviewReport.documentationReport(evidence, review.summary(), concerns, language));
         AtomicFiles.write(directory.resolve("review-status.md"), completion.markdown());
-        progress.finish(stages, "Wrote report.md");
         return null;
     }
 

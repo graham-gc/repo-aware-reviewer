@@ -175,23 +175,24 @@ final class AgentStabilityTests {
                 && Files.readString(run.resolve("report.md")).startsWith("> **Review incomplete:"), "a missing discovery role cannot be presented as full review coverage");
         require(Files.isRegularFile(run.resolve("discovery/R2-response.md")) && Files.isRegularFile(run.resolve("discovery/R3-response.md"))
                 && Main.reviewExitCode(run) == 3, "valid reviewers survive and the CLI indicates incomplete execution");
-        require(Files.readString(run.resolve("timings.md")).contains("Actual launched attempts: 3"),
+        require(Files.readString(run.resolve("timings.md")).contains("Actual launched attempts: 4"),
                 "an incomplete run records its actual calls without counting compatibility logs twice");
         Files.delete(dir.resolve("fail-r1"));
         args.addAll(List.of("--resume", run.toString(), "--review-parallelism", "1"));
         pipeline.run(CliOptions.parse(args.toArray(String[]::new)));
         require(Main.reviewExitCode(run) == 0 && Files.readString(run.resolve("review-status.md")).contains("COMPLETE"), "validated resume clears the missing discovery role");
         require(Files.readString(run.resolve("timings.md")).contains("Actual launched attempts: 1")
-                && Files.readString(run.resolve("timings.md")).contains("Valid cached tasks reused: 2"),
+                && Files.readString(run.resolve("timings.md")).contains("Valid cached tasks reused: 3"),
                 "resumed timing excludes earlier calls and reports cache reuse separately");
         require(Files.readString(dir.resolve("R1-count")).equals("xx") && Files.readString(dir.resolve("R2-count")).equals("x")
-                && Files.readString(dir.resolve("R3-count")).equals("x"), "changing parallelism does not rerun completed independent reviewers");
+                && Files.readString(dir.resolve("R3-count")).equals("x") && Files.readString(dir.resolve("R5-count")).equals("x"),
+                "changing parallelism does not rerun completed independent reviewers");
         Files.createFile(dir.resolve("fail-report"));
         args.remove(args.indexOf("--resume") + 1); args.remove("--resume");
         Path local = pipeline.run(CliOptions.parse(args.toArray(String[]::new)));
         require(Main.reviewExitCode(local) == 0 && !Files.exists(local.resolve("report-prompt.md"))
                 && Files.readString(local.resolve("report.md")).contains("Changed paths")
-                && Files.readString(local.resolve("timings.md")).contains("Actual launched attempts: 3"),
+                && Files.readString(local.resolve("timings.md")).contains("Actual launched attempts: 4"),
                 "valid findings can produce a complete report even when the agent would fail report generation");
     }
 
@@ -325,8 +326,11 @@ final class AgentStabilityTests {
                   'You are the discovery stage'*)
                     case "$prompt" in
                       *'Correctness and regressions.'*) role=R1;;
-                      *'Requirements and business contracts.'*) role=R2;;
-                      *) role=R3;;
+                      *'Business contracts and compatibility.'*) role=R2;;
+                      *'Boundary conditions and error handling.'*) role=R3;;
+                      *'Requirements compliance.'*) role=R4;;
+                      *'Security and isolation.'*) role=R5;;
+                      *) exit 10;;
                     esac
                     printf x >> "$role-count"
                     if [ "$role" = R1 ] && [ -f fail-r1 ]; then exit 9; fi

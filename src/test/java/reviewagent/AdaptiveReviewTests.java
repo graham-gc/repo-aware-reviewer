@@ -131,12 +131,12 @@ final class AdaptiveReviewTests {
 
             writeLocal(fixture, decision("CONFIRMED", "", "LOW").replace("<lines>2:2</lines>", "<lines>1:1</lines>"));
             Path fallback = pipeline.run(options(arguments));
-            check(Main.reviewExitCode(fallback) == 0 && calls(fallback, 5)
-                    && Files.readString(fallback.resolve("coverage.md")).contains("Local response failed validation"),
-                    "unbound finding locations cannot be published and trigger deep review");
+            check(Main.reviewExitCode(fallback) == 3 && calls(fallback, 1)
+                    && Files.readString(fallback.resolve("review-status.md")).contains("INVALID_OUTPUT"),
+                    "unbound finding locations cannot be published or trigger another discovery call");
 
             Path forced = pipeline.run(options(arguments, "--review-mode", "deep"));
-            check(calls(forced, 3) && !Files.exists(forced.resolve("adaptive")), "explicit deep review bypasses local review");
+            check(calls(forced, 4) && !Files.exists(forced.resolve("adaptive")), "explicit deep review bypasses local review");
 
             Files.writeString(repository.resolve("README.md"), "# Guide\nRun the missing example.\n");
             Files.writeString(repository.resolve("README.zh-CN.md"), "# 指南\n运行缺失的示例。\n");
@@ -166,33 +166,31 @@ final class AdaptiveReviewTests {
             Path firstDocumentationReply = fixture.resolve("documentation-first.txt");
             Files.writeString(firstDocumentationReply, "Tool request instead of a review.");
             Path recoveredDocumentation = pipeline.run(options(arguments));
-            String recoveryPrompt = Files.readString(recoveredDocumentation.resolve("documentation/review-repair-prompt.md"));
-            check(Main.reviewExitCode(recoveredDocumentation) == 0 && calls(recoveredDocumentation, 2)
-                    && recoveryPrompt.startsWith("DOCUMENTATION RESPONSE RECOVERY")
-                    && !recoveryPrompt.contains("Tool request instead of a review.")
-                    && report(recoveredDocumentation).contains("README.md:2"),
-                    "a missing review block gets a fresh evidence-based attempt and a grounded report");
+            check(Main.reviewExitCode(recoveredDocumentation) == 3 && calls(recoveredDocumentation, 1)
+                    && !Files.exists(recoveredDocumentation.resolve("documentation/review-repair-prompt.md"))
+                    && Files.readString(recoveredDocumentation.resolve("review-status.md")).contains("INVALID_OUTPUT"),
+                    "a missing documentation block remains visible without another model call");
             Files.delete(firstDocumentationReply);
 
             Files.writeString(fixture.resolve("documentation.xml"), docsResponse.replace("6,8", "6-500"));
             Path outOfRange = pipeline.run(options(arguments));
-            check(Main.reviewExitCode(outOfRange) == 3 && calls(outOfRange, 2) && !report(outOfRange).contains("Incorrect example"),
+            check(Main.reviewExitCode(outOfRange) == 3 && calls(outOfRange, 1) && !report(outOfRange).contains("Incorrect example"),
                     "dashed citation ranges must still be inside the supplied evidence block");
 
             Files.writeString(fixture.resolve("documentation.xml"), docsResponse.replace("6,8", "7"));
             Path removed = pipeline.run(options(arguments));
-            check(Main.reviewExitCode(removed) == 3 && calls(removed, 2) && !report(removed).contains("Incorrect example"),
+            check(Main.reviewExitCode(removed) == 3 && calls(removed, 1) && !report(removed).contains("Incorrect example"),
                     "removed lines alone cannot verify a target finding");
 
             Files.writeString(fixture.resolve("documentation.xml"),
                     "<documentation-review><summary>Updated two guides.</summary><doc-findings/>"
                             + "<escalate>Check the example against the CLI implementation.</escalate></documentation-review>");
             Path expanded = pipeline.run(options(arguments));
-            check(Main.reviewExitCode(expanded) == 0 && calls(expanded, 4)
+            check(Main.reviewExitCode(expanded) == 0 && calls(expanded, 5)
                     && Files.readString(expanded.resolve("coverage.md")).contains("Documentation review requested broader evidence"),
                     "a documentation issue that needs implementation evidence can request full review");
             Path deepDocumentation = pipeline.run(options(arguments, "--review-mode", "deep"));
-            check(calls(deepDocumentation, 3) && !Files.exists(deepDocumentation.resolve("documentation")),
+            check(calls(deepDocumentation, 4) && !Files.exists(deepDocumentation.resolve("documentation")),
                     "explicit deep review bypasses the documentation route");
 
             String distantContext = "\n# Unrelated detail.\n".repeat(50) + "# FAR_FROM_EDIT\n";
@@ -287,15 +285,13 @@ final class AdaptiveReviewTests {
             Path malformedScope = fixture.resolve("focused-first.txt");
             Files.writeString(malformedScope, "<tool_call>No review content</tool_call>");
             Path partialFocused = pipeline.run(options(arguments));
-            String scopeRecovery = Files.readString(partialFocused.resolve("focused/F1-repair-prompt.md"));
-            check(Main.reviewExitCode(partialFocused) == 3 && calls(partialFocused, 4)
-                    && scopeRecovery.startsWith("ADAPTIVE RESPONSE RECOVERY")
-                    && scopeRecovery.contains(ReviewSchema.ADAPTIVE_XML)
-                    && scopeRecovery.contains("runtime/worker.py") && !scopeRecovery.contains("No review content")
-                    && Files.readString(partialFocused.resolve("focused/F1-state.properties")).contains("status=SUCCEEDED")
+            check(Main.reviewExitCode(partialFocused) == 3 && calls(partialFocused, 2)
+                    && !Files.exists(partialFocused.resolve("focused/F1-repair-prompt.md"))
+                    && !Files.exists(partialFocused.resolve("focused/O-repair-prompt.md"))
+                    && Files.readString(partialFocused.resolve("focused/F1-state.properties")).contains("status=FAILED")
                     && Files.readString(partialFocused.resolve("focused/O-state.properties")).contains("status=FAILED")
-                    && report(partialFocused).contains("unfinished checks: 1."),
-                    "a tool-only reply retries the review from its evidence and an unrecovered scope counts as unfinished");
+                    && report(partialFocused).contains("unfinished checks: 2."),
+                    "a tool-only reply leaves the affected scope unfinished without another model call");
             Files.delete(malformedScope);
 
             Path outbound = Files.createDirectory(repository.resolve("outbound"));

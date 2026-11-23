@@ -225,11 +225,27 @@ final class ReviewRequestTests {
         var correct = Files.readString(run.resolve("discovery/R1-prompt.md"));
         var contract = Files.readString(run.resolve("discovery/R2-prompt.md"));
         var boundary = Files.readString(run.resolve("discovery/R3-prompt.md"));
+        var security = Files.readString(run.resolve("discovery/R5-prompt.md"));
         check(correct.contains("### Plain.java at ") && !contract.contains("### Plain.java at ") && !boundary.contains("### Plain.java at ")
                 && contract.contains("+    int value() { return 3; }") && boundary.contains("+    int value() { return 3; }")
                 && contract.contains("### docs/design.md at ") && boundary.contains("### Guard.java at ")
                 && contract.contains("boundaryValue = 190923") && boundary.contains("boundaryValue = 190923"),
                 "focused discovery drops duplicate views but retains all changed lines and context outside the diff");
+        check(!Files.exists(run.resolve("discovery/R4-prompt.md"))
+                && !boundary.contains("Security and isolation.")
+                && security.contains("Security and isolation.") && !security.contains("Boundary conditions and error handling."),
+                "ordinary failure paths and security are separate roles and explicit requirements are opt-in by input");
+        Path requirement = root.resolve("requirement.md");
+        Files.writeString(requirement, "Return the configured limit in the public response.\n");
+        var withRequirement = review("--prepare-only", "--review-mode", "deep", "--requirement", requirement.toString());
+        String requirements = Files.readString(withRequirement.resolve("discovery/R4-prompt.md"));
+        check(requirements.contains("Requirements compliance.")
+                && requirements.contains("Return the configured limit in the public response.")
+                && requirements.contains("identify the explicit rule and the changed implementation")
+                && !requirements.contains("Business contracts and compatibility.")
+                && List.of(correct, contract, boundary, security, requirements).stream().allMatch(prompt ->
+                        prompt.contains("REQUIRED RESPONSE") && !prompt.contains("Also draft a requirement checklist")),
+                "each role has a self-contained assignment and a candidate response contract");
     }
 
     private void discoveryHandoff() throws Exception {
@@ -258,6 +274,9 @@ final class ReviewRequestTests {
                 request='REQUEST_FILE|target|delivery_policy.txt|all|Read the delivery policy'
                 case "$prompt" in
                   *'Correctness and regressions. Trace control flow'*) cat "$fixture/findings.xml" ;;
+                  *'Inspect the supplemental evidence'*)
+                    if [ -f "$fixture/bad-supplemental" ]; then printf 'No response block.'
+                    else printf '<findings/>'; fi ;;
                   'You are the discovery stage'*) printf '<findings/>' ;;
                   'You are the independent candidate verification batch'*)
                     if [ -f "$fixture/recover-batch-gap" ]; then
@@ -289,7 +308,7 @@ final class ReviewRequestTests {
         String findings = "<findings>\n" + alpha + beta + "</findings>\n";
         Files.writeString(reply, findings + request + "Read the delivery policy\n");
         var baseline = review("--review-mode", "deep");
-        check(Main.reviewExitCode(baseline) == 0 && calls(baseline, 7)
+        check(Main.reviewExitCode(baseline) == 0 && calls(baseline, 8)
                 && Files.exists(baseline.resolve("verification/round-2/R1-1-response.md")),
                 "an unmarked discovery request retains the existing verification follow-up");
 
@@ -298,7 +317,7 @@ final class ReviewRequestTests {
                 + request + "[finding:1] Check whether unfinished work is blocked\n"
                 + "REQUEST_FILE|target|delivery_policy.txt|1:1|[finding:19] Invalid candidate number\n");
         var delivered = review("--review-mode", "deep");
-        check(Main.reviewExitCode(delivered) == 0 && calls(delivered, 6)
+        check(Main.reviewExitCode(delivered) == 0 && calls(delivered, 7)
                 && Files.readString(delivered.resolve("verification/R1-1-prompt.md")).contains("PINNED_POLICY:")
                 && !Files.readString(delivered.resolve("verification/R1-2-prompt.md")).contains("PINNED_POLICY:")
                 && !Files.exists(delivered.resolve("verification/round-2")),
@@ -316,7 +335,7 @@ final class ReviewRequestTests {
         String samePath = findings.replace("<path>beta.py</path>", "<path>alpha.py</path>");
         Files.writeString(reply, samePath + request + "[finding:1] Read the delivery policy\n");
         var batched = review("--review-mode", "deep", "--batched-verification");
-        check(Main.reviewExitCode(batched) == 0 && calls(batched, 6)
+        check(Main.reviewExitCode(batched) == 0 && calls(batched, 7)
                 && !Files.readString(batched.resolve("verification/batch-R1-1-prompt.md")).contains("PINNED_POLICY:")
                 && Files.exists(batched.resolve("verification/round-2/R1-1-response.md")),
                 "handoff does not turn a compatible shared first request into more calls");
@@ -324,7 +343,7 @@ final class ReviewRequestTests {
         Files.writeString(reply, samePath + request + "[finding:1] Read the delivery policy\n"
                 + request + "[finding:2] Check the same policy for the second candidate\n");
         var shared = review("--review-mode", "deep", "--batched-verification");
-        check(Main.reviewExitCode(shared) == 0 && calls(shared, 5)
+        check(Main.reviewExitCode(shared) == 0 && calls(shared, 6)
                 && Files.readString(shared.resolve("verification/batch-R1-1-prompt.md")).contains("PINNED_POLICY:")
                 && !Files.exists(shared.resolve("verification/round-2")),
                 "the same fulfilled file request can serve two explicitly associated candidates in one batch");
@@ -332,7 +351,7 @@ final class ReviewRequestTests {
         Files.writeString(reply, samePath);
         Files.createFile(root.resolve("recover-batch-gap"));
         var recovered = review("--review-mode", "deep", "--batched-verification");
-        check(Main.reviewExitCode(recovered) == 0 && calls(recovered, 6)
+        check(Main.reviewExitCode(recovered) == 0 && calls(recovered, 7)
                 && !Files.exists(recovered.resolve("verification/R1-1-response.md"))
                 && !Files.exists(recovered.resolve("verification/R1-2-response.md")),
                 "candidate-owned evidence requests bypass both stale individual fallbacks");
@@ -342,6 +361,17 @@ final class ReviewRequestTests {
                     && !prompt.contains("The delivery rule is still unknown."),
                     "the renewed review sees the new source and explicit question without importing the invalid verdict");
         }
+
+        Files.writeString(reply, findings + request + "[finding:1] Check the pinned delivery policy\n");
+        Files.createFile(root.resolve("bad-supplemental"));
+        var partial = review("--review-mode", "deep");
+        String supplementalPrompt = Files.readString(partial.resolve("discovery/S1-prompt.md"));
+        check(Main.reviewExitCode(partial) == 3 && calls(partial, 7)
+                && supplementalPrompt.indexOf("REQUIRED RESPONSE") < supplementalPrompt.indexOf("Inspect the supplemental evidence")
+                && !Files.exists(partial.resolve("discovery/S1-repair-prompt.md"))
+                && Files.readString(partial.resolve("review-status.md")).contains("discovery/S1 [INVALID_OUTPUT]")
+                && Files.readString(partial.resolve("coverage.md")).contains("R1-1 — REJECTED"),
+                "invalid supplemental discovery is recorded after one call without discarding the completed initial work");
     }
 
     private void verificationReady() throws Exception {
@@ -365,6 +395,19 @@ final class ReviewRequestTests {
         Files.writeString(model, """
                 fixture=$1
                 prompt=$(cat)
+                case "$prompt" in
+                  'You are the discovery stage'*)
+                    case "$prompt" in
+                      *'Correctness and regressions.'*) touch "$fixture/discovery-1" ;;
+                      *'Business contracts and compatibility.'*) touch "$fixture/discovery-2" ;;
+                      *'Boundary conditions and error handling.'*) touch "$fixture/discovery-3" ;;
+                      *'Security and isolation.'*) touch "$fixture/discovery-5" ;;
+                    esac
+                    while [ ! -e "$fixture/discovery-1" ] || [ ! -e "$fixture/discovery-2" ] ||
+                          [ ! -e "$fixture/discovery-3" ] || [ ! -e "$fixture/discovery-5" ]; do
+                      sleep 0.02
+                    done ;;
+                esac
                 case "$prompt" in
                   *'Correctness and regressions. Trace control flow'*) cat "$fixture/findings.xml"; exit ;;
                   'You are the discovery stage'*) printf '<findings/>'; exit ;;
@@ -396,10 +439,10 @@ final class ReviewRequestTests {
                 fi
                 """);
         var run = pipeline.run(options(false, "--review-mode", "deep", "--agent-timeout-seconds", "6"));
-        check(Main.reviewExitCode(run) == 0 && calls(run, 8)
+        check(Main.reviewExitCode(run) == 0 && calls(run, 9)
                 && Files.readString(run.resolve("timings.md")).contains("| 4 | VERIFICATION_READY_TASKS")
                 && Files.exists(run.resolve("verification/round-2/R1-1-response.md")),
-                "four distinct candidates start together and only the requesting candidate resumes before its peers finish");
+                "default discovery runs all four independent roles together and verification releases only the candidate with new evidence");
     }
 
     private void discoveryBudget() throws Exception {
@@ -418,16 +461,16 @@ final class ReviewRequestTests {
         check(Main.reviewExitCode(run) == 0, "budgeted deep discovery completes all partitions");
         var discovery = run.resolve("discovery");
         try (var files = Files.list(discovery)) {
-            var requests = files.filter(file -> file.getFileName().toString().matches("R[1-3]-P[0-9]+-prompt\\.md"))
+            var requests = files.filter(file -> file.getFileName().toString().matches("R[1235]-P[0-9]+-prompt\\.md"))
                     .sorted().toList();
-            check(requests.size() >= 6, "all three deep reviewers receive partitioned requests");
+            check(requests.size() >= 8, "all active deep reviewers receive partitioned requests");
             for (var request : requests) {
                 var prompt = Files.readString(request);
                 check(Files.size(request) <= 320_000 && prompt.contains("Retain this baseline review rule.")
                         && !prompt.contains("### zz-dependencies.lock at "),
                         "bounded requests preserve baseline rules and defer the oversized full source");
             }
-            for (int reviewer = 1; reviewer <= 3; reviewer++) {
+            for (int reviewer : List.of(1, 2, 3, 5)) {
                 String prefix = "R" + reviewer + "-";
                 var addedLines = new ArrayList<String>();
                 for (var request : requests) {
@@ -543,14 +586,14 @@ final class ReviewRequestTests {
 
         Files.createFile(root.resolve("escalate"));
         var deep = review("--review-mode", "scoped-rules");
-        check(Main.reviewExitCode(deep) == 0 && calls(deep, 4)
+        check(Main.reviewExitCode(deep) == 0 && calls(deep, 5)
                 && Files.readString(deep.resolve("coverage.md")).contains("Repository-rule partition C1 was not assessed")
                 && Files.readString(deep.resolve("discovery/R1-prompt.md")).contains("BASELINE_RULE:"),
                 "an unassessed repository-rule partition falls back to full deep review");
 
         var automatic = review();
         var automaticCoverage = Files.readString(automatic.resolve("coverage.md"));
-        check(Main.reviewExitCode(automatic) == 0 && calls(automatic, 3)
+        check(Main.reviewExitCode(automatic) == 0 && calls(automatic, 4)
                 && !Files.exists(automatic.resolve("focused"))
                 && automaticCoverage.contains("Trusted repository review rules supplied"),
                 "automatic review uses independent deep discovery for trusted repository rules");

@@ -242,7 +242,7 @@ final class ReviewQualityTests {
         String existing = ReviewOutput.findingXml(finding("unused", "Existing acceptance gap"));
         String positive = decision(finding("ID", "TITLE"), "INTRODUCED", citation("Core.java", code)
                 + citation("Core.java", "class Core { int value() { return Helper.parse(); } }"));
-        String explicit = decision(finding("R3-1", "Existing acceptance gap"), "UNMET_REQUIREMENT",
+        String explicit = decision(finding("R4-1", "Existing acceptance gap"), "UNMET_REQUIREMENT",
                 citation("Core.java", code) + citation("External requirement — " + requirementPath, requirement));
         String draft = assessment(requirement, "SATISFIED", citation("Core.java", code), "Draft overlooked a boundary");
         String audited = assessment(requirement, "INSUFFICIENT_EVIDENCE", "", "Missing null-input handler evidence");
@@ -254,8 +254,8 @@ final class ReviewQualityTests {
                     printf '%s\\n' '<findings>'
                     case "$prompt" in
                       *'Correctness and regressions.'*) printf '%s\\n' 'DISPUTED' 'DEEP' ;;
-                      *'Requirements and business contracts.'*) printf '%s\\n' 'DISPUTED' ;;
-                      *) printf '%s\\n' 'EXISTING' ;;
+                      *'Business contracts and compatibility.'*) printf '%s\\n' 'DISPUTED' ;;
+                      *'Requirements compliance.'*) printf '%s\\n' 'EXISTING' ;;
                     esac
                     printf '%s\\n' '</findings>' ;;
                   'You are the independent candidate verification'*|'You are the independent publication adjudication'*)
@@ -284,14 +284,14 @@ final class ReviewQualityTests {
                       *) printf '%s\\n' 'EXPLICIT' ;;
                     esac ;;
                   'You are the candidate reconciliation'*)
-                    printf '%s\\n' '<candidate-groups><group><id>R1-1</id><id>R2-1</id></group><group><id>R1-2</id></group><group><id>R3-1</id></group></candidate-groups>' ;;
+                    printf '%s\\n' '<candidate-groups><group><id>R1-1</id><id>R2-1</id></group><group><id>R1-2</id></group><group><id>R4-1</id></group></candidate-groups>' ;;
                   'You are the requirement assessment stage'*) printf '%s\\n' 'DRAFT' ;;
                   'You are the independent requirement assessment auditor'*)
                     printf '%s\\n' 'AUDITED' 'REQUEST_FILE|target|NoHandler.java|all|Find null-input error mapping' ;;
                   'You are the report consolidation'*)
                     printf '%s\\n' '# Review scope' '# Functional and business change' '# Findings' '[VERIFIED_FINDINGS]' \\
                       '# Requirement assessment' 'Fabricated satisfied conclusion.' '# Knowledge-base feedback' '# Verification limits' \\
-                      '<finding-groups><group><id>R1-2</id></group><group><id>R3-1</id></group></finding-groups>' ;;
+                      '<finding-groups><group><id>R1-2</id></group><group><id>R4-1</id></group></finding-groups>' ;;
                   *) exit 72 ;;
                 esac
                 """.replace("DISPUTED", disputed).replace("DEEP", deep).replace("EXISTING", existing)

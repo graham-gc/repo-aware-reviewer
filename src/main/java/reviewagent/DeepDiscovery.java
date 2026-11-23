@@ -25,12 +25,13 @@ record DeepDiscovery(List<EvidenceBundle> batches, EvidenceBundle evidence, List
     static DeepDiscovery plan(EvidenceBundle original, CliOptions options, GitClient git, PromptFactory prompts,
                               Set<String> requiredSources, int ceiling) throws IOException, InterruptedException {
         int limit = Math.min(ceiling, options.maxEvidenceBytes());
+        var focuses = DiscoveryEvidence.Focus.active(options);
         var sources = original.catalog().sources();
         Set<String> scopedPaths = options.knowledgeMode() == CliOptions.KnowledgeMode.SCOPED
                 ? git.repositoryPaths(options.knowledge()) : Set.of();
         var complete = sources.stream().filter(DeepDiscovery::completeDiff).map(EvidenceSource::path).collect(Collectors.toSet());
         if (requiredSources.isEmpty() && complete.containsAll(original.changedFiles().stream()
-                .filter(path -> !scopedPaths.contains(path)).toList()) && fits(original, prompts, limit)) {
+                .filter(path -> !scopedPaths.contains(path)).toList()) && fits(original, prompts, focuses, limit)) {
             return new DeepDiscovery(List.of(original), original, List.of(), "");
         }
         if (!requiredSources.isEmpty() && EvidenceText.bytes(
@@ -46,7 +47,7 @@ record DeepDiscovery(List<EvidenceBundle> batches, EvidenceBundle evidence, List
                 + "Review only the changed paths whose diff is supplied in this request. Other blocks provide context or rules. "
                 + "Request specific tracked source ranges when missing context could change a conclusion.\n\n";
         var fixed = bundle(original, original.changedFiles(), heading, required);
-        int room = limit - promptBytes(fixed, prompts);
+        int room = limit - promptBytes(fixed, prompts, focuses);
         if (room <= 0) {
             return new DeepDiscovery(List.of(), original,
                     List.of("Required review material exceeds the per-request evidence budget."), "");
@@ -105,7 +106,7 @@ record DeepDiscovery(List<EvidenceBundle> batches, EvidenceBundle evidence, List
                 remaining -= bytes;
             }
             var batch = bundle(original, paths, heading, selected);
-            if (!fits(batch, prompts, limit)) {
+            if (!fits(batch, prompts, focuses, limit)) {
                 gaps.add("Evidence for " + String.join(", ", paths.stream().map(EvidenceText::oneLine).toList())
                         + " exceeds the request budget after rendering.");
                 continue;
@@ -140,16 +141,15 @@ record DeepDiscovery(List<EvidenceBundle> batches, EvidenceBundle evidence, List
                 original.supplementBudget(), original.scopedKnowledge(), new EvidenceCatalog(sources, true));
     }
 
-    private static boolean fits(EvidenceBundle evidence, PromptFactory prompts, int limit) {
-        return promptBytes(evidence, prompts) <= limit;
+    private static boolean fits(EvidenceBundle evidence, PromptFactory prompts, List<DiscoveryEvidence.Focus> focuses, int limit) {
+        return promptBytes(evidence, prompts, focuses) <= limit;
     }
 
-    private static int promptBytes(EvidenceBundle evidence, PromptFactory prompts) {
-        // The same evidence is sent to all three focuses; reserve the largest assignment and summary.
-        return java.util.stream.Stream.concat(
-                        java.util.Arrays.stream(DiscoveryEvidence.Focus.values()).map(focus -> focus.instructions),
-                        java.util.stream.Stream.of(SUPPLEMENTAL_ASSIGNMENT))
-                .mapToInt(assignment -> EvidenceText.bytes(prompts.independentDiscovery(evidence, assignment, true)))
+    private static int promptBytes(EvidenceBundle evidence, PromptFactory prompts, List<DiscoveryEvidence.Focus> focuses) {
+        // Allow the longest active assignment to receive the full partition.
+        int initial = focuses.stream().mapToInt(focus -> EvidenceText.bytes(
+                prompts.independentDiscovery(evidence, focus.instructions, focus == DiscoveryEvidence.Focus.CORRECTNESS)))
                 .max().orElseThrow();
+        return Math.max(initial, EvidenceText.bytes(prompts.independentDiscovery(evidence, SUPPLEMENTAL_ASSIGNMENT)));
     }
 }

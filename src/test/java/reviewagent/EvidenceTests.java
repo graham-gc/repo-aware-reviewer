@@ -257,8 +257,8 @@ final class EvidenceTests {
                         printf '%s\\n' '```xml' '<findings>'
                         case "$prompt" in
                             *'Correctness and regressions.'*) printf '%s\\n' 'FIRST_XML' 'REJECTED_XML' ;;
-                            *'Requirements and business contracts.'*) printf '%s\\n' 'DUPLICATE_XML' 'INSUFFICIENT_XML' ;;
-                            *) printf '%s\\n' 'SEPARATE_XML' ;;
+                            *'Business contracts and compatibility.'*) printf '%s\\n' 'DUPLICATE_XML' 'INSUFFICIENT_XML' ;;
+                            *'Boundary conditions and error handling.'*) printf '%s\\n' 'SEPARATE_XML' ;;
                         esac
                         printf '%s\\n' '</findings>' '```'
                         ;;
@@ -322,16 +322,15 @@ final class EvidenceTests {
                 "--agent-arg", "resume-stub", "--agent-arg", savedReply.toString()});
         new ReviewPipeline(new ProcessExecutor(), Clock.systemUTC()).run(incomplete);
         require(Files.readString(run.resolve("report.md")).equals(report), "resume invokes only the missing verification task");
-        String savedScope = Files.readString(run.resolve("scope.md"));
-        try {
-            CliOptions changedInput = CliOptions.parse(new String[]{"review", "--repo", repo.toString(), "--resume", run.toString(),
-                    "--language", "zh-CN", "--agent-command", "/bin/sh", "--agent-arg", "-c", "--agent-arg", "exit 99"});
-            new ReviewPipeline(new ProcessExecutor(), Clock.systemUTC()).run(changedInput);
-            throw new AssertionError("Expected changed resume inputs to be rejected");
-        } catch (java.io.IOException mismatch) {
-            require(mismatch.getMessage().contains("scope.md"), "resume diagnoses changed review inputs");
-        }
-        require(Files.readString(run.resolve("scope.md")).equals(savedScope), "rejected resume preserves the saved scope");
+        CliOptions localized = CliOptions.parse(new String[]{"review", "--repo", repo.toString(), "--resume", run.toString(),
+                "--language", "zh-CN", "--agent-command", "/bin/sh", "--agent-arg", "-c", "--agent-arg", "exit 99"});
+        new ReviewPipeline(new ProcessExecutor(), Clock.systemUTC()).run(localized);
+        require(Files.readString(run.resolve("scope.md")).contains("Report language: zh-CN")
+                && Files.readString(run.resolve("timings.md")).contains("Actual launched attempts: 1")
+                && Files.readString(run.resolve("review-status.md")).contains("Report translation: FAILED")
+                && Files.readString(run.resolve("report.md")).equals(report)
+                && Main.reviewExitCode(run) == 3,
+                "changing the report language only invokes translation and keeps the English report on failure");
 
         Path repairDirectory = Files.createDirectory(fixture.resolve("format-repair"));
         String repairStub = """
