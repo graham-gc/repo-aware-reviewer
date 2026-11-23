@@ -112,11 +112,16 @@ public class TextLanguageModule implements LanguageModule {
     }
 
     public String load(Request request, Environment environment, int maxBytes) throws IOException, InterruptedException {
-        if (!request.selector().equals("index")) throw new IOException(name + " has text/file-index support; use REQUEST_FILE with all or a line range for implementation. Declaration and dependency resolution are unavailable.");
+        if (!request.selector().equals("index")) throw new IOException("selector: " + name
+                + " supports index only; use REQUEST_FILE with all or a line range for implementation");
         List<String> tracked = environment.repository().paths(request.revision());
-        if (!tracked.contains(request.context()) || !isText(request.context())) throw new IOException("Expected a tracked " + name + " source or project metadata file as context");
         String requested = request.resource().equals(".") ? "" : request.resource();
-        if (!requested.isEmpty() && !safeDirectory(requested)) throw new IOException("Expected a repository-relative directory, without parent traversal");
+        if (!requested.isEmpty() && (!safeDirectory(requested)
+                || tracked.stream().noneMatch(path -> path.startsWith(requested + "/"))))
+            throw new IOException("resource: expected a tracked directory at this revision; use REQUEST_FILE with index for directory navigation");
+        if (!tracked.contains(request.context()) || !isText(request.context()))
+            throw new IOException("context: expected a tracked " + name + " source or project metadata file at this revision; "
+                    + "use REQUEST_FILE with index for directory navigation");
         return index(environment.repository(), request.revision(), List.of(requested), maxBytes);
     }
 
@@ -149,12 +154,6 @@ public class TextLanguageModule implements LanguageModule {
         return name + " module [" + id + "] — text evidence and file navigation.\n" + hints + "\n"
                 + "Use REQUEST_FILE for implementation. " + declarations + dependencies
                 + "Source inspection does not establish compiler/type checking, installed dependencies, or passing tests.\n";
-    }
-
-    public String requestInstructions() {
-        return "File navigation for " + name + ": REQUEST_LANGUAGE|target|" + id
-                + "|tracked/context/file|repository/relative/directory|index|Why these filenames are needed\n"
-                + "Use . for the repository root. This lists filenames only; follow with REQUEST_FILE for implementation.\n";
     }
 
     private String manifestAnchor(String path) {

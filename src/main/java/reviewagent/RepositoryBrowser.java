@@ -22,8 +22,10 @@ final class RepositoryBrowser {
 
     EvidenceSource source(String revision, String query, int budget) throws IOException, InterruptedException {
         var matches = pathsMatching(query);
-        List<String> matching = repository.paths(revision).stream().filter(RepositoryPathPolicy::allowed)
-                .filter(matches).sorted().toList();
+        List<String> matching = repository.paths(revision).stream().filter(matches).sorted().toList();
+        if (matching.isEmpty() && !query.equals(".") && !isGlob(query))
+            throw new IOException("path: no tracked directory at the selected revision");
+        matching = matching.stream().filter(RepositoryPathPolicy::allowed).toList();
         StringBuilder body = new StringBuilder("Tracked repository files (metadata only; all languages).\n");
         int listed = 0;
         for (String path : matching) {
@@ -43,7 +45,7 @@ final class RepositoryBrowser {
 
     static Predicate<String> pathsMatching(String query) throws IOException {
         String prefix = directoryPrefix(query);
-        if (!(query.contains("*") || query.contains("?"))) return path -> path.startsWith(prefix);
+        if (!isGlob(query)) return path -> path.startsWith(prefix);
         Pattern pattern = glob(query);
         return path -> pattern.matcher(path).matches();
     }
@@ -59,8 +61,12 @@ final class RepositoryBrowser {
     private static String directoryPrefix(String query) throws IOException {
         if (query.equals(".")) return "";
         String path = query.endsWith("/") ? query.substring(0, query.length() - 1) : query;
-        if (!RepositoryPathPolicy.allowed(path)) throw new IOException("Invalid or excluded repository navigation path");
+        if (!RepositoryPathPolicy.allowed(path)) throw new IOException("path: invalid or excluded repository navigation path");
         return path + "/";
+    }
+
+    private static boolean isGlob(String query) {
+        return query.contains("*") || query.contains("?");
     }
 
     private static Pattern glob(String query) {

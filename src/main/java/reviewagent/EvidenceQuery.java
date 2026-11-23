@@ -6,6 +6,7 @@ import java.util.regex.Pattern;
 
 record EvidenceQuery(String command, String side, String language, String context, String resource,
                      String selector, String reason, String fallback) {
+    static final int MAX_LENGTH = 1200;
     private static final String FALLBACK = ";fallback=";
     static final Pattern LINES = Pattern.compile("[1-9][0-9]{0,6}:[1-9][0-9]{0,6}");
     static final String SYMBOL = "symbol:";
@@ -33,14 +34,20 @@ record EvidenceQuery(String command, String side, String language, String contex
     }
 
     static EvidenceQuery parse(String line, LanguageRegistry languages) throws IOException {
-        String[] fields = line.split("\\|", line.startsWith("REQUEST_LANGUAGE|") ? 7 : 5);
-        if (line.length() > 1200 || fields.length < 2 || !(fields[1].equals("base") || fields[1].equals("target")))
-            throw new IOException("Expected a bounded evidence request at base or target");
-        if (fields[0].equals("REQUEST_LANGUAGE")) {
-            if (fields.length != 7 || java.util.Arrays.stream(fields).anyMatch(String::isBlank)) throw new IOException("Expected seven REQUEST_LANGUAGE fields");
+        boolean provider = line.startsWith("REQUEST_LANGUAGE|");
+        String[] fields = line.split("\\|", provider ? 7 : 5);
+        if (line.length() > MAX_LENGTH) throw new IOException("request: exceeds " + MAX_LENGTH + " characters");
+        String[] names = provider ? new String[]{"side", "language", "context", "resource", "selector", "reason"}
+                : new String[]{"side", "path/resource", "selector", "reason"};
+        for (int i = 0; i < names.length; i++) {
+            if (fields.length <= i + 1 || fields[i + 1].isBlank())
+                throw new IOException(names[i] + ": missing required field");
+        }
+        if (!(fields[1].equals("base") || fields[1].equals("target")))
+            throw new IOException("side: expected base or target");
+        if (provider) {
             return new EvidenceQuery(fields[0], fields[1], fields[2], fields[3], fields[4], fields[5], fields[6], "");
         }
-        if (fields.length != 5 || java.util.Arrays.stream(fields).anyMatch(String::isBlank)) throw new IOException("Expected five file or legacy evidence fields");
         boolean file = fields[0].equals("REQUEST_FILE");
         String fallback = "";
         int alternative = file ? fields[3].indexOf(FALLBACK) : -1;
@@ -51,14 +58,14 @@ record EvidenceQuery(String command, String side, String language, String contex
             boolean near = fallback.startsWith(NEAR) && ANCHOR.matcher(fallback.substring(NEAR.length())).matches();
             boolean narrower = fields[3].equals("all") && (range || named(fallback, SYMBOL) || named(fallback, DECLARATION))
                     || named(fields[3], SYMBOL) && (range || near);
-            if (!narrower) throw new IOException("Expected a narrower file selector after " + FALLBACK);
+            if (!narrower) throw new IOException("selector: expected a narrower file selector after " + FALLBACK);
         }
         if (file && fields[3].startsWith(DECLARATION) && !named(fields[3], DECLARATION))
-            throw new IOException("Expected a name after " + DECLARATION);
+            throw new IOException("selector: expected a name after " + DECLARATION);
         if (file && fields[3].startsWith(REFERENCES)) {
             String reference = fields[3].substring(REFERENCES.length());
             if (!NAME.matcher(reference).matches() && !CONSTRUCTION.matcher(reference).matches())
-                throw new IOException("A reference search requires a literal symbol, resource name, or new Type");
+                throw new IOException("selector: a reference search requires a literal symbol, resource name, or new Type");
             fields[3] = normalizeSelector(fields[3]);
         }
         String language = file ? "" : languages.legacy(fields[0]).id();

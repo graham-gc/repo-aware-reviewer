@@ -350,13 +350,14 @@ final class AdaptiveReview {
                 <finding><title>Possible regression</title><path>changed-file</path><line>1</line><endLine>1</endLine>
                 <trigger>Concrete trigger</trigger><impact>Potential effect</impact><evidence>Established behavior</evidence>
                 <diffRelation>Relevant change</diffRelation></finding>
-                <requests>REQUEST_FILE|target|path|all|Specific question</requests></local-decision></decisions>
+                <requests>REQUEST_FILE|target|{tracked path}|{selector}|Specific question</requests></local-decision></decisions>
                 Optionally add a direct <nextCheck> naming the decision a maintainer can make.
                 Omit disproved candidates.%s
 
                 %s""".formatted(language.code(), scoped ? "when there are no candidates" : "for no findings",
                 scoped ? "" : " For DEEP, supply a summary and <decisions/>.",
-                EvidenceRequest.SCOPED_GUIDANCE + EvidenceIndex.LINE_CITATION_GUIDANCE + promptEvidence(evidence, index));
+                EvidenceRequest.SCOPED_GUIDANCE + EvidenceRequest.PATH_GUIDANCE
+                        + EvidenceIndex.LINE_CITATION_GUIDANCE + promptEvidence(evidence, index));
     }
 
     static String promptEvidence(EvidenceBundle evidence, EvidenceIndex index) {

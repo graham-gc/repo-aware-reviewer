@@ -45,8 +45,8 @@ final class ReviewSchema {
               <reason>The caller is missing; an early return would refute the trigger.</reason>
               <nextCheck>Does the caller return early on empty input?</nextCheck>
             </verification>
-            REQUEST_FILE|target|src/Runner.java|31:48|Check the caller guard
-            Use the actual missing premise, file, and selector. The path and range above are examples.
+            `REQUEST_FILE|target|{tracked caller path}|{first:last}|Check the caller guard`
+            Fill in the missing premise and real file coordinates. Emit the request as a raw line.
             Omit <nextCheck> and evidence requests for a resolved verdict.
             """;
     private static final Set<String> LISTS = Set.of("findings", "premises", "citations", "triggerCitations", "outcomeCitations", "assessment", "candidate-groups",

@@ -140,6 +140,16 @@ final class EvidenceDeliveryTests {
                     REQUEST_FILE|target|caller.py|1:1|Inspect the call site
                     """;
             var evidence = new EvidenceBundle(scope, List.of("worker.py"), "", "", 4_800, null, EvidenceCatalog.empty());
+            String malformed = "REQUEST_FILE|target|caller.py|all";
+            String valid = malformed + "|Inspect the caller";
+            var session = new EvidenceSession(evidence, collector, 0, 0);
+            session.load(malformed + "\n" + valid, "Review evidence");
+            var delivery = session.discoveryDelivery(malformed + "\n" + valid, EvidenceCatalog.empty());
+            require(delivery.sources().size() == 1 && delivery.missing().size() == 1
+                    && delivery.missing().getFirst().contains("reason: missing required field")
+                    && session.deliverScoped("adjudication/R1-1", valid, EvidenceCatalog.empty()).equals(delivery.sources()),
+                    "a malformed request cannot suppress or inherit a valid request's pinned evidence");
+
             var result = collector.collect(evidence, requested, 3, 0);
             var supplied = result.catalog().sources();
             require(result.coverage().contains("Supplemental requests included: 3/3")

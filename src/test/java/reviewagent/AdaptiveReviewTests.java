@@ -278,7 +278,8 @@ final class AdaptiveReviewTests {
             check(riskPrompt.contains("Do not call or request any tools."),
                     "focused requests ask for a complete review from the supplied evidence");
             check(riskPrompt.contains("<decisions><local-decision><status>INSUFFICIENT_EVIDENCE</status>")
-                    && riskPrompt.contains("<requests>REQUEST_FILE|target|path|all|Specific question</requests></local-decision>")
+                    && riskPrompt.contains("<requests>REQUEST_FILE|target|{tracked path}|{selector}|Specific question</requests></local-decision>")
+                    && riskPrompt.contains(EvidenceRequest.PATH_GUIDANCE) && overview.contains(EvidenceRequest.PATH_GUIDANCE)
                     && riskPrompt.contains(ReviewSchema.ADAPTIVE_XML) && overview.contains(ReviewSchema.ADAPTIVE_XML),
                     "risk and overview prompts share the evidence request's envelope and placement rules");
 

@@ -5,13 +5,20 @@ import java.util.List;
 import java.util.stream.Collectors;
 
 final class PromptFactory {
-    static final String DECISIVE_FOLLOWUP = """
+    private static final String VERIFICATION_PREFLIGHT = """
+            CHECK EVIDENCE FIRST
+            For each candidate, start with its deciding premises and any Discovery evidence handoff. Check
+            whether the supplied sources can refute the trigger or establish the trigger, outcome and change
+            attribution. When a claim depends on compatibility or an external consumer, check whether the
+            affected consumer still exists or is supported. Compare the relevant base and target behavior.
+            If the supplied evidence settles this candidate, give the verdict in this reply.
+            If a decisive premise cannot be checked, stop that candidate before broader analysis. Return
+            INSUFFICIENT_EVIDENCE with the exact missing premise in <nextCheck> and request all identifiable
+            excerpts needed to resolve it together. If no tracked source can answer it, preserve the facts
+            already established, state the question for the maintainer and omit further requests.
+            """;
 
-            Start by checking whether the supplied source blocks can establish or refute the trigger, outcome
-            and change attribution. If a decisive fact cannot be checked from this material and the available
-            source does not already settle the verdict, return INSUFFICIENT_EVIDENCE for that candidate immediately,
-            before broader analysis. In that reply, request all currently identifiable excerpts needed together
-            to decide the missing fact. Check each candidate separately when more than one verdict is requested.
+    static final String DECISIVE_FOLLOWUP = """
 
             The next automatic call must answer one question that can change this verdict. Always return a complete
             verification verdict. Only an INSUFFICIENT_EVIDENCE verdict can request more evidence. Put the exact
@@ -107,19 +114,9 @@ final class PromptFactory {
                 Gaps discovered later for specific candidates use the ordinary evidence handoff below.
 
                 """.formatted(ReviewOutput.Discovery.NEEDS_EVIDENCE_PREFIX);
-        String handoff = supplemental ? """
-                Send remaining decisive questions to verification. Attach a source read only for a
-                specific candidate's verification, using the same one-based N in its reason:
-                REQUEST_FILE|target|src/worker.ext|10:90|[finding:1] Read the fallback guard
-                Use a known tracked path at base or target and a range of up to 200 lines.
-                This pass cannot schedule more discovery.
-                """ : """
-                If missing context could change a candidate, ask for the smallest set of deciding excerpts
-                together. Start the reason for a candidate-specific source read with [finding:N].
-                For example:
-                REQUEST_FILE|target|src/worker.ext|10:90|[finding:1] Read the fallback guard
-                REQUEST_FILE|base|src/worker.ext|all|Compare the earlier behavior
-                """ + fileRequestLimit() + evidenceRequestInstructions(evidence, false);
+        String handoff = supplemental
+                ? "These requests prepare verification. They cannot schedule more discovery.\n" + EvidenceRequest.PATH_GUIDANCE
+                : fileRequestLimit() + evidenceRequestInstructions(evidence, false);
         String summary = includeChangeSummary ? """
                 After the XML, add one plain %s line describing the main functional change shown
                 by the diff. Keep candidate allegations and requirement verdicts out of that line.
@@ -173,8 +170,16 @@ final class PromptFactory {
 
                 EVIDENCE HANDOFF
                 Write one unbulleted VERIFY_QUESTION|N|Exact question per candidate. N is the
-                candidate's one-based position in this reply's <findings>. Ask about the deciding
-                guard or behavior. Keep commentary and acceptance assessments out of the response.
+                candidate's one-based position in this reply's <findings>. Name the specific premises
+                that could confirm or refute the claim. For compatibility or cross-component claims, check
+                both the affected consumer and any support requirement the claim depends on.
+                If missing context could change a candidate, request every identifiable, unsupplied excerpt
+                needed to decide those premises together. Give the pinned side, exact path and narrowest usable
+                selector. Start each candidate's request reason with [finding:N] and describe the premise it checks.
+                Candidate read: `REQUEST_FILE|target|{tracked path}|{first:last}|[finding:1] Check the caller guard`.
+                Baseline read: `REQUEST_FILE|base|{tracked path}|all|[finding:1] Compare the earlier behavior`.
+                If no source for a missing premise is known, name the gap in VERIFY_QUESTION.
+                Keep commentary and acceptance assessments out of the response.
                 """ + summary + handoff + """
 
                 EVIDENCE FOLLOWS
@@ -241,7 +246,7 @@ final class PromptFactory {
                   <status>INSUFFICIENT_EVIDENCE</status>
                   <reason>A guard would refute the trigger; the caller has not been read.</reason>
                   <nextCheck>Does the caller's guard block this input?</nextCheck>
-                  <requests>REQUEST_FILE|target|src/Caller.java|all|Inspect the caller guard</requests>
+                  <requests>REQUEST_FILE|target|{tracked caller path}|{selector}|Inspect the caller guard</requests>
                 </verification>
                 Keep the entire response inside <verifications>.
                 """.formatted(ids, first.id());
@@ -281,6 +286,7 @@ final class PromptFactory {
                 %s
                 Output language: English (en). Use canonical English protocol values.
 
+                %s
                 VERIFICATION TASK
                 %s Trace its trigger, impact, existing guards, callers and
                 relationship to the diff. Actively search for evidence that disproves it. An unreachable trigger,
@@ -396,7 +402,7 @@ final class PromptFactory {
                 Preserve a changed-file location with positive inclusive line numbers for a confirmed finding.
 
                 """.formatted(
-                role.strip(), responseContract.strip(),
+                role.strip(), responseContract.strip(), VERIFICATION_PREFLIGHT,
                 batch ? "Decide each supplied candidate independently." : "Decide the supplied candidate.",
                 batch ? "<verifications><verification id=\"" + id + "\">" : "<verification>",
                 proofExample, id, groundedPublication ? "MEDIUM" : "HIGH",
@@ -710,24 +716,21 @@ final class PromptFactory {
             if (!source.baselinePath().isBlank()) paths.add(source.baselinePath());
         }
         String knowledge = evidence.scopedKnowledge() == null ? "" : """
-                REQUEST_KNOWLEDGE|{short search terms or section ID}|{why the rule could change the decision}
+                `REQUEST_KNOWLEDGE|{short search terms or section ID}|{why the rule could change the decision}`
                 Use exact IDs or terms in the source's language. The CLI searches the scoped knowledge base.
                 """ + (maxKnowledgeQueries == 0 ? "Knowledge queries have no count limit.\n"
                 : "The CLI processes at most " + maxKnowledgeQueries + " knowledge queries.\n");
         return """
                 EVIDENCE REQUEST SYNTAX
                 Use one unbulleted line per request, in the response location specified for this task.
-                Replace the brace-enclosed fields. Use the literal base for the old revision or target for the new one.
-                REQUEST_FILE|{side}|{tracked path}|{selector}|{reason}
+                `REQUEST_FILE|{side}|{path or directory/glob}|{selector}|{reason}`
                 Use an inclusive range of up to 200 lines, all for a small file, or a symbol or declaration
-                selector documented by the requested file's module (up to 200 lines). Use a directory or glob with the literal
-                index to locate tracked files, then request their contents. Indexes provide navigation only.
-                REQUEST_FILE|target|src/**/worker.ext|index|Locate the worker implementation
-                REQUEST_LANGUAGE|{side}|{language}|{context}|{resource}|{selector}|{reason}
-                Use a registered language ID and a tracked context file. The module defines resource and
-                selector syntax. For file navigation, use a directory as resource and the literal index
-                selector. Use known paths and coordinates. The CLI performs the reads.
-                """ + knowledge + LanguageRegistry.defaults().instructions(List.copyOf(paths), includeOtherProviders) + "\n";
+                selector documented by the file's module (up to 200 lines).
+                `REQUEST_LANGUAGE|{side}|{language}|{context}|{resource}|{selector}|{reason}`
+                Use REQUEST_LANGUAGE for provider-specific queries with the registered language ID, a tracked
+                context file, and a resource and selector supported by that provider. The CLI performs the reads.
+                """ + EvidenceRequest.PATH_GUIDANCE + knowledge
+                + LanguageRegistry.defaults().instructions(List.copyOf(paths), includeOtherProviders) + "\n";
     }
 
     private String fileRequestLimit() {

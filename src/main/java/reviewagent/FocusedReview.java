@@ -435,7 +435,7 @@ final class FocusedReview {
 
                         """.formatted(language.code())
                         + allowedLocations(evidence) + PromptFactory.SCOPED_OUTCOME_RULES + "\n"
-                        + ReviewSchema.CANDIDATE_REQUESTS + EvidenceRequest.SCOPED_GUIDANCE
+                        + ReviewSchema.CANDIDATE_REQUESTS + EvidenceRequest.SCOPED_GUIDANCE + EvidenceRequest.PATH_GUIDANCE
                         + EvidenceIndex.LINE_CITATION_GUIDANCE
                         + EvidenceText.block("Original out-of-scope candidate " + candidate.id(), "xml", ReviewXml.markup(candidate.decision()))
                         + AdaptiveReview.promptEvidence(evidence, index);
@@ -516,7 +516,7 @@ final class FocusedReview {
                 Use one raw request string per requests array item. Follow the attached schema's field names and types.
 
                 """.formatted(InputDocument.sha256(schema.getBytes(java.nio.charset.StandardCharsets.UTF_8)), language.code())
-                + EvidenceRequest.SCOPED_GUIDANCE + AdaptiveReview.promptEvidence(area.evidence(), index);
+                + EvidenceRequest.SCOPED_GUIDANCE + EvidenceRequest.PATH_GUIDANCE + AdaptiveReview.promptEvidence(area.evidence(), index);
     }
 
     private static boolean needsIndependentVerification(ReviewOutput.Decision decision, OutputLanguage language, ReviewScope scope) {

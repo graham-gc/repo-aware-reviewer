@@ -242,23 +242,16 @@ final class ReviewRequestTests {
                 && boundaryInstructions.contains("VERIFY_QUESTION|N|")
                 && boundaryInstructions.contains("set endLine equal to line")
                 && boundaryInstructions.contains("Cite other participating files in evidence")
-                && boundaryInstructions.contains("Java helpers: REQUEST_FILE")
-                && !boundaryInstructions.contains("REQUEST_LANGUAGE|target|go|")
+                && boundaryInstructions.contains("Java helpers: use REQUEST_FILE")
+                && !boundaryInstructions.contains("Go helpers:")
                 && !boundaryInstructions.contains("Use these requirement assessment labels")
                 && !boundaryInstructions.contains("Each candidate must include:"),
                 "the R3 prompt leads with a single response contract and advertises only relevant language helpers");
-        var examples = EvidenceRequest.parse(boundaryInstructions).stream()
-                .filter(request -> request.text().contains("|src/worker.ext|")
-                        || request.text().contains("|src/**/worker.ext|")).toList();
-        check(examples.size() == 3, "R3 shows examples for candidate-owned reads, baseline reads, and navigation");
-        var targetRead = EvidenceQuery.parse(examples.get(0).text(), LanguageRegistry.defaults());
-        var baseRead = EvidenceQuery.parse(examples.get(1).text(), LanguageRegistry.defaults());
-        var navigation = EvidenceQuery.parse(examples.get(2).text(), LanguageRegistry.defaults());
-        check(targetRead.side().equals("target") && targetRead.selector().equals("10:90")
-                && examples.get(0).discoveryOwner() == 1 && baseRead.side().equals("base")
-                && baseRead.selector().equals("all") && navigation.operation() == EvidenceQuery.Operation.FIND_FILES
-                && examples.get(2).discoveryOwner() == 0,
-                "the R3 examples follow the parser's selector, revision, and candidate ownership rules");
+        check(boundaryInstructions.contains(EvidenceRequest.PATH_GUIDANCE)
+                && boundaryInstructions.contains("`REQUEST_FILE|target|{tracked path}|{first:last}|[finding:1]")
+                && boundaryInstructions.contains("`REQUEST_FILE|base|{tracked path}|all|")
+                && EvidenceRequest.parse(boundaryInstructions).isEmpty(),
+                "discovery shows template fields, candidate ownership, and real navigation syntax without raw sample paths");
         Path requirement = root.resolve("requirement.md");
         Files.writeString(requirement, "Return the configured limit in the public response.\n");
         var withRequirement = review("--prepare-only", "--review-mode", "deep", "--language", "zh-CN",
@@ -293,9 +286,15 @@ final class ReviewRequestTests {
                 prompt=$(cat)
                 request() {
                   printf '%s\\n' '<findings/>' 'DISCOVERY_NEEDS_EVIDENCE|Does the worker guard reject the input?' \\
+                    'REQUEST_FILE|target|policy|index|Locate the pinned policy' \\
                     'REQUEST_FILE|target|policy/guard.txt|all|Read the pinned guard'
                   if [ -f "$fixture/missing" ]; then
                     printf '%s\\n' 'REQUEST_FILE|target|policy/missing.txt|all|Read the other required guard'
+                  fi
+                  if [ -f "$fixture/bad-request" ]; then
+                    printf '%s\\n' 'REQUEST_LANGUAGE|target|python|sample/path.py|policy|index|Locate the policy' \\
+                      'REQUEST_FILE|target|sample/policy|index|Locate the alternative policy' \\
+                      'REQUEST_FILE|target|policy/guard.txt|all'
                   fi
                 }
                 case "$prompt" in
@@ -339,6 +338,18 @@ final class ReviewRequestTests {
                 && !Files.exists(blocked.resolve("discovery/S1-prompt.md")),
                 "a partial evidence group remains incomplete without restarting or triggering supplemental discovery");
         Files.delete(root.resolve("missing"));
+        Files.createFile(root.resolve("bad-request"));
+        var invalid = review("--review-mode", "deep");
+        String coverage = Files.readString(invalid.resolve("coverage.md"));
+        String status = Files.readString(invalid.resolve("review-status.md"));
+        check(Main.reviewExitCode(invalid) == 3 && calls(invalid, 4)
+                && coverage.contains("target policy/guard.txt all: INCLUDED")
+                && status.contains("context: expected a tracked Python source")
+                && status.contains("path: no tracked directory at the selected revision")
+                && status.contains("reason: missing required field")
+                && !Files.exists(invalid.resolve("discovery/round-2")),
+                "initial discovery keeps valid pinned sources and identifies malformed fields without claiming coverage");
+        Files.delete(root.resolve("bad-request"));
         Files.createFile(root.resolve("repeat"));
         var repeated = review("--review-mode", "deep");
         check(Main.reviewExitCode(repeated) == 3 && calls(repeated, 5)
@@ -441,11 +452,16 @@ final class ReviewRequestTests {
                     esac
                     printf '</verification><verification id="R1-2">%s</verification></verifications>' "$rejected" ;;
                   'You are the independent candidate verification stage'*)
+                    case "$prompt" in *'CHECK EVIDENCE FIRST'*'VERIFICATION TASK'*) ;; *) exit 92 ;; esac
                     case "$prompt" in
-                      *'<path>beta.py</path>'*)
-                        case "$prompt" in *'PINNED_POLICY:'*) exit 91 ;; esac
+                      *'<title>Separate delivery concern</title>'*)
+                        if [ ! -f "$fixture/recover-batch-gap" ]; then
+                          case "$prompt" in *'PINNED_POLICY:'*) exit 91 ;; esac
+                        fi
                         printf '<verification>%s</verification>' "$rejected" ;;
                       *'PINNED_POLICY:'*) printf '<verification>%s</verification>' "$rejected" ;;
+                      *'REQUEST_FILE|base|retention_agreement.txt|all — unavailable:'*)
+                        printf '<verification>%s</verification>' "$pending" ;;
                       *) printf '<verification>%s</verification>\\n%s\\n' "$pending" "$request" ;;
                     esac ;;
                   *) exit 91 ;;
@@ -462,14 +478,18 @@ final class ReviewRequestTests {
         String question = "Can unfinished items reach public delivery?";
         Files.writeString(reply, findings + "VERIFY_QUESTION|1|" + question + "\n"
                 + request + "[finding:1] Check whether unfinished work is blocked\n"
+                + "REQUEST_FILE|base|delivery_policy.txt|all|[finding:1] Compare the baseline rule\n"
                 + "REQUEST_FILE|target|delivery_policy.txt|1:1|[finding:19] Invalid candidate number\n");
         var delivered = review("--review-mode", "deep");
+        String firstPrompt = Files.readString(delivered.resolve("verification/R1-1-prompt.md"));
         check(Main.reviewExitCode(delivered) == 0 && calls(delivered, 7)
-                && Files.readString(delivered.resolve("verification/R1-1-prompt.md")).contains("PINNED_POLICY:")
+                && firstPrompt.contains("PINNED_POLICY:")
+                && firstPrompt.contains("REQUEST_FILE|base|delivery_policy.txt|all — supplied as SRC-")
+                && firstPrompt.contains("REQUEST_FILE|target|delivery_policy.txt|all — supplied as SRC-")
                 && !Files.readString(delivered.resolve("verification/R1-2-prompt.md")).contains("PINNED_POLICY:")
                 && !Files.exists(delivered.resolve("verification/round-2")),
                 "the real pipeline sends previously collected evidence to its owner and saves one call");
-        check(Files.readString(delivered.resolve("verification/R1-1-prompt.md")).contains(question)
+        check(firstPrompt.contains(question)
                 && !Files.readString(delivered.resolve("verification/R1-2-prompt.md")).contains(question),
                 "the discovery question appears only in the owning verification request");
         for (var run : List.of(baseline, delivered)) {
@@ -483,9 +503,11 @@ final class ReviewRequestTests {
         Files.writeString(reply, samePath + request + "[finding:1] Read the delivery policy\n");
         var batched = review("--review-mode", "deep", "--batched-verification");
         check(Main.reviewExitCode(batched) == 0 && calls(batched, 7)
-                && !Files.readString(batched.resolve("verification/batch-R1-1-prompt.md")).contains("PINNED_POLICY:")
-                && Files.exists(batched.resolve("verification/round-2/R1-1-response.md")),
-                "handoff does not turn a compatible shared first request into more calls");
+                && Files.readString(batched.resolve("verification/R1-1-prompt.md")).contains("PINNED_POLICY:")
+                && !Files.readString(batched.resolve("verification/R1-2-prompt.md")).contains("PINNED_POLICY:")
+                && !Files.exists(batched.resolve("verification/batch-R1-1-prompt.md"))
+                && !Files.exists(batched.resolve("verification/round-2")),
+                "different evidence views are dispatched separately with their complete handoffs in the first call");
 
         Files.writeString(reply, samePath + request + "[finding:1] Read the delivery policy\n"
                 + request + "[finding:2] Check the same policy for the second candidate\n");
@@ -508,6 +530,28 @@ final class ReviewRequestTests {
                     && !prompt.contains("The delivery rule is still unknown."),
                     "the renewed review sees the new source and explicit question without importing the invalid verdict");
         }
+        Files.delete(root.resolve("recover-batch-gap"));
+
+        Files.writeString(reply, findings + "VERIFY_QUESTION|1|Does the project require legacy delivery?\n"
+                + "REQUEST_FILE|base|retention_agreement.txt|all|[finding:1] Check the support requirement\n");
+        var unavailable = review("--review-mode", "deep");
+        String unavailablePrompt = Files.readString(unavailable.resolve("verification/R1-1-prompt.md"));
+        check(Main.reviewExitCode(unavailable) == 0 && calls(unavailable, 6)
+                && unavailablePrompt.contains("REQUEST_FILE|base|retention_agreement.txt|all — unavailable: No regular tracked file")
+                && unavailablePrompt.contains("If a decisive premise cannot be checked, stop that candidate before broader analysis.")
+                && Files.readString(unavailable.resolve("coverage.md")).contains("- R1-1 — INSUFFICIENT_EVIDENCE.")
+                && !Files.exists(unavailable.resolve("verification/round-2")),
+                "a missing tracked policy is visible to the first verifier and can be left for a maintainer without a retry");
+
+        Files.writeString(reply, Files.readString(reply) + request + "[finding:1] Check the caller's delivery guard\n");
+        var refuted = review("--review-mode", "deep");
+        String refutedPrompt = Files.readString(refuted.resolve("verification/R1-1-prompt.md"));
+        check(Main.reviewExitCode(refuted) == 0 && calls(refuted, 7)
+                && refutedPrompt.contains("REQUEST_FILE|base|retention_agreement.txt|all — unavailable:")
+                && refutedPrompt.contains("REQUEST_FILE|target|delivery_policy.txt|all — supplied as SRC-")
+                && Files.readString(refuted.resolve("coverage.md")).contains("- R1-1 — REJECTED.")
+                && !Files.exists(refuted.resolve("verification/round-2")),
+                "counterevidence can resolve a candidate in its first call even when a planned source is unavailable");
 
         Files.writeString(reply, findings + request + "[finding:1] Check the pinned delivery policy\n");
         Files.createFile(root.resolve("bad-supplemental"));
@@ -832,6 +876,8 @@ final class ReviewRequestTests {
         var focusedPrompt = Files.readString(run.resolve("focused/F1-prompt.md"));
         check(Main.reviewExitCode(run) == 0 && calls(run, 3) && verify.contains("APPROVED_ONLY")
                 && focusedPrompt.contains("Use DEEP with an INSUFFICIENT_EVIDENCE decision")
+                && focusedPrompt.contains(EvidenceRequest.PATH_GUIDANCE)
+                && verify.contains(EvidenceRequest.PATH_GUIDANCE)
                 && !focusedPrompt.contains("For DEEP, supply a summary and <decisions/>.")
                 && verify.contains("A method's comment or a guard in a caller is IMPLEMENTATION evidence")
                 && !verify.contains("EXTRANEOUS_CONTEXT") && !Files.exists(run.resolve("discovery"))

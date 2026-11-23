@@ -350,6 +350,7 @@ final class ReviewPublicationTests {
                 require(Main.reviewExitCode(prefetch) == 0 && coverage.contains("the previous evidence question remains unanswered")
                         && coverage.contains("Preparing evidence for first publication adjudication")
                         && prompt.contains("INDEPENDENT VERIFICATION QUESTIONS FOR THIS ADJUDICATION")
+                        && prompt.contains(EvidenceRequest.PATH_GUIDANCE)
                         && prompt.contains("R1-2: Did the baseline guard return zero for empty input?")
                         && prompt.contains("Supplied evidence for this question: SRC-")
                         && prompt.contains("(Kind: BASE_SOURCE;") && !prompt.contains("VERIFICATION TASK")

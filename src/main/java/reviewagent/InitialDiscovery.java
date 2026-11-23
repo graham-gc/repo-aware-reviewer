@@ -71,8 +71,6 @@ final class InitialDiscovery {
                 String gap;
                 if (check.round() >= options.agentPolicy().maxCalls()) {
                     gap = "Initial reviewer reached its evidence preflight round limit";
-                } else if (!session.requestOnly(needed.requests())) {
-                    gap = "Initial reviewer did not provide valid requests for the missing evidence";
                 } else {
                     session.load(needed.requests(), "Initial discovery evidence requested by " + id);
                     var delivery = session.discoveryDelivery(needed.requests(), view.catalog());

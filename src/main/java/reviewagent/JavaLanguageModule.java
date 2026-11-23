@@ -30,13 +30,12 @@ public final class JavaLanguageModule implements LanguageModule {
     }
     public String requestInstructions() {
         return """
-                Java helpers: REQUEST_FILE|target|src/File.java|symbol:methodName|reason
+                Java helpers: use REQUEST_FILE with a tracked Java path for declarations or method bodies.
                 Use declaration:Type for a type declaration and declaration:Type#method for method signatures
                 on that type, including its overloads. Use symbol:methodName for a unique method's body.
-                REQUEST_LANGUAGE|target|java|pom.xml|group:artifact:exactVersion|package.Type|reason
+                `REQUEST_LANGUAGE|{side}|java|pom.xml|{group:artifact:exactVersion}|{class or archive path}|{reason}`
                 Java dependency requests require an exact fixed direct dependency in the root POM and a local
                 cached JAR. A .proto archive path may replace package.Type. Public signatures do not prove behavior.
-                Legacy REQUEST_MAVEN|target|group:artifact:exactVersion|package.Type|reason is also accepted.
                 """;
     }
 }

@@ -398,11 +398,8 @@ final class ReviewQuality {
                 if (!briefs.isEmpty()) {
                     var withHandoff = plan.members().stream().map(member ->
                             withHandoff(checks.get(member.candidate().id()), member, briefs, maximum)).toList();
-                    if (!withHandoff.equals(plan.members())) {
-                        var enriched = VerificationBatch.plan(withHandoff, render, maximum);
-                        // A possible saving in a later round cannot justify extra first-round requests.
-                        if (enriched.requests() <= plan.requests()) plan = enriched;
-                    }
+                    // Batch only candidates whose prepared evidence matches.
+                    if (!withHandoff.equals(plan.members())) plan = VerificationBatch.plan(withHandoff, render, maximum);
                 }
                 for (var member : plan.members()) members.put(member.candidate().id(), member);
                 for (var batch : plan.batches()) {
@@ -618,7 +615,7 @@ final class ReviewQuality {
         }
 
         ReviewTasks.Job collectBatchGap(VerificationBatch.EvidenceGap gap) throws IOException, InterruptedException {
-            if (gap == null || !session.requestOnly(gap.requests())) return null;
+            if (gap == null) return null;
             String task = directory.relativize(path()).resolve(candidate.id()).toString();
             session.load(gap.requests(), task + " evidence from an unvalidated batch verdict");
             var previousView = view.bundle().catalog();

@@ -6,6 +6,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
 
@@ -17,7 +18,7 @@ final class SupplementalEvidence {
     private static final int REFERENCE_CONTEXT = 10;
 
     record Result(String markdown, String coverage, boolean hasMaterial, EvidenceCatalog catalog,
-                  java.util.Map<String, Set<String>> resolvedSources) {
+                  Map<String, Set<String>> resolvedSources, Map<String, String> failures) {
     }
 
     private record Excerpt(String markdown, String status, EvidenceCatalog catalog) {
@@ -78,7 +79,8 @@ final class SupplementalEvidence {
             throws InterruptedException {
         var requests = new LinkedHashMap<List<String>, EvidenceQuery>();
         var requestKeys = new LinkedHashMap<List<String>, String>();
-        var invalidLines = new ArrayList<Integer>();
+        var invalidLines = new ArrayList<String>();
+        var failures = new LinkedHashMap<String, String>();
         List<EvidenceRequest> parsed = EvidenceRequest.parse(candidates);
         for (EvidenceRequest request : parsed) {
             String line = request.text();
@@ -88,7 +90,10 @@ final class SupplementalEvidence {
                 requests.putIfAbsent(query.key(), query);
                 requestKeys.putIfAbsent(query.key(), request.key());
             } catch (IOException invalid) {
-                invalidLines.add(request.line());
+                String reason = EvidenceText.oneLine(invalid.getMessage());
+                failures.put(request.key(), reason);
+                invalidLines.add("- Invalid file or language request on reviewer output line " + request.line()
+                        + ": " + reason + ".\n");
             }
         }
 
@@ -108,6 +113,7 @@ final class SupplementalEvidence {
         for (EvidenceRequest request : parsed) if (request.text().startsWith("REQUEST_KNOWLEDGE|")) {
             resolved.put(request.key(), evidence.scopedKnowledge() == null ? Set.of()
                     : evidence.scopedKnowledge().knownSources(request.text(), evidence.catalog().plus(knowledge.catalog()), false));
+            if (evidence.scopedKnowledge() == null) failures.put(request.key(), "no scoped knowledge base is configured");
         }
         for (int i = 0; i < pending.size(); i++) {
             var query = pending.get(i);
@@ -180,7 +186,9 @@ final class SupplementalEvidence {
                     pending.add(query);
                     continue;
                 }
-                status = "UNAVAILABLE (" + EvidenceText.oneLine(unavailable.getMessage()) + ")";
+                String reason = EvidenceText.oneLine(unavailable.getMessage());
+                failures.put(requestKeys.get(query.key()), reason);
+                status = "UNAVAILABLE (" + reason + ")";
                 String note = "- " + label + ": " + status + "\n";
                 if (EvidenceText.bytes(note) <= quota) {
                     prompt.append(note);
@@ -190,13 +198,12 @@ final class SupplementalEvidence {
             coverage.append("- ").append(label).append(": ").append(status).append(". Reason: ")
                     .append(EvidenceText.oneLine(query.reason())).append('\n');
         }
-        for (int line : invalidLines) {
-            coverage.append("- Invalid file or language request on reviewer output line ").append(line).append(".\n");
-        }
+        invalidLines.forEach(coverage::append);
         String summary = "\nSupplemental requests included: " + included + "/" + total + ". Invalid: " + invalidLines.size()
                 + ". Skipped by request limit: " + (requests.size() - total) + ". See `coverage.md` for details.\n";
         return new Result(prompt.append(summary).append(knowledge.markdown()).toString(),
-                coverage.append(summary).append(knowledge.coverage()).toString(), material, catalog, java.util.Map.copyOf(resolved));
+                coverage.append(summary).append(knowledge.coverage()).toString(), material, catalog,
+                Map.copyOf(resolved), Map.copyOf(failures));
     }
 
     private Excerpt references(EvidenceBundle evidence, String revision, EvidenceQuery query, int quota)
@@ -266,7 +273,7 @@ final class SupplementalEvidence {
     private Excerpt repositoryFile(ReviewScope scope, String revision, EvidenceQuery query, int quota)
             throws IOException, InterruptedException {
         if (!eligiblePath(query.resource()))
-            throw new IOException("Path is not eligible tracked source, test, schema, or documentation");
+            throw new IOException("path: not eligible tracked source, test, schema, or documentation");
         if (query.fallback().startsWith(EvidenceQuery.NEAR))
             return symbolExcerpt(scope, revision, query.resource(), query.selector(), query.fallback(), quota);
         if (query.fallback().isEmpty()) return repositoryFile(scope, revision, query.resource(), query.selector(), quota);
@@ -291,15 +298,15 @@ final class SupplementalEvidence {
         if (selector.startsWith(EvidenceQuery.SYMBOL))
             return symbolExcerpt(scope, revision, path, selector, "", quota);
         if (!EvidenceQuery.LINES.matcher(selector).matches()) {
-            throw new IOException("Expected all, a line range, symbol:, or declaration:");
+            throw new IOException("selector: expected all, a line range, symbol:, or declaration:");
         }
         String[] endpoints = selector.split(":");
         int first = Integer.parseInt(endpoints[0]);
         int last = Integer.parseInt(endpoints[1]);
         if (last < first || last - first >= MAX_SOURCE_LINES)
-            throw new IOException("Requested range must contain between 1 and 200 lines");
+            throw new IOException("selector: requested range must contain between 1 and 200 lines");
         var lines = git.regularBlobAt(revision, path, MAX_SOURCE_BYTES).lines().toList();
-        if (first > lines.size()) throw new IOException("Requested range is beyond the end of the file");
+        if (first > lines.size()) throw new IOException("selector: requested range is beyond the end of the file");
         return new Excerpt(fileExcerpt(scope, revision, path, lines, first, Math.min(last, lines.size())), "INCLUDED");
     }
 

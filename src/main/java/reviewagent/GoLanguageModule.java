@@ -173,11 +173,11 @@ public final class GoLanguageModule implements LanguageModule {
 
     public String requestInstructions() {
         return """
-                Go helpers: REQUEST_FILE|target|path/file.go|symbol:Name|reason
+                Go helpers: use REQUEST_FILE with a tracked Go path and symbol:Name for symbol lookup.
                 Name can be a function, type, variable, constant, or Receiver.Method (pointer receivers omit *).
                 A declaration:Name request uses the same lexical declaration locator in that file.
                 Symbol extraction is lexical, not type checking; ambiguous names require a qualified method/file.
-                REQUEST_LANGUAGE|target|go|path/to/context.go|example.com/module/pkg|index|reason
+                `REQUEST_LANGUAGE|{side}|go|{context}|{package or schema directory}|{selector}|{reason}`
                 The context is a tracked source file or go.mod that selects its nearest pinned module/workspace.
                 Resource is the exact imported package path (or a known schema directory for .proto files);
                 selector is index, symbol:Name, symbol:Receiver.Method,

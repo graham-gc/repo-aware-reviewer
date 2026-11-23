@@ -16,6 +16,7 @@ final class EvidenceSession {
     private final int knowledgeLimit;
     private final Set<String> seen = new LinkedHashSet<>();
     private final Map<String, Set<String>> fulfilled = new LinkedHashMap<>();
+    private final Map<String, String> failures = new LinkedHashMap<>();
     private final Map<String, String> initialRequests = new LinkedHashMap<>();
     private final StringBuilder markdown = new StringBuilder();
     private final StringBuilder coverage = new StringBuilder();
@@ -94,6 +95,7 @@ final class EvidenceSession {
         markdown.append(result.markdown());
         catalog = catalog.plus(result.catalog());
         result.resolvedSources().forEach((key, ids) -> { if (!ids.isEmpty()) fulfilled.put(key, ids); });
+        failures.putAll(result.failures());
         coverage.append(result.coverage());
         return result.hasMaterial();
     }
@@ -106,11 +108,12 @@ final class EvidenceSession {
     Delivery discoveryDelivery(String requests, EvidenceCatalog supplied) {
         return delivery(requests, supplied, true);
     }
-    record VerificationBrief(String question, Map<String, Set<String>> sourcesByRequest) {
+    record VerificationBrief(String question, Map<String, VerificationRead> reads) {
         static final VerificationBrief EMPTY = new VerificationBrief("", Map.of());
 
         Set<String> sources() {
-            return sourcesByRequest.values().stream().flatMap(Set::stream).collect(java.util.stream.Collectors.toSet());
+            return reads.values().stream().flatMap(read -> read.sources().stream())
+                    .collect(java.util.stream.Collectors.toSet());
         }
 
         String instructions(EvidenceCatalog supplied) {
@@ -118,16 +121,27 @@ final class EvidenceSession {
             if (!question.isEmpty())
                 text.append("\n").append(EvidenceText.block("Discovery's question for independent verification", "text", question))
                         .append("Treat it as a lead. Check all facts needed to decide the original candidate.\n");
-            var ids = supplied.sources().stream().map(EvidenceSource::id).collect(java.util.stream.Collectors.toSet());
-            var gaps = sourcesByRequest.entrySet().stream()
-                    .filter(entry -> entry.getValue().isEmpty() || !ids.containsAll(entry.getValue()))
-                    .map(Map.Entry::getKey).sorted().toList();
-            if (!gaps.isEmpty()) {
-                text.append("\nPLANNED EVIDENCE THAT IS NOT FULLY PRESENT IN THIS REQUEST\n");
-                gaps.forEach(gap -> text.append("- ").append(gap).append('\n'));
-                text.append("Check whether the supplied evidence already decides the claim. Request any still-decisive gap together.\n");
+            if (!reads.isEmpty()) {
+                text.append("\nDISCOVERY EVIDENCE HANDOFF\n");
+                reads.entrySet().stream().sorted(Map.Entry.comparingByKey()).forEach(entry -> {
+                    text.append("- ").append(EvidenceText.oneLine(entry.getKey())).append(" — ")
+                            .append(entry.getValue().availability(supplied)).append(". Check: ")
+                            .append(entry.getValue().purpose()).append('\n');
+                });
+                text.append("Check the supplied evidence for a decisive refutation first. For any remaining decisive gap, "
+                        + "request a specific alternative or a narrower excerpt, or state what a maintainer must establish.\n");
             }
             return text.toString();
+        }
+    }
+
+    record VerificationRead(Set<String> sources, String failure, String purpose) {
+        String availability(EvidenceCatalog supplied) {
+            if (sources.isEmpty()) return failure.isBlank() ? "not collected" : "unavailable: " + failure;
+            var visible = supplied.select(sources);
+            if (visible.sources().size() < sources.size()) return "collected, but not fully included in this prompt";
+            return "supplied as " + visible.sources().stream().map(visible::reference)
+                    .collect(java.util.stream.Collectors.joining(", "));
         }
     }
 
@@ -135,8 +149,12 @@ final class EvidenceSession {
         var byCandidate = new LinkedHashMap<String, VerificationBrief>();
         questions.forEach((id, question) -> byCandidate.put(id, new VerificationBrief(question, Map.of())));
         requests.forEach((candidate, lines) -> {
-            var byRequest = new LinkedHashMap<String, Set<String>>();
-            for (var request : lines) byRequest.put(request.key(), Set.copyOf(fulfilled.getOrDefault(request.key(), Set.of())));
+            var byRequest = new LinkedHashMap<String, VerificationRead>();
+            for (var request : lines) {
+                String key = request.key();
+                byRequest.putIfAbsent(key, new VerificationRead(fulfilled.getOrDefault(key, Set.of()),
+                        failures.getOrDefault(key, ""), EvidenceText.linePrefix(EvidenceText.oneLine(request.discoveryPurpose()), 300)));
+            }
             byCandidate.put(candidate, new VerificationBrief(questions.getOrDefault(candidate, ""), Map.copyOf(byRequest)));
         });
         return byCandidate;
@@ -185,7 +203,10 @@ final class EvidenceSession {
                 fulfilledRequest = true;
                 if (!visible.contains(id) && !FileEvidenceCache.alreadySupplied(source, supplied)) result.add(id);
             }
-            if (!fulfilledRequest) missing.add(request.key());
+            if (!fulfilledRequest) {
+                String reason = failures.get(request.key());
+                missing.add(reason == null ? request.key() : request.key() + " (" + reason + ")");
+            }
         }
         return new Delivery(java.util.Collections.unmodifiableSet(result), List.copyOf(missing));
     }
