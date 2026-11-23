@@ -22,6 +22,7 @@ final class AdaptiveConcurrencyTests {
         var directory = Files.createTempDirectory("review-auto-concurrency-");
         try {
             options();
+            phaseLimits(directory);
             throughput(directory);
             mixedInputSizes(directory);
             history(directory);
@@ -36,14 +37,14 @@ final class AdaptiveConcurrencyTests {
 
     private static void options() {
         var defaults = CliOptions.parse(new String[]{"review", "--repo", "."});
-        require(!defaults.adaptiveParallelism() && defaults.reviewParallelism() == 3
-                && defaults.verificationParallelismLimit() == null, "discovery stays fixed and deep verification uses ready work");
+        require(defaults.adaptiveParallelism() && defaults.reviewParallelismLimit() == null,
+                "every review phase defaults to automatic scheduling with no fixed cap");
         var selected = CliOptions.parse(new String[]{"review", "--repo", ".", "--review-parallelism", "auto",
                 "--review-max-parallelism", "4"});
         require(selected.adaptiveParallelism() && selected.reviewParallelism() == 4
-                && selected.verificationParallelismLimit() == 4, "auto uses the selected hard cap");
+                && selected.reviewParallelismLimit() == 4, "auto uses an explicitly selected hard cap");
         var fixed = CliOptions.parse(new String[]{"review", "--repo", ".", "--review-parallelism", "1"});
-        require(!fixed.adaptiveParallelism() && fixed.verificationParallelismLimit() == 1,
+        require(!fixed.adaptiveParallelism() && fixed.reviewParallelismLimit() == 1,
                 "an explicit fixed value applies to verification as well");
         for (String[] arguments : List.of(new String[]{"review", "--repo", ".", "--review-max-parallelism", "4"},
                 new String[]{"review", "--repo", ".", "--review-parallelism", "auto", "--review-max-parallelism", "0"})) {
@@ -52,6 +53,23 @@ final class AdaptiveConcurrencyTests {
                 throw new AssertionError("invalid hard cap accepted");
             } catch (IllegalArgumentException expected) { }
         }
+    }
+
+    private static void phaseLimits(Path directory) {
+        var options = CliOptions.parse(new String[]{"review", "--repo", "."});
+        var agent = new AgentRunner(new ProcessExecutor(), "claude", List.of("-p"), directory, Duration.ofSeconds(1));
+        List<String> defaultRoute = java.util.Collections.singletonList(null);
+        require(agent.phaseParallelism(options, 9, defaultRoute) == 9, "unknown provider capacity falls back to outstanding work");
+        var known = new ModelPromptBudget.Limit(320_000, ModelPromptBudget.Source.DEFAULT,
+                new ModelPromptBudget.Capabilities(0, 0, 5));
+        agent.promptBudget(known);
+        require(agent.phaseParallelism(options, 4, defaultRoute) == 4 && agent.phaseParallelism(options, 9, defaultRoute) == 5,
+                "the known route and stage work both constrain concurrency");
+        agent.promptBudget("second-model", new ModelPromptBudget.Limit(320_000, ModelPromptBudget.Source.DEFAULT,
+                new ModelPromptBudget.Capabilities(0, 0, 2)));
+        require(agent.phaseParallelism(options, 4, List.of("second-model")) == 2
+                        && agent.phaseParallelism(options, 4, defaultRoute) == 4,
+                "a discovery model's ceiling does not cap stages using the default model");
     }
 
     private static void throughput(Path directory) throws Exception {

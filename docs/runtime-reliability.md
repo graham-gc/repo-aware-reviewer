@@ -6,7 +6,7 @@ A model process completing successfully does not establish a correct review. All
 
 | Option | Default | Scope |
 | --- | --- | --- |
-| `--review-parallelism` | `3` | Concurrent independent review tasks in this CLI execution. `1` runs the same independent prompts sequentially. |
+| `--review-parallelism` | `auto` | Each stage uses its outstanding work count and any advertised model concurrency limit. A number fixes the CLI scheduling limit. `1` runs model requests sequentially. |
 | `--agent-timeout-seconds` | `900` | Maximum time for one process, stdin writing and stdout/stderr collection. |
 | `--agent-retries` | `1` | Additional recoverable invocation attempts shared by one task, across its output corrections. `0` disables them. |
 | `--agent-max-calls-per-task` | `5` | All CLI-launched model calls for a task, including the initial call, retries and format/source/decision corrections. |

@@ -93,6 +93,19 @@ record VerificationEvidence(EvidenceBundle bundle, EvidenceIndex index, int tota
         return new VerificationEvidence(view, new EvidenceIndex(catalog, available), available.sources().size(), false);
     }
 
+    VerificationEvidence withSources(EvidenceCatalog available, Set<String> requested) {
+        var ids = bundle.catalog().sources().stream().map(EvidenceSource::id)
+                .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
+        var added = available.select(requested).sources().stream().filter(source -> ids.add(source.id())).toList();
+        if (added.isEmpty()) return this;
+        var catalog = available.select(ids);
+        String markdown = bundle.markdown() + added.stream().map(EvidenceSource::markdown)
+                .collect(java.util.stream.Collectors.joining());
+        var view = new EvidenceBundle(bundle.scope(), bundle.changedFiles(), markdown, bundle.coverage(),
+                bundle.supplementBudget(), bundle.scopedKnowledge(), catalog);
+        return new VerificationEvidence(view, new EvidenceIndex(catalog, available), available.sources().size(), fallback);
+    }
+
     private static boolean relatedLanguage(List<LanguageModule> local, String path) {
         return local.isEmpty() || local.stream().anyMatch(module -> module.supports(path));
     }

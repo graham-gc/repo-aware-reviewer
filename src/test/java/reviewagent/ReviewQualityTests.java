@@ -147,7 +147,18 @@ final class ReviewQualityTests {
         fails(() -> ReviewOutput.candidateGroups("<candidate-groups><group><id>R1-1</id></group></candidate-groups>", List.of(candidate, negative)));
         var positiveVerdict = ReviewGrounding.verification(confirmed, candidate, evidence, index);
         var negativeVerdict = new ReviewOutput.Decision(new ReviewOutput.Verification(negative, ReviewOutput.Status.REJECTED,
-                "The policy contradicts this claim", null), ReviewOutput.Relation.PRE_EXISTING, "", "", List.of());
+                "The policy contradicts this claim", null), ReviewOutput.Relation.PRE_EXISTING, "",
+                "This policy applies only to errors from the parser", List.of());
+        var verdicts = List.of(positiveVerdict, negativeVerdict);
+        String groupingPrompt = new PromptFactory().groupCandidates(verdicts);
+        require(groupingPrompt.contains("<finding id=\"R1-1\"><status>CONFIRMED</status>")
+                && groupingPrompt.contains("<finding id=\"R2-1\"><status>REJECTED</status>")
+                && groupingPrompt.contains("<trigger>") && groupingPrompt.contains("<impact>")
+                && groupingPrompt.contains("<contract>This policy applies only to errors from the parser</contract>")
+                && groupingPrompt.contains("<reason>The policy contradicts this claim</reason>")
+                && !groupingPrompt.contains("<evidence>") && !groupingPrompt.contains(code)
+                && PromptFactory.publicationContext(verdicts, index).contains(code),
+                "grouping sees claims and disagreements while publication retains the source proof");
         var reconciled = ReviewQuality.resolveConflicts(List.of(positiveVerdict, negativeVerdict), groups, OutputLanguage.EN);
         require(reconciled.getFirst().verdict().status() == ReviewOutput.Status.DISPUTED
                 && reconciled.getFirst().verdict().confirmed().equals(positiveVerdict.verdict().confirmed()),

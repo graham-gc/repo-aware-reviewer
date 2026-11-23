@@ -43,6 +43,7 @@ public final class AllTests {
         BatchedVerificationTests.run();
         AgentStabilityTests.run();
         AdaptiveConcurrencyTests.run();
+        ModelPromptBudgetTests.run();
         VerificationEvidenceTests.run();
         EvidenceDeliveryTests.run();
         RepositoryNavigationTests.run();
@@ -235,7 +236,7 @@ public final class AllTests {
         String english = new PromptFactory().finalizeReport(evidence, List.of(), "candidate", "", "coverage");
         check(english.contains("Output language: English (en)"));
         check(english.contains("# Review scope\n") && english.contains("Translate business statements"));
-        String discovery = new PromptFactory().independentDiscovery(evidence, "Correctness");
+        String discovery = new PromptFactory().discovery(evidence);
         check(discovery.indexOf("REQUIRED RESPONSE") < discovery.indexOf("If missing context"));
         check(discovery.contains("<findings/>") && discovery.contains("Output language: English (en)")
                 && discovery.contains("中文需求原文"));
@@ -245,20 +246,23 @@ public final class AllTests {
         ReviewScope scope = new ReviewScope(ReviewScope.Mode.COMMIT, "a", "b", "a", "b", "a..b");
         EvidenceBundle evidence = new EvidenceBundle(scope, java.util.List.of(), "evidence", "coverage", 2_000, null);
         String prompt = new PromptFactory().finalizeReport(evidence, List.of(), "candidate", "supplement", "coverage");
-        check(prompt.contains("No verified findings"));
-        check(prompt.contains("INSUFFICIENT_EVIDENCE"));
+        check(prompt.contains("<finding-groups/>") && prompt.contains("Write only [VERIFIED_FINDINGS]"));
+        check(prompt.contains("Write only [REQUIREMENT_ASSESSMENT]"));
         check(prompt.contains("never promoted"));
         check(prompt.contains("supplement"));
-        equal(3, CliOptions.parse(new String[]{"review", "--repo", "."}).reviewParallelism());
+        check(CliOptions.parse(new String[]{"review", "--repo", "."}).adaptiveParallelism());
         equal(1, CliOptions.parse(new String[]{"review", "--repo", ".", "--review-parallelism", "1"}).reviewParallelism());
         throwsArgument(() -> CliOptions.parse(new String[]{"review", "--repo", ".", "--review-parallelism", "0"}));
         String discovery = new PromptFactory().discovery(evidence);
         check(!discovery.contains("Also draft a requirement checklist"));
         check(!discovery.contains("For requirement assessment, split each requirement"));
-        check(prompt.contains("UI counts, lists, navigation and confirmation"));
-        check(prompt.contains("absent from the evidence, mark that behavior INSUFFICIENT_EVIDENCE"));
-        check(prompt.contains("syntactically valid null or wrong-shaped data"));
-        check(prompt.contains("only when every\nrequired behavior is supported"));
+        check(!prompt.contains("For requirement assessment, split each requirement"));
+        String assessment = new PromptFactory().assessRequirements(evidence, "", "", "", true);
+        check(assessment.contains("UI counts, lists, navigation and confirmation"));
+        check(assessment.contains("absent from the evidence, mark that behavior INSUFFICIENT_EVIDENCE"));
+        check(assessment.contains("syntactically valid null or wrong-shaped data"));
+        check(assessment.contains("Assess combined requirements as separate items.")
+                && !assessment.contains("Use PARTIAL"));
     }
 
     private static void equal(Object expected, Object actual) {

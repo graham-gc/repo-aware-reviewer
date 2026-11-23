@@ -85,6 +85,7 @@ final class ReviewRequestTests {
         try {
             new ReviewRequestTests(Files.createDirectory(fixture.resolve("followup"))).followup();
             new ReviewRequestTests(Files.createDirectory(fixture.resolve("discovery"))).discovery();
+            new ReviewRequestTests(Files.createDirectory(fixture.resolve("discovery-preflight"))).discoveryPreflight();
             new ReviewRequestTests(Files.createDirectory(fixture.resolve("discovery-handoff"))).discoveryHandoff();
             new ReviewRequestTests(Files.createDirectory(fixture.resolve("verification-ready"))).verificationReady();
             new ReviewRequestTests(Files.createDirectory(fixture.resolve("discovery-budget"))).discoveryBudget();
@@ -235,17 +236,115 @@ final class ReviewRequestTests {
                 && !boundary.contains("Security and isolation.")
                 && security.contains("Security and isolation.") && !security.contains("Boundary conditions and error handling."),
                 "ordinary failure paths and security are separate roles and explicit requirements are opt-in by input");
+        String boundaryInstructions = boundary.substring(0, boundary.indexOf("EVIDENCE FOLLOWS"));
+        check(boundaryInstructions.indexOf("REQUIRED RESPONSE") < boundaryInstructions.indexOf("SCOPE")
+                && boundaryInstructions.contains("fenced <findings/> block")
+                && boundaryInstructions.contains("VERIFY_QUESTION|N|")
+                && boundaryInstructions.contains("set endLine equal to line")
+                && boundaryInstructions.contains("Cite other participating files in evidence")
+                && boundaryInstructions.contains("Java helpers: REQUEST_FILE")
+                && !boundaryInstructions.contains("REQUEST_LANGUAGE|target|go|")
+                && !boundaryInstructions.contains("Use these requirement assessment labels")
+                && !boundaryInstructions.contains("Each candidate must include:"),
+                "the R3 prompt leads with a single response contract and advertises only relevant language helpers");
+        var examples = EvidenceRequest.parse(boundaryInstructions).stream()
+                .filter(request -> request.text().contains("|src/worker.ext|")
+                        || request.text().contains("|src/**/worker.ext|")).toList();
+        check(examples.size() == 3, "R3 shows examples for candidate-owned reads, baseline reads, and navigation");
+        var targetRead = EvidenceQuery.parse(examples.get(0).text(), LanguageRegistry.defaults());
+        var baseRead = EvidenceQuery.parse(examples.get(1).text(), LanguageRegistry.defaults());
+        var navigation = EvidenceQuery.parse(examples.get(2).text(), LanguageRegistry.defaults());
+        check(targetRead.side().equals("target") && targetRead.selector().equals("10:90")
+                && examples.get(0).discoveryOwner() == 1 && baseRead.side().equals("base")
+                && baseRead.selector().equals("all") && navigation.operation() == EvidenceQuery.Operation.FIND_FILES
+                && examples.get(2).discoveryOwner() == 0,
+                "the R3 examples follow the parser's selector, revision, and candidate ownership rules");
         Path requirement = root.resolve("requirement.md");
         Files.writeString(requirement, "Return the configured limit in the public response.\n");
-        var withRequirement = review("--prepare-only", "--review-mode", "deep", "--requirement", requirement.toString());
+        var withRequirement = review("--prepare-only", "--review-mode", "deep", "--language", "zh-CN",
+                "--requirement", requirement.toString());
         String requirements = Files.readString(withRequirement.resolve("discovery/R4-prompt.md"));
         check(requirements.contains("Requirements compliance.")
                 && requirements.contains("Return the configured limit in the public response.")
                 && requirements.contains("identify the explicit rule and the changed implementation")
                 && !requirements.contains("Business contracts and compatibility.")
                 && List.of(correct, contract, boundary, security, requirements).stream().allMatch(prompt ->
-                        prompt.contains("REQUIRED RESPONSE") && !prompt.contains("Also draft a requirement checklist")),
+                        prompt.indexOf("REQUIRED RESPONSE") < prompt.indexOf("SCOPE")
+                                && prompt.contains("VERIFY_QUESTION|N|")
+                                && !prompt.contains("Use these requirement assessment labels"))
+                && correct.contains("plain CHANGE_SUMMARY| line")
+                && List.of(contract, boundary, security, requirements).stream().noneMatch(prompt -> prompt.contains("plain CHANGE_SUMMARY| line")),
                 "each role has a self-contained assignment and a candidate response contract");
+        String localizedBoundary = Files.readString(withRequirement.resolve("discovery/R3-prompt.md"));
+        check(localizedBoundary.startsWith(boundaryInstructions)
+                && localizedBoundary.contains("Return the configured limit in the public response."),
+                "R3 still receives the supplied requirement and keeps its English instructions for Chinese reports");
+    }
+
+    private void discoveryPreflight() throws Exception {
+        write("worker.py", "result = 0\n");
+        write("policy/guard.txt", "PINNED_PREFLIGHT_GUARD\n");
+        commit("base");
+        write("worker.py", "result = 1\n");
+        commit("change worker behavior");
+        write("policy/guard.txt", "WORKTREE_ONLY_GUARD\n");
+        Files.writeString(model, """
+                fixture=$1
+                prompt=$(cat)
+                request() {
+                  printf '%s\\n' '<findings/>' 'DISCOVERY_NEEDS_EVIDENCE|Does the worker guard reject the input?' \\
+                    'REQUEST_FILE|target|policy/guard.txt|all|Read the pinned guard'
+                  if [ -f "$fixture/missing" ]; then
+                    printf '%s\\n' 'REQUEST_FILE|target|policy/missing.txt|all|Read the other required guard'
+                  fi
+                }
+                case "$prompt" in
+                  *'Boundary conditions and error handling.'*)
+                    case "$prompt" in
+                      *'PINNED_PREFLIGHT_GUARD'*)
+                        touch "$fixture/restarted"
+                        if [ -f "$fixture/repeat" ]; then request
+                        else printf '<findings/>'; fi ;;
+                      *) request ;;
+                    esac ;;
+                  *'Correctness and regressions.'*)
+                    if [ -f "$fixture/parallel" ]; then
+                      while [ ! -f "$fixture/restarted" ]; do sleep 0.02; done
+                    fi
+                    printf '<findings/>' ;;
+                  *'Inspect the supplemental evidence'*) exit 90 ;;
+                  'You are the discovery stage'*) printf '<findings/>' ;;
+                  *) exit 91 ;;
+                esac
+                """);
+        Files.createFile(root.resolve("parallel"));
+        var run = pipeline.run(options(false, "--review-mode", "deep", "--agent-timeout-seconds", "6"));
+        Path restarted = run.resolve("discovery/round-2/R3-prompt.md");
+        String prompt = Files.readString(restarted);
+        check(Main.reviewExitCode(run) == 0 && calls(run, 5)
+                && prompt.contains("PINNED_PREFLIGHT_GUARD") && !prompt.contains("WORKTREE_ONLY_GUARD")
+                && prompt.contains("+result = 1")
+                && !Files.exists(run.resolve("discovery/round-2/R1-prompt.md"))
+                && !Files.exists(run.resolve("discovery/S1-prompt.md")),
+                "the same initial role restarts with pinned sources while another role is running");
+        pipeline.run(options(false, "--review-mode", "deep", "--agent-timeout-seconds", "6", "--resume", run.toString()));
+        check(calls(run, 0), "preflight and resumed initial results both reuse checkpoints");
+        Files.delete(root.resolve("parallel"));
+
+        Files.createFile(root.resolve("missing"));
+        var blocked = review("--review-mode", "deep");
+        check(Main.reviewExitCode(blocked) == 3 && calls(blocked, 4)
+                && Files.readString(blocked.resolve("review-status.md")).contains("policy/missing.txt")
+                && !Files.exists(blocked.resolve("discovery/round-2"))
+                && !Files.exists(blocked.resolve("discovery/S1-prompt.md")),
+                "a partial evidence group remains incomplete without restarting or triggering supplemental discovery");
+        Files.delete(root.resolve("missing"));
+        Files.createFile(root.resolve("repeat"));
+        var repeated = review("--review-mode", "deep");
+        check(Main.reviewExitCode(repeated) == 3 && calls(repeated, 5)
+                && Files.readString(repeated.resolve("review-status.md")).contains("evidence already supplied")
+                && !Files.exists(repeated.resolve("discovery/round-3")),
+                "a repeated material request without new evidence stops the affected reviewer");
     }
 
     private void discoveryHandoff() throws Exception {
@@ -441,6 +540,7 @@ final class ReviewRequestTests {
         var run = pipeline.run(options(false, "--review-mode", "deep", "--agent-timeout-seconds", "6"));
         check(Main.reviewExitCode(run) == 0 && calls(run, 9)
                 && Files.readString(run.resolve("timings.md")).contains("| 4 | VERIFICATION_READY_TASKS")
+                && Files.readString(run.resolve("timings.md")).contains("| 4 | DISCOVERY_READY_TASKS (maximum 4)")
                 && Files.exists(run.resolve("verification/round-2/R1-1-response.md")),
                 "default discovery runs all four independent roles together and verification releases only the candidate with new evidence");
     }
@@ -494,6 +594,13 @@ final class ReviewRequestTests {
                 "coverage records deferred optional source");
         var resumed = review("--review-mode", "deep", "--resume", run.toString());
         check(Main.reviewExitCode(resumed) == 0 && calls(resumed, 0), "a partitioned review reuses matching results on resume");
+
+        var larger = review("--prepare-only", "--review-mode", "deep", "--max-prompt-bytes", "600000");
+        var fullRequest = larger.resolve("discovery/R1-prompt.md");
+        check(Files.size(fullRequest) > 320_000 && Files.size(fullRequest) <= 600_000
+                && Files.readAllLines(fullRequest).stream().filter(line -> line.startsWith("+REVIEW_CHANGE_")).count() == additions.size()
+                && !Files.exists(larger.resolve("timings.md")),
+                "the explicit fallback allows larger offline partitions without dropping hunks or calling the model");
     }
 
     private void repositoryRules() throws Exception {

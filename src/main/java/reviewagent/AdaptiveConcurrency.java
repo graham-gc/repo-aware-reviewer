@@ -69,6 +69,7 @@ final class AdaptiveConcurrency {
     private final LongSupplier clock;
     private final boolean seedOnAdmission;
     private final int readyCeiling;
+    private final String readyReason;
     private final ReentrantLock lock = new ReentrantLock(true);
     private final Condition changed = lock.newCondition();
     private final Map<String, Observation> observations = new HashMap<>();
@@ -94,25 +95,31 @@ final class AdaptiveConcurrency {
     }
 
     AdaptiveConcurrency(int maximum, Path history, ReviewTimings timings, LongSupplier clock) {
-        this(maximum, history, timings, clock, List.of());
+        this(maximum, history, timings, clock, List.of(), "VERIFICATION");
     }
 
     static AdaptiveConcurrency forReadyWork(int maximum, Path history, ReviewTimings timings, List<Workload> ready) {
-        return new AdaptiveConcurrency(maximum, history, timings, System::nanoTime, ready);
+        return forReadyWork(maximum, history, timings, ready, "VERIFICATION");
     }
 
-    private AdaptiveConcurrency(int maximum, Path history, ReviewTimings timings, LongSupplier clock, List<Workload> ready) {
+    static AdaptiveConcurrency forReadyWork(int maximum, Path history, ReviewTimings timings, List<Workload> ready, String phase) {
+        return new AdaptiveConcurrency(maximum, history, timings, System::nanoTime, ready, phase);
+    }
+
+    private AdaptiveConcurrency(int maximum, Path history, ReviewTimings timings, LongSupplier clock, List<Workload> ready,
+                                String phase) {
         this.maximum = maximum;
         this.history = history;
         this.timings = timings;
         this.clock = clock;
         this.seedOnAdmission = ready.isEmpty();
+        this.readyReason = phase + "_READY_TASKS";
         this.readyCeiling = ready.stream().mapToInt(this::historicalLimit).filter(known -> known > 0)
                 .min().orElse(maximum);
         int startup = Math.min(maximum, seedOnAdmission ? 2 : ready.size());
         this.limit = Math.min(startup, readyCeiling);
         this.lastEvent = this.cooldownUntil = clock.getAsLong();
-        String reason = seedOnAdmission ? "COLD_START" : limit < startup ? "VERIFICATION_RECENT_STABLE_LIMIT" : "VERIFICATION_READY_TASKS";
+        String reason = seedOnAdmission ? "COLD_START" : limit < startup ? phase + "_RECENT_STABLE_LIMIT" : readyReason;
         timings.parallelism(limit, reason + " (maximum " + maximum + ")");
     }
 
@@ -121,7 +128,7 @@ final class AdaptiveConcurrency {
         try {
             int next = Math.min(readyCeiling, count);
             if (next > limit && lastThrottle == null && observations.isEmpty() && fatal == null)
-                change(next, clock.getAsLong(), "VERIFICATION_READY_TASKS");
+                change(next, clock.getAsLong(), readyReason);
         } finally {
             lock.unlock();
         }

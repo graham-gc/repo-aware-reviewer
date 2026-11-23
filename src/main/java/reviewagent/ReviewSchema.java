@@ -36,9 +36,9 @@ final class ReviewSchema {
             + ADAPTIVE_FIELDS.stream().map(field -> "<" + field + ">").collect(java.util.stream.Collectors.joining(", ")) + ".\n"
             + CANDIDATE_REQUESTS;
     static final String VERIFICATION_REQUESTS = """
-            Return one complete <verification> XML document. If you append any evidence request lines,
-            set <status> to INSUFFICIENT_EVIDENCE and include a nonempty <nextCheck> as a direct child of
-            <verification>. The CLI uses this field to decide whether the request can change the verdict.
+            Return one complete <verification> XML document. When decisive evidence is missing, set
+            <status> to INSUFFICIENT_EVIDENCE. To request evidence, put a nonempty <nextCheck> directly
+            inside <verification> and each raw request on its own line after the closing XML.
             Use the following shape for a missing premise that can be checked in a tracked file:
             <verification>
               <status>INSUFFICIENT_EVIDENCE</status>

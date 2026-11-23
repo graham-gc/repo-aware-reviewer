@@ -27,9 +27,9 @@ final class AgentStabilityTests {
 
     private static void policies() {
         var defaults = CliOptions.parse(new String[]{"review", "--repo", "."});
-        require(defaults.reviewParallelism() == 3 && defaults.agentPolicy().maxCalls() == 5
+        require(defaults.adaptiveParallelism() && defaults.agentPolicy().maxCalls() == 5
                 && defaults.agentPolicy().retries() == 1 && defaults.agentPolicy().taskTimeout().toSeconds() == 1800,
-                "parallelism stays unchanged; calls and elapsed time have explicit task budgets");
+                "automatic parallelism preserves explicit call and elapsed-time budgets");
         var custom = CliOptions.parse(new String[]{"review", "--repo", ".", "--agent-retries", "0",
                 "--agent-max-calls-per-task", "2", "--agent-task-timeout-seconds", "7"});
         require(custom.agentPolicy().retries() == 0 && custom.agentPolicy().maxCalls() == 2

@@ -9,7 +9,7 @@ import java.util.LinkedHashMap;
 
 /** Shared request counts and byte budget across discovery, verification and adjudication. */
 final class EvidenceSession {
-    private record Delivery(Set<String> sources, List<String> missing) { }
+    record Delivery(Set<String> sources, List<String> missing) { }
     private final EvidenceBundle evidence;
     private final SupplementalEvidence collector;
     private final int fileLimit;
@@ -103,6 +103,9 @@ final class EvidenceSession {
         return delivery(requests, supplied, true).sources();
     }
 
+    Delivery discoveryDelivery(String requests, EvidenceCatalog supplied) {
+        return delivery(requests, supplied, true);
+    }
     record VerificationBrief(String question, Map<String, Set<String>> sourcesByRequest) {
         static final VerificationBrief EMPTY = new VerificationBrief("", Map.of());
 
@@ -182,7 +185,7 @@ final class EvidenceSession {
                 fulfilledRequest = true;
                 if (!visible.contains(id) && !FileEvidenceCache.alreadySupplied(source, supplied)) result.add(id);
             }
-            if (!fulfilledRequest && !includeNavigation) missing.add(request.key());
+            if (!fulfilledRequest) missing.add(request.key());
         }
         return new Delivery(java.util.Collections.unmodifiableSet(result), List.copyOf(missing));
     }

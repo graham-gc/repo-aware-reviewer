@@ -235,6 +235,7 @@ final class ReviewPublicationTests {
             Path repo = Files.createDirectory(fixture.resolve("repo"));
             git(repo, "init", "-q");
             Files.writeString(repo.resolve("calculator.py"), BASE);
+            Files.writeString(repo.resolve("entrypoint.py"), "def run_summary():\n    return summarize_measurements()\n");
             git(repo, "add", "--all"); git(repo, "commit", "-qm", "base");
             Files.writeString(repo.resolve("calculator.py"), TARGET);
             git(repo, "add", "--all"); git(repo, "commit", "-qm", "target");
@@ -265,15 +266,36 @@ final class ReviewPublicationTests {
                       'You are the discovery stage'*) printf '<findings/>' ;;
                       'You are the independent candidate verification stage'*)
                         case "$prompt" in
+                          *'<title>Check the empty-input baseline</title>'*)
+                            case "$prompt" in
+                              *'VERIFICATION FOLLOW-UP CONTEXT'*)
+                                ref=$(printf '%s\\n' "$prompt" | sed -n 's/^### \\(SRC-[0-9]*\\) .*entrypoint[.]py.*Kind: TARGET_SOURCE.*/\\1/p' | head -1)
+                                [ -n "$ref" ] || exit 93
+                                sed "s/ENTRYPOINT_REF/$ref/g" "$fixture/handoff.xml" ;;
+                              *)
+                                printf '%s\\n' '<verification><status>INSUFFICIENT_EVIDENCE</status><reason>Read the entry point before deciding.</reason><nextCheck>Does the entry point expose the calculation?</nextCheck></verification>'
+                                printf '%s\\n' 'REQUEST_FILE|target|entrypoint.py|all|Read the entry point' ;;
+                            esac ;;
                           *'<trigger>average([None])</trigger>'*) printf '<verification><status>REJECTED</status><reason>The proposed condition is different.</reason></verification>' ;;
                           *'<triggerCitations>'*'<outcomeCitations>'*) cat "$fixture/verification.xml" ;;
                           *) exit 91 ;;
                         esac ;;
                       'You are the candidate reconciliation'*)
+                        if [ -f "$fixture/handoff.xml" ]; then
+                          printf '<candidate-groups><group><id>R1-1</id><id>R1-2</id></group></candidate-groups>'
+                          exit
+                        fi
                         printf '<candidate-groups><group><id>R1-1</id></group>'
                         case "$prompt" in *'<finding id="R1-2">'*) printf '<group><id>R1-2</id></group>' ;; esac
                         printf '</candidate-groups>' ;;
-                      'You are the independent publication adjudication'*) cat "$fixture/adjudicated.xml" ;;
+                      'You are the independent publication adjudication'*)
+                        if [ -f "$fixture/handoff.xml" ]; then
+                          ref=$(printf '%s\\n' "$prompt" | sed -n 's/^### \\(SRC-[0-9]*\\) .*calculator[.]py.*Kind: BASE_SOURCE.*/\\1/p' | head -1)
+                          [ -n "$ref" ] || exit 94
+                          sed "s/PREFETCHED_BASE/$ref/g" "$fixture/adjudicated.xml"
+                        else
+                          cat "$fixture/adjudicated.xml"
+                        fi ;;
                       *) exit 92 ;;
                     esac
                     """);
@@ -310,6 +332,31 @@ final class ReviewPublicationTests {
             Path pending = pipeline.run(options);
             require(Main.reviewExitCode(pending) == 0 && Files.exists(pending.resolve("adjudication/R1-1-response.md")),
                     "a linked verdict with an open premise still runs adjudication");
+
+            Files.writeString(discoveries, "<findings>" + finding
+                    + finding.replace("Empty-input behavior changed", "Check the empty-input baseline") + "</findings>");
+            Files.writeString(response, positive);
+            Files.writeString(fixture.resolve("handoff.xml"), """
+                    <verification><status>INSUFFICIENT_EVIDENCE</status><reason>The entry point delegates to the summary. The prior guard remains open.</reason>
+                    <nextCheck>Did the baseline guard return zero for empty input?</nextCheck>
+                    <citations><citation><source>ENTRYPOINT_REF</source><lines>2:2</lines></citation></citations></verification>
+                    REQUEST_FILE|base|calculator.py|all|Establish the prior behavior
+                    """);
+            Files.writeString(fixture.resolve("adjudicated.xml"), positive("R1-1", target.id(), "PREFETCHED_BASE", "return 0\n    " + EXPRESSION));
+            for (var reviewOptions : List.of(options, options(command, "--batched-verification"))) {
+                Path prefetch = pipeline.run(reviewOptions);
+                String prompt = Files.readString(prefetch.resolve("adjudication/R1-1-prompt.md"));
+                String coverage = Files.readString(prefetch.resolve("coverage.md"));
+                require(Main.reviewExitCode(prefetch) == 0 && coverage.contains("the previous evidence question remains unanswered")
+                        && coverage.contains("Preparing evidence for first publication adjudication")
+                        && prompt.contains("INDEPENDENT VERIFICATION QUESTIONS FOR THIS ADJUDICATION")
+                        && prompt.contains("R1-2: Did the baseline guard return zero for empty input?")
+                        && prompt.contains("Supplied evidence for this question: SRC-")
+                        && prompt.contains("(Kind: BASE_SOURCE;") && !prompt.contains("VERIFICATION TASK")
+                        && !Files.exists(prefetch.resolve("adjudication/round-2"))
+                        && Files.readString(prefetch.resolve("report.md")).contains("Confirmed defects: 1"),
+                        "publication supplies a peer's stopped evidence request and confirms from the pinned baseline in its first call");
+            }
         } finally {
             try (var paths = Files.walk(fixture)) {
                 for (Path path : paths.sorted(Comparator.reverseOrder()).toList()) Files.delete(path);
@@ -550,13 +597,14 @@ final class ReviewPublicationTests {
                 && Files.mismatch(shared.resolve("candidates.md"), automated.resolve("candidates.md")) == -1
                 && Files.mismatch(shared.resolve("evidence.md"), automated.resolve("evidence.md")) == -1
                 && Files.mismatch(shared.resolve("report.md"), automated.resolve("report.md")) == -1
-                && Files.readString(automated.resolve("timings.md")).contains("COLD_START (maximum 4)"),
+                && Files.readString(automated.resolve("timings.md")).contains("DISCOVERY_READY_TASKS (maximum 4)"),
                 "auto scheduling preserves identical discovery, evidence and publication for fixed replies");
 
         Files.createFile(fixture.resolve("different-claim"));
         Path separate = new ReviewPipeline(new ProcessExecutor(), Clock.systemUTC()).run(options);
         require(Main.reviewExitCode(separate) == 0
                 && Files.readString(separate.resolve("timings.md")).contains("|adjudication|3|")
+                && Files.readString(separate.resolve("timings.md")).contains("ADJUDICATION_READY_TASKS (maximum 1)")
                 && Files.exists(separate.resolve("adjudication/R3-1-prompt.md"))
                 && Files.readString(separate.resolve("coverage.md")).contains("R1-1 is the publication task for R1-1, R2-1, R2-2 ("),
                 "the exact duplicates share one task and the neighboring claim is adjudicated in its own task");

@@ -9,17 +9,12 @@ import java.util.stream.Collectors;
 
 /** Give each independent reviewer the same complete change, in bounded partitions when needed. */
 record DeepDiscovery(List<EvidenceBundle> batches, EvidenceBundle evidence, List<String> gaps, String coverage) {
-    static final int MAX_PROMPT_BYTES = 320_000;
     private static final int MAX_OPTIONAL_SOURCE_BYTES = 48_000;
-    static final String SUPPLEMENTAL_ASSIGNMENT = """
-            Inspect the supplemental evidence and newly supplied business rules for concrete regressions.
-            This pass runs after evidence collection. Use the material already supplied and record remaining
-            evidence gaps in prose. Do not issue additional evidence requests in this pass.
-            """;
 
     static DeepDiscovery plan(EvidenceBundle original, CliOptions options, GitClient git, PromptFactory prompts,
                               Set<String> requiredSources) throws IOException, InterruptedException {
-        return plan(original, options, git, prompts, requiredSources, MAX_PROMPT_BYTES);
+        return plan(original, options, git, prompts, requiredSources,
+                ModelPromptBudget.Limit.fallback(options.maxPromptBytes()).bytes());
     }
 
     static DeepDiscovery plan(EvidenceBundle original, CliOptions options, GitClient git, PromptFactory prompts,
@@ -35,7 +30,7 @@ record DeepDiscovery(List<EvidenceBundle> batches, EvidenceBundle evidence, List
             return new DeepDiscovery(List.of(original), original, List.of(), "");
         }
         if (!requiredSources.isEmpty() && EvidenceText.bytes(
-                prompts.independentDiscovery(original, SUPPLEMENTAL_ASSIGNMENT)) <= limit) {
+                prompts.supplementalDiscovery(original)) <= limit) {
             return new DeepDiscovery(List.of(original), original, List.of(), "");
         }
 
@@ -47,7 +42,10 @@ record DeepDiscovery(List<EvidenceBundle> batches, EvidenceBundle evidence, List
                 + "Review only the changed paths whose diff is supplied in this request. Other blocks provide context or rules. "
                 + "Request specific tracked source ranges when missing context could change a conclusion.\n\n";
         var fixed = bundle(original, original.changedFiles(), heading, required);
-        int room = limit - promptBytes(fixed, prompts, focuses);
+        // Reserve language guidance for any source we might pack before budgeting diff and context bytes.
+        var budgetBasis = new EvidenceBundle(fixed.scope(), fixed.changedFiles(), fixed.markdown(), fixed.coverage(),
+                fixed.supplementBudget(), fixed.scopedKnowledge(), original.catalog());
+        int room = limit - promptBytes(budgetBasis, prompts, focuses);
         if (room <= 0) {
             return new DeepDiscovery(List.of(), original,
                     List.of("Required review material exceeds the per-request evidence budget."), "");
@@ -148,8 +146,8 @@ record DeepDiscovery(List<EvidenceBundle> batches, EvidenceBundle evidence, List
     private static int promptBytes(EvidenceBundle evidence, PromptFactory prompts, List<DiscoveryEvidence.Focus> focuses) {
         // Allow the longest active assignment to receive the full partition.
         int initial = focuses.stream().mapToInt(focus -> EvidenceText.bytes(
-                prompts.independentDiscovery(evidence, focus.instructions, focus == DiscoveryEvidence.Focus.CORRECTNESS)))
+                prompts.independentDiscovery(evidence, focus, focus == DiscoveryEvidence.Focus.CORRECTNESS)))
                 .max().orElseThrow();
-        return Math.max(initial, EvidenceText.bytes(prompts.independentDiscovery(evidence, SUPPLEMENTAL_ASSIGNMENT)));
+        return Math.max(initial, EvidenceText.bytes(prompts.supplementalDiscovery(evidence)));
     }
 }

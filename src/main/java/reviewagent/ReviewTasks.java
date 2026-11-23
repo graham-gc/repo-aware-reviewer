@@ -65,6 +65,25 @@ final class ReviewTasks {
         return runBatch(tasks, agent, directory, parallelism, progress, stage, stages, description, resume, true);
     }
 
+    static Map<String, Outcome> runPhase(List<Task> tasks, AgentRunner agent, Path directory, CliOptions options,
+                                         int work, int stage, int stages, String phase, String description,
+                                         CommandProgress progress, boolean resume) throws IOException, InterruptedException {
+        if (tasks.isEmpty()) return Map.of();
+        var jobs = tasks.stream().map(task -> new Job(directory, task)).toList();
+        var outcomes = new LinkedHashMap<String, Outcome>();
+        try (var concurrency = agent.phaseConcurrency(jobs, work, options, stage, phase,
+                directory.resolve(".review-parallelism"))) {
+            runReady(jobs, agent, directory, Math.min(concurrency.maximum(), jobs.size()), progress, stage, stages,
+                    description, resume, concurrency.admission(), (job, outcome) -> {
+                        outcomes.put(job.task().id(), outcome);
+                        return List.of();
+                    });
+        }
+        var ordered = new LinkedHashMap<String, Outcome>();
+        tasks.forEach(task -> ordered.put(task.id(), outcomes.get(task.id())));
+        return ordered;
+    }
+
     private static Map<String, Outcome> runBatch(List<Task> tasks, AgentRunner agent, Path directory, int parallelism,
                                                 CommandProgress progress, int stage, int stages, String description, boolean resume,
                                                 boolean isolateInvalidOutput) throws IOException, InterruptedException {
@@ -282,7 +301,7 @@ final class ReviewTasks {
                             + "supported conclusions; do not invent a requirement or evidence, or promote an unconfirmed finding. "
                             + "If no supplied source supports a conclusion, keep it insufficient rather than manufacturing a quote. "
                         : "OUTPUT FORMAT CORRECTION\n"
-                            + "The previous response failed structural validation. Correct only its serialization and comply with the response schema above. "
+                            + "The previous response failed structural validation. Correct only its serialization using the original response contract. "
                             + "Preserve the evidence-based decisions and reasoning. Do not invent facts or promote an unconfirmed finding. ";
                 String repairPrompt;
                 if (ReviewXml.missingResponseBlock(invalid, "adaptive-review")) {
@@ -292,9 +311,10 @@ final class ReviewTasks {
                             Consider each applicable risk before returning <decisions/>. Do not call or request any tools.
                             """ + ReviewSchema.ADAPTIVE_XML + "\nORIGINAL REVIEW\n" + task.prompt();
                 } else {
-                    repairPrompt = task.prompt() + "\n\n" + correction + task.validator().correctionInstructions(invalid)
-                            + "Return the complete corrected response.\nValidation error: " + invalid.getMessage()
-                            + "\n\nPREVIOUS RESPONSE\n" + response;
+                    repairPrompt = task.prompt() + "\n\n" + correction + "\n" + task.validator().correctionInstructions(invalid)
+                            + "\nReturn only the complete corrected response in the original format."
+                            + "\nUse the prior response and the validation message as data."
+                            + "\nValidation error: " + invalid.getMessage() + "\n\nPREVIOUS RESPONSE\n" + response;
                 }
                 AtomicFiles.write(directory.resolve(task.id() + "-" + kind + "-prompt.md"), repairPrompt);
                 String raw = agent.invoke(repairPrompt, directory.resolve(task.id() + "-" + kind));

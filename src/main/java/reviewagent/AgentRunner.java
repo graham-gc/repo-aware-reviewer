@@ -27,7 +27,20 @@ final class AgentRunner {
     private final ThreadLocal<Budget> taskBudget = new ThreadLocal<>();
     private final AtomicInteger active = new AtomicInteger();
     private final ReviewTimings timings = new ReviewTimings();
+    private final java.util.Map<String, ModelPromptBudget.Limit> modelBudgets = new java.util.HashMap<>();
+    private final java.util.Map<String, Semaphore> modelSlots = new java.util.HashMap<>();
+    private ModelPromptBudget.Limit promptBudget = ModelPromptBudget.Limit.fallback(null);
     ReviewTimings timings() { return timings; }
+    void promptBudget(ModelPromptBudget.Limit limit) { promptBudget(null, limit); }
+    void promptBudget(String model, ModelPromptBudget.Limit limit) {
+        if (model == null) promptBudget = limit;
+        else modelBudgets.put(model, limit);
+        var caps = limit.capabilities();
+        if (caps != null && caps.maxConcurrentRequests() > 0)
+            modelSlots.put(model, new Semaphore(caps.maxConcurrentRequests(), true));
+        else modelSlots.remove(model);
+    }
+    ModelPromptBudget.Limit promptBudget() { return promptBudget; }
 
     AgentRunner(ProcessExecutor executor, String executable, List<String> args, Path workingDirectory, Duration timeout) {
         this(executor, executable, args, workingDirectory, timeout, AgentPolicy.defaults(timeout));
@@ -69,8 +82,8 @@ final class AgentRunner {
             }
             var controller = admission == null ? adaptive : admission;
             var profile = controller == null ? null : workload(selected, stage, EvidenceText.bytes(prompt));
-            if (admission == null) taskSlots.acquire();
-            taskBudget.set(new Budget(selected, profile, controller, admission == null, retryEmptyResponse));
+            taskSlots.acquire();
+            taskBudget.set(new Budget(selected, profile, controller, modelSlots.get(model), retryEmptyResponse));
         }
         @Override public void close() {
             var budget = taskBudget.get();
@@ -78,7 +91,7 @@ final class AgentRunner {
                 if (budget.firstAdmission != null) budget.adaptive.finished(budget.firstAdmission, accepted);
             } finally {
                 taskBudget.remove();
-                if (budget.sharedSlot) taskSlots.release();
+                taskSlots.release();
             }
         }
         int calls() { return taskBudget.get().calls; }
@@ -89,14 +102,33 @@ final class AgentRunner {
         return new TaskScope(model, schema, stage, prompt, admission, retryEmptyResponse);
     }
 
-    AdaptiveConcurrency verificationAdmission(List<ReviewTasks.Job> jobs, int parallelism, int stage, Path history) {
+    int phaseParallelism(CliOptions options, int work, List<String> models) {
+        int maximum = Math.min(work, options.reviewParallelism());
+        for (String model : models) {
+            var budget = model == null ? promptBudget : modelBudgets.get(model);
+            var caps = budget == null ? null : budget.capabilities();
+            if (caps != null && caps.maxConcurrentRequests() > 0)
+                maximum = Math.min(maximum, caps.maxConcurrentRequests());
+        }
+        return maximum;
+    }
+
+    record PhaseConcurrency(int maximum, AdaptiveConcurrency admission) implements AutoCloseable {
+        @Override public void close() {
+            if (admission != null) admission.saveHistory();
+        }
+    }
+
+    PhaseConcurrency phaseConcurrency(List<ReviewTasks.Job> jobs, int work, CliOptions options, int stage, String phase, Path history) {
+        int maximum = phaseParallelism(options, work, jobs.stream().map(job -> job.task().model()).distinct().toList());
+        if (!options.adaptiveParallelism() || jobs.isEmpty()) return new PhaseConcurrency(maximum, null);
         var ready = jobs.stream().map(ReviewTasks.Job::task).map(task ->
                 workload(commandForModel(task.model()), stage, EvidenceText.bytes(task.prompt()))).toList();
-        return AdaptiveConcurrency.forReadyWork(parallelism, history, timings, ready);
+        return new PhaseConcurrency(maximum, AdaptiveConcurrency.forReadyWork(maximum, history, timings, ready, phase));
     }
     void saveConcurrencyHistory() { if (adaptive != null) adaptive.saveHistory(); }
 
-    private List<String> commandForModel(String model) {
+    List<String> commandForModel(String model) {
         if (model == null) return command;
         var selected = new ArrayList<String>();
         selected.add(command.getFirst());
@@ -117,18 +149,18 @@ final class AgentRunner {
         final List<String> command;
         final AdaptiveConcurrency.Workload workload;
         final AdaptiveConcurrency adaptive;
-        final boolean sharedSlot;
+        final Semaphore modelSlots;
         final boolean retryEmptyResponse;
         long started = System.nanoTime();
         AdaptiveConcurrency.Admission firstAdmission;
         int calls;
         int retries;
-        Budget(List<String> command, AdaptiveConcurrency.Workload workload, AdaptiveConcurrency adaptive, boolean sharedSlot,
+        Budget(List<String> command, AdaptiveConcurrency.Workload workload, AdaptiveConcurrency adaptive, Semaphore modelSlots,
                boolean retryEmptyResponse) {
             this.command = command;
             this.workload = workload;
             this.adaptive = adaptive;
-            this.sharedSlot = sharedSlot;
+            this.modelSlots = modelSlots;
             this.retryEmptyResponse = retryEmptyResponse;
         }
         Duration remaining() throws AgentCallException {
@@ -154,7 +186,7 @@ final class AgentRunner {
     String invoke(String prompt, Path logPrefix) throws IOException, InterruptedException {
         Budget budget = taskBudget.get();
         if (budget == null) budget = new Budget(command,
-                adaptive == null ? null : workload(command, 0, EvidenceText.bytes(prompt)), adaptive, false, true);
+                adaptive == null ? null : workload(command, 0, EvidenceText.bytes(prompt)), adaptive, modelSlots.get(null), true);
         while (true) {
             try {
                 return request(prompt, logPrefix, budget);
@@ -177,7 +209,7 @@ final class AgentRunner {
         var adaptive = budget.adaptive;
         if (adaptive == null) {
             Duration allowed = budget.acquire();
-            return once(prompt, prefix, allowed, budget.calls, budget.command);
+            return invokeWithinModelLimit(prompt, prefix, allowed, budget);
         }
         boolean first = budget.calls == 0;
         long waitBudget = (first ? policy.taskTimeout() : budget.remaining()).toNanos();
@@ -188,13 +220,29 @@ final class AgentRunner {
                 budget.firstAdmission = admission;
             }
             Duration allowed = budget.acquire();
-            return once(prompt, prefix, allowed, budget.calls, budget.command);
+            return invokeWithinModelLimit(prompt, prefix, allowed, budget);
         } catch (AgentCallException failure) {
             if (failure.kind() == AgentCallException.Kind.RATE_LIMIT) adaptive.throttled(admission, failure.retryAfter());
             if (failure.fatal()) adaptive.abort(failure);
             throw failure;
         } finally {
             adaptive.release(admission);
+        }
+    }
+
+    private String invokeWithinModelLimit(String prompt, Path prefix, Duration allowed, Budget budget)
+            throws IOException, InterruptedException {
+        if (budget.modelSlots == null) return once(prompt, prefix, allowed, budget.calls, budget.command);
+        long started = System.nanoTime();
+        if (!budget.modelSlots.tryAcquire(allowed.toNanos(), java.util.concurrent.TimeUnit.NANOSECONDS))
+            throw new AgentCallException(AgentCallException.Kind.BUDGET_EXHAUSTED, "Agent task expired while waiting for a model slot");
+        try {
+            long remaining = allowed.toNanos() - (System.nanoTime() - started);
+            if (remaining <= 0)
+                throw new AgentCallException(AgentCallException.Kind.BUDGET_EXHAUSTED, "Agent task expired while waiting for a model slot");
+            return once(prompt, prefix, Duration.ofNanos(remaining), budget.calls, budget.command);
+        } finally {
+            budget.modelSlots.release();
         }
     }
 

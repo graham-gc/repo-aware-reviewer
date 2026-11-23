@@ -53,9 +53,12 @@ final class ReviewOutput {
         }
     }
 
-    record Discovery(List<ReviewFinding> findings, String notes) {
+    record Discovery(List<ReviewFinding> findings, String notes, EvidenceNeeded evidenceNeeded) {
         static final String CHANGE_SUMMARY_PREFIX = "CHANGE_SUMMARY|";
+        static final String NEEDS_EVIDENCE_PREFIX = "DISCOVERY_NEEDS_EVIDENCE|";
         private static final String VERIFY_QUESTION_PREFIX = "VERIFY_QUESTION|";
+
+        record EvidenceNeeded(String question, String requests) { }
 
         String changeSummary() {
             return notes.lines().map(String::strip)
@@ -93,12 +96,36 @@ final class ReviewOutput {
     }
 
     static Discovery discovery(String response, String reviewer, List<String> changedFiles) throws IOException {
+        return discovery(response, reviewer, changedFiles, false);
+    }
+
+    static Discovery initialDiscovery(String response, String reviewer, List<String> changedFiles) throws IOException {
+        return discovery(response, reviewer, changedFiles, true);
+    }
+
+    private static Discovery discovery(String response, String reviewer, List<String> changedFiles, boolean preflight)
+            throws IOException {
         XmlBlock block = xml(response, "findings");
         var findings = new ArrayList<ReviewFinding>();
         for (Element element : children(block.root(), "finding")) {
             findings.add(finding(element, reviewer + "-" + (findings.size() + 1), changedFiles, false));
         }
-        return new Discovery(List.copyOf(findings), block.remainder());
+        String notes = block.remainder();
+        var lines = notes.lines().map(String::strip).filter(line -> !line.isEmpty()).toList();
+        String marker = Discovery.NEEDS_EVIDENCE_PREFIX;
+        Discovery.EvidenceNeeded evidenceNeeded = null;
+        if (lines.stream().anyMatch(line -> line.startsWith(marker))) {
+            if (!preflight) throw new IOException("The evidence preflight response is only valid for initial reviewers");
+            if (!findings.isEmpty() || !lines.getFirst().startsWith(marker) || lines.size() < 2)
+                throw new IOException("A discovery evidence preflight requires empty findings, a question and evidence requests");
+            String question = lines.getFirst().substring(marker.length()).strip();
+            var requestLines = lines.subList(1, lines.size());
+            String requests = String.join("\n", requestLines);
+            if (question.isEmpty() || !requestLines.equals(EvidenceRequest.parse(requests).stream().map(EvidenceRequest::text).toList()))
+                throw new IOException("Return only the discovery preflight question and one unbulleted line per evidence request");
+            evidenceNeeded = new Discovery.EvidenceNeeded(question, requests);
+        }
+        return new Discovery(List.copyOf(findings), notes, evidenceNeeded);
     }
 
     static Verification verification(String response, ReviewFinding candidate, List<String> changedFiles) throws IOException {
@@ -264,6 +291,22 @@ final class ReviewOutput {
                 + element("endLine", Integer.toString(finding.endLine())) + element("trigger", finding.trigger())
                 + element("impact", finding.impact()) + element("evidence", finding.evidence())
                 + element("diffRelation", finding.diffRelation()) + "</finding>";
+    }
+
+    static String groupingXml(Decision decision) {
+        var verdict = decision.verdict();
+        var finding = verdict.confirmed() == null ? verdict.candidate() : verdict.confirmed();
+        String location = finding.path() + ":" + finding.line()
+                + (finding.endLine() == finding.line() ? "" : "–" + finding.endLine());
+        return "<finding id=\"" + verdict.candidate().id() + "\">"
+                + element("status", verdict.status().name()) + element("title", finding.title())
+                + element("location", location) + element("trigger", finding.trigger())
+                + element("impact", finding.impact())
+                + element("diffRelation", decision.relation().name() + ": " + finding.diffRelation())
+                + (decision.contract().isBlank() ? "" : element("contract", decision.contract()))
+                + (verdict.status() == Status.CONFIRMED ? "" : element("reason", verdict.reason()))
+                + (verdict.nextCheck().isBlank() ? "" : element("nextCheck", verdict.nextCheck()))
+                + "</finding>";
     }
 
     private static String element(String name, String value) {

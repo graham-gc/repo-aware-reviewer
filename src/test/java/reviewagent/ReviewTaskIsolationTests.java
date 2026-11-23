@@ -70,23 +70,48 @@ final class ReviewTaskIsolationTests {
 
                 - Trace `Runner.run()` at src/runner.py:18 using [coverage](coverage.md).
                 - Evidence: "return approved"
+                - Trigger — `rename_bpmn_diagram` receives a valid `diagram_id` and a nonempty `name`…
+                - Evidence — REACHABLE_FAILURE: src/runner.py:18 @ 0123456789012345678901234567890123456789 — The guard is bypassed.
 
                 ```python
                 return approved
                 ```
                 """;
         var translator = new ReportTranslation(source);
-        String reply = translator.prompt().lines().filter(line -> line.startsWith("LINE|"))
-                .map(line -> line.replaceFirst("^LINE", "TRANSLATION").replace("Trace", "检查")
-                        .replace("using", "参考").replace("coverage", "覆盖记录").replace("Evidence", "证据"))
+        String prompt = translator.prompt();
+        String reply = prompt.lines().filter(line -> line.startsWith("FIELD|")).map(line -> {
+                    var field = line.split("\\|", 4);
+                    String value = field[3];
+                    if (field[2].equals("TRIGGER")) {
+                        var markers = java.util.regex.Pattern.compile("⟦[0-9]+⟧").matcher(value).results()
+                                .map(java.util.regex.MatchResult::group).toList();
+                        value = "以有效的 " + markers.get(1) + " 和非空的 " + markers.get(2) + " 调用 " + markers.getFirst() + "…";
+                    } else {
+                        value = value.replace("Trace", "检查").replace("using", "参考").replace("coverage", "覆盖记录")
+                                .replace("Evidence", "证据").replace("The guard is bypassed.", "保护条件被绕过。");
+                    }
+                    return "TRANSLATION|" + field[1] + "|" + value;
+                })
                 .collect(java.util.stream.Collectors.joining("\n"));
         String chinese = translator.apply(reply);
         require(chinese.startsWith("# 审查范围\n")
                 && chinese.contains("`Runner.run()`") && chinese.contains("src/runner.py:18")
                 && chinese.contains("[覆盖记录](coverage.md)") && chinese.contains("\"return approved\"")
+                && chinese.contains("触发条件 — 以有效的 `diagram_id` 和非空的 `name` 调用 `rename_bpmn_diagram`…")
+                && chinese.contains("证据 — 可达故障: src/runner.py:18 @ 0123456789012345678901234567890123456789 — 保护条件被绕过。")
+                && !prompt.contains("REACHABLE_FAILURE") && !prompt.contains("0123456789012345678901234567890123456789")
+                && prompt.contains("|EVIDENCE_CLAIMS|The guard is bypassed.")
                 && chinese.contains("```python\nreturn approved\n```"), "translation preserves locations, links, code and quotations");
-        fails(() -> translator.apply(reply.replace("[KEEP_1]", "other/file.py:9")));
+        fails(() -> translator.apply(reply.replace("⟦1⟧", "other/file.py:9")));
+        fails(() -> translator.apply(reply.replace("⟦1⟧", "⟦0⟧")));
+        fails(() -> translator.apply(reply.replace("…", "。")));
         fails(() -> translator.apply(reply.lines().findFirst().orElseThrow()));
+
+        var comparison = new ReportTranslation("Compare `base_mode` → `target_mode` via [source](docs/a(b).md).");
+        String comparisonReply = "TRANSLATION|F1-L3|源码\nTRANSLATION|F1|比较 ⟦0⟧ → ⟦1⟧，见 ⟦2⟧。";
+        require(comparison.apply(comparisonReply).equals("比较 `base_mode` → `target_mode`，见 [源码](docs/a(b).md)。"),
+                "a translated link label remains bound to its original destination");
+        fails(() -> comparison.apply(comparisonReply.replace("⟦0⟧ → ⟦1⟧", "⟦1⟧ → ⟦0⟧")));
     }
 
     private static void initialSilenceDoesNotRetry() throws Exception {
@@ -145,7 +170,7 @@ final class ReviewTaskIsolationTests {
                 REPORT
                     ;;
                   'Translate the final review report'*) printf '%s\\n' "$prompt" | sed -n \
-                    's/^LINE|/TRANSLATION|/p' | sed -e 's/Review incomplete:/审查未完成：/' \
+                    -E 's/^FIELD[|]([^|]+)[|][^|]+[|]/TRANSLATION|\\1|/p' | sed -e 's/Review incomplete:/审查未完成：/' \
                      -e 's/Check not completed/检查未完成/' -e 's/did not complete verification/未完成复核/'
                     ;;
                   *) exit 88 ;;
