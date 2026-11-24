@@ -8,6 +8,7 @@ import java.util.regex.Pattern;
 record EvidenceRequest(int line, String text) {
     private static final Pattern MARKER = Pattern.compile("REQUEST_[A-Z][A-Z_]*\\|");
     private static final Pattern DISCOVERY_OWNER = Pattern.compile("\\[finding:([1-9][0-9]{0,8})\\]\\h+\\S");
+    private static final Pattern DISCOVERY_PREMISE = Pattern.compile("\\[premise:([1-9][0-9]{0,8})\\]\\h+");
     static final String PATH_GUIDANCE = """
             Use the literal base for the old revision or target for the new one. Use repository-relative paths
             supported by the evidence for that revision. Replace fields in braces and sample paths with real
@@ -26,7 +27,8 @@ record EvidenceRequest(int line, String text) {
             Java method signature selector. The file request form is `REQUEST_FILE|{side}|{path}|{selector}|{reason}`.
             Use references only to locate uses. A reference or constructor does not establish a declaration.
             If a narrower selector in the same file is sufficient on its own, declare it as a fallback:
-            In the selector field, `symbol:run;fallback=42:49` and `symbol:run;fallback=near:dispatch(` illustrate this.
+            In the selector field, `35:78;fallback=42:49`, `symbol:run;fallback=42:49`, and
+            `symbol:run;fallback=near:dispatch(` illustrate this.
             The CLI tries the fallback locally if the first selector cannot be supplied. Do not guess line
             numbers. A near fallback needs one literal match inside the requested symbol; verify the binding
             and surrounding control flow. Use a directory or glob with references to locate callers or readers:
@@ -58,12 +60,22 @@ record EvidenceRequest(int line, String text) {
         int count = fieldCount();
         if (navigationOnly() || count == 5 && !text.startsWith("REQUEST_FILE|")) return 0;
         String[] fields = text.split("\\|", count);
-        if (fields.length != count || count == 5 && fields[3].startsWith("references:")) return 0;
+        if (fields.length != count || count == 5 && fields[3].startsWith("references:") && discoveryPremise() == 0) return 0;
         var owner = DISCOVERY_OWNER.matcher(fields[count - 1].stripLeading());
         return owner.lookingAt() ? Integer.parseInt(owner.group(1)) : 0;
     }
 
     String discoveryPurpose() {
+        String reason = discoveryReason();
+        return DISCOVERY_PREMISE.matcher(reason).replaceFirst("").strip();
+    }
+
+    int discoveryPremise() {
+        var premise = DISCOVERY_PREMISE.matcher(discoveryReason());
+        return premise.lookingAt() ? Integer.parseInt(premise.group(1)) : 0;
+    }
+
+    private String discoveryReason() {
         String[] fields = text.split("\\|", fieldCount());
         String reason = fields[fields.length - 1].strip();
         return DISCOVERY_OWNER.matcher(reason).lookingAt() ? reason.substring(reason.indexOf(']') + 1).strip() : "";

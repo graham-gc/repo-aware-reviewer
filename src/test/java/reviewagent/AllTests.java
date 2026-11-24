@@ -237,7 +237,7 @@ public final class AllTests {
         check(english.contains("Output language: English (en)"));
         check(english.contains("# Review scope\n") && english.contains("Translate business statements"));
         String discovery = new PromptFactory().discovery(evidence);
-        check(discovery.indexOf("REQUIRED RESPONSE") < discovery.indexOf("If missing context"));
+        check(discovery.indexOf("REQUIRED RESPONSE") < discovery.indexOf("EVIDENCE HANDOFF"));
         check(discovery.contains("<findings/>") && discovery.contains("Output language: English (en)")
                 && discovery.contains("中文需求原文"));
     }

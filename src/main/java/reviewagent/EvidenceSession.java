@@ -9,7 +9,7 @@ import java.util.LinkedHashMap;
 
 /** Shared request counts and byte budget across discovery, verification and adjudication. */
 final class EvidenceSession {
-    record Delivery(Set<String> sources, List<String> missing) { }
+    record Delivery(Set<String> sources, List<String> missing, List<String> recoveries) { }
     private final EvidenceBundle evidence;
     private final SupplementalEvidence collector;
     private final int fileLimit;
@@ -17,6 +17,7 @@ final class EvidenceSession {
     private final Set<String> seen = new LinkedHashSet<>();
     private final Map<String, Set<String>> fulfilled = new LinkedHashMap<>();
     private final Map<String, String> failures = new LinkedHashMap<>();
+    private final Map<String, String> recoveredPaths = new LinkedHashMap<>();
     private final Map<String, String> initialRequests = new LinkedHashMap<>();
     private final StringBuilder markdown = new StringBuilder();
     private final StringBuilder coverage = new StringBuilder();
@@ -38,12 +39,20 @@ final class EvidenceSession {
     String initialRequests(String candidate) { return initialRequests.getOrDefault(candidate, ""); }
 
     boolean load(String replies, String phase) throws InterruptedException {
+        return load(replies, phase, "");
+    }
+
+    void loadDiscovery(String replies, String phase) throws InterruptedException {
+        load(replies, phase, replies);
+    }
+
+    private boolean load(String replies, String phase, String requestGroup) throws InterruptedException {
         int coverageStart = coverage.length();
-        try { return loadRound(replies, phase); }
+        try { return loadRound(replies, phase, requestGroup); }
         finally { lastCoverage = coverage.substring(coverageStart); }
     }
 
-    private boolean loadRound(String replies, String phase) throws InterruptedException {
+    private boolean loadRound(String replies, String phase, String requestGroup) throws InterruptedException {
         StringBuilder fresh = new StringBuilder();
         int newFiles = 0;
         int newQueries = 0;
@@ -89,13 +98,14 @@ final class EvidenceSession {
         EvidenceBundle round = bundle(catalog(), remaining);
         SupplementalEvidence.Result result = collector.collect(round, requests,
                 fileLimit == 0 ? 0 : Math.max(1, fileLimit - files),
-                knowledgeLimit == 0 ? 0 : Math.max(1, knowledgeLimit - queries));
+                knowledgeLimit == 0 ? 0 : Math.max(1, knowledgeLimit - queries), requestGroup);
         files += fileLimit == 0 ? newFiles : Math.min(newFiles, Math.max(0, fileLimit - files));
         queries += knowledgeLimit == 0 ? newQueries : Math.min(newQueries, Math.max(0, knowledgeLimit - queries));
         markdown.append(result.markdown());
         catalog = catalog.plus(result.catalog());
         result.resolvedSources().forEach((key, ids) -> { if (!ids.isEmpty()) fulfilled.put(key, ids); });
         failures.putAll(result.failures());
+        recoveredPaths.putAll(result.recoveredPaths());
         coverage.append(result.coverage());
         return result.hasMaterial();
     }
@@ -108,12 +118,21 @@ final class EvidenceSession {
     Delivery discoveryDelivery(String requests, EvidenceCatalog supplied) {
         return delivery(requests, supplied, true);
     }
-    record VerificationBrief(String question, Map<String, VerificationRead> reads) {
-        static final VerificationBrief EMPTY = new VerificationBrief("", Map.of());
+
+    List<String> outstandingDiscovery(String requests, EvidenceCatalog supplied) {
+        return delivery(requests, supplied, true, true).missing();
+    }
+    record VerificationBrief(String question, Map<Integer, String> premises, Map<Integer, List<VerificationRead>> reads) {
+        static final VerificationBrief EMPTY = new VerificationBrief("", Map.of(), Map.of());
 
         Set<String> sources() {
-            return reads.values().stream().flatMap(read -> read.sources().stream())
+            return reads.values().stream().flatMap(List::stream).flatMap(read -> read.sources().stream())
                     .collect(java.util.stream.Collectors.toSet());
+        }
+
+        List<Set<String>> premiseSources() {
+            return premises.keySet().stream().sorted().map(id -> reads.getOrDefault(id, List.of()).stream()
+                    .flatMap(read -> read.sources().stream()).collect(java.util.stream.Collectors.toUnmodifiableSet())).toList();
         }
 
         String instructions(EvidenceCatalog supplied) {
@@ -121,13 +140,17 @@ final class EvidenceSession {
             if (!question.isEmpty())
                 text.append("\n").append(EvidenceText.block("Discovery's question for independent verification", "text", question))
                         .append("Treat it as a lead. Check all facts needed to decide the original candidate.\n");
-            if (!reads.isEmpty()) {
+            if (!reads.isEmpty() || !premises.isEmpty()) {
                 text.append("\nDISCOVERY EVIDENCE HANDOFF\n");
-                reads.entrySet().stream().sorted(Map.Entry.comparingByKey()).forEach(entry -> {
-                    text.append("- ").append(EvidenceText.oneLine(entry.getKey())).append(" — ")
-                            .append(entry.getValue().availability(supplied)).append(". Check: ")
-                            .append(entry.getValue().purpose()).append('\n');
+                premises.entrySet().stream().sorted(Map.Entry.comparingByKey()).forEach(entry -> {
+                    int id = entry.getKey();
+                    text.append("Premise ").append(id).append(" — ")
+                            .append(entry.getValue().isBlank() ? "Conflicting descriptions in discovery" : entry.getValue()).append('\n');
+                    var required = reads.getOrDefault(id, List.of());
+                    if (required.isEmpty()) text.append("- Discovery did not name a source. Check the supplied evidence for this premise.\n");
+                    required.forEach(read -> text.append(read.describe(supplied)));
                 });
+                reads.getOrDefault(0, List.of()).forEach(read -> text.append(read.describe(supplied)));
                 text.append("Check the supplied evidence for a decisive refutation first. For any remaining decisive gap, "
                         + "request a specific alternative or a narrower excerpt, or state what a maintainer must establish.\n");
             }
@@ -135,8 +158,13 @@ final class EvidenceSession {
         }
     }
 
-    record VerificationRead(Set<String> sources, String failure, String purpose) {
-        String availability(EvidenceCatalog supplied) {
+    record VerificationRead(String request, Set<String> sources, String failure, String purpose, String recovery) {
+        String describe(EvidenceCatalog supplied) {
+            return "- " + EvidenceText.oneLine(request) + " — " + availability(supplied) + ". "
+                    + (recovery.isEmpty() ? "" : recovery + ". ") + "Check: " + purpose + "\n";
+        }
+
+        private String availability(EvidenceCatalog supplied) {
             if (sources.isEmpty()) return failure.isBlank() ? "not collected" : "unavailable: " + failure;
             var visible = supplied.select(sources);
             if (visible.sources().size() < sources.size()) return "collected, but not fully included in this prompt";
@@ -145,18 +173,27 @@ final class EvidenceSession {
         }
     }
 
-    Map<String, VerificationBrief> verificationBriefs(Map<String, String> questions, Map<String, List<EvidenceRequest>> requests) {
+    Map<String, VerificationBrief> verificationBriefs(Map<String, String> questions,
+            Map<String, Map<Integer, String>> candidatePremises, Map<String, List<EvidenceRequest>> requests) {
         var byCandidate = new LinkedHashMap<String, VerificationBrief>();
-        questions.forEach((id, question) -> byCandidate.put(id, new VerificationBrief(question, Map.of())));
-        requests.forEach((candidate, lines) -> {
-            var byRequest = new LinkedHashMap<String, VerificationRead>();
-            for (var request : lines) {
+        var candidates = new LinkedHashSet<>(questions.keySet());
+        candidates.addAll(candidatePremises.keySet());
+        candidates.addAll(requests.keySet());
+        for (String candidate : candidates) {
+            var premises = candidatePremises.getOrDefault(candidate, Map.of());
+            var byPremise = new LinkedHashMap<Integer, LinkedHashMap<String, VerificationRead>>();
+            for (var request : requests.getOrDefault(candidate, List.of())) {
                 String key = request.key();
-                byRequest.putIfAbsent(key, new VerificationRead(fulfilled.getOrDefault(key, Set.of()),
-                        failures.getOrDefault(key, ""), EvidenceText.linePrefix(EvidenceText.oneLine(request.discoveryPurpose()), 300)));
+                int premise = premises.containsKey(request.discoveryPremise()) ? request.discoveryPremise() : 0;
+                byPremise.computeIfAbsent(premise, unused -> new LinkedHashMap<>()).putIfAbsent(key,
+                        new VerificationRead(key, fulfilled.getOrDefault(key, Set.of()), failures.getOrDefault(key, ""),
+                                EvidenceText.linePrefix(EvidenceText.oneLine(request.discoveryPurpose()), 300),
+                                recoveredPaths.getOrDefault(key, "")));
             }
-            byCandidate.put(candidate, new VerificationBrief(questions.getOrDefault(candidate, ""), Map.copyOf(byRequest)));
-        });
+            var reads = new LinkedHashMap<Integer, List<VerificationRead>>();
+            byPremise.forEach((id, byRequest) -> reads.put(id, List.copyOf(byRequest.values())));
+            byCandidate.put(candidate, new VerificationBrief(questions.getOrDefault(candidate, ""), Map.copyOf(premises), Map.copyOf(reads)));
+        }
         return byCandidate;
     }
 
@@ -170,6 +207,7 @@ final class EvidenceSession {
 
     private Set<String> deliverFollowup(String requester, String requests, EvidenceCatalog supplied, boolean allowPartial) {
         var delivery = delivery(requests, supplied, false);
+        if (!delivery.recoveries().isEmpty()) lastCoverage += "\n" + String.join("\n", delivery.recoveries()) + "\n";
         if (delivery.missing().isEmpty()) {
             recordFollowup(requester, requests, delivery.sources());
             return delivery.sources();
@@ -189,8 +227,13 @@ final class EvidenceSession {
     }
 
     private Delivery delivery(String requests, EvidenceCatalog supplied, boolean includeNavigation) {
+        return delivery(requests, supplied, includeNavigation, false);
+    }
+
+    private Delivery delivery(String requests, EvidenceCatalog supplied, boolean includeNavigation, boolean suppliedOnly) {
         var result = new LinkedHashSet<String>();
         var missing = new LinkedHashSet<String>();
+        var recoveries = new LinkedHashSet<String>();
         var visible = supplied.sources().stream().map(EvidenceSource::id).collect(java.util.stream.Collectors.toSet());
         var available = catalog();
         var suppliedBundle = bundle(supplied, 0);
@@ -200,15 +243,19 @@ final class EvidenceSession {
             for (String id : fulfilled.getOrDefault(request.key(), Set.of())) {
                 var source = available.source(id);
                 if (source == null || !includeNavigation && source.role(EvidenceSource.Role.INDEX)) continue;
+                boolean alreadySupplied = visible.contains(id) || FileEvidenceCache.alreadySupplied(source, supplied);
+                if (!alreadySupplied && suppliedOnly) continue;
                 fulfilledRequest = true;
-                if (!visible.contains(id) && !FileEvidenceCache.alreadySupplied(source, supplied)) result.add(id);
+                if (!alreadySupplied) result.add(id);
             }
             if (!fulfilledRequest) {
                 String reason = failures.get(request.key());
                 missing.add(reason == null ? request.key() : request.key() + " (" + reason + ")");
+            } else if (recoveredPaths.containsKey(request.key())) {
+                recoveries.add(recoveredPaths.get(request.key()));
             }
         }
-        return new Delivery(java.util.Collections.unmodifiableSet(result), List.copyOf(missing));
+        return new Delivery(java.util.Collections.unmodifiableSet(result), List.copyOf(missing), List.copyOf(recoveries));
     }
 
     void recordDelivery(String requester, Set<String> ids) {

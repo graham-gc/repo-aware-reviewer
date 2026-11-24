@@ -136,7 +136,7 @@ final class AdaptiveReviewTests {
                     "unbound finding locations cannot be published or trigger another discovery call");
 
             Path forced = pipeline.run(options(arguments, "--review-mode", "deep"));
-            check(calls(forced, 4) && !Files.exists(forced.resolve("adaptive")), "explicit deep review bypasses local review");
+            check(calls(forced, 5) && !Files.exists(forced.resolve("adaptive")), "explicit deep review bypasses local review");
 
             Files.writeString(repository.resolve("README.md"), "# Guide\nRun the missing example.\n");
             Files.writeString(repository.resolve("README.zh-CN.md"), "# 指南\n运行缺失的示例。\n");
@@ -186,11 +186,11 @@ final class AdaptiveReviewTests {
                     "<documentation-review><summary>Updated two guides.</summary><doc-findings/>"
                             + "<escalate>Check the example against the CLI implementation.</escalate></documentation-review>");
             Path expanded = pipeline.run(options(arguments));
-            check(Main.reviewExitCode(expanded) == 0 && calls(expanded, 5)
+            check(Main.reviewExitCode(expanded) == 0 && calls(expanded, 6)
                     && Files.readString(expanded.resolve("coverage.md")).contains("Documentation review requested broader evidence"),
                     "a documentation issue that needs implementation evidence can request full review");
             Path deepDocumentation = pipeline.run(options(arguments, "--review-mode", "deep"));
-            check(calls(deepDocumentation, 4) && !Files.exists(deepDocumentation.resolve("documentation")),
+            check(calls(deepDocumentation, 5) && !Files.exists(deepDocumentation.resolve("documentation")),
                     "explicit deep review bypasses the documentation route");
 
             String distantContext = "\n# Unrelated detail.\n".repeat(50) + "# FAR_FROM_EDIT\n";

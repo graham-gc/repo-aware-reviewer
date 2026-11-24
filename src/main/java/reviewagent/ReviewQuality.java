@@ -476,10 +476,27 @@ final class ReviewQuality {
 
     private VerificationBatch.Member withHandoff(ReadyCheck check, VerificationBatch.Member member,
             Map<String, EvidenceSession.VerificationBrief> briefs, int maximum) {
-        var sources = briefs.getOrDefault(check.candidate.id(), EvidenceSession.VerificationBrief.EMPTY).sources();
-        if (sources.isEmpty() || sourceIds(member.view().bundle().catalog()).containsAll(sources)) return member;
+        var brief = briefs.getOrDefault(check.candidate.id(), EvidenceSession.VerificationBrief.EMPTY);
+        var sources = brief.sources();
+        var visible = sourceIds(member.view().bundle().catalog());
+        if (visible.containsAll(sources)) return member;
         var enriched = check.propose(check.compact, sources);
-        return EvidenceText.bytes(enriched.task().prompt()) <= maximum ? enriched : member;
+        if (EvidenceText.bytes(enriched.task().prompt()) <= maximum) return enriched;
+
+        // Keep the initial view and admit complete sets of collected sources one premise at a time.
+        var pinned = new LinkedHashSet<String>();
+        var selected = member;
+        for (var group : brief.premiseSources()) {
+            if (sourceIds(selected.view().bundle().catalog()).containsAll(group)) continue;
+            var next = new LinkedHashSet<>(pinned);
+            next.addAll(group);
+            var proposal = check.propose(check.compact, next);
+            if (EvidenceText.bytes(proposal.task().prompt()) <= maximum) {
+                pinned = next;
+                selected = proposal;
+            }
+        }
+        return selected;
     }
 
     /** A continuation sees its initial evidence plus the blocks delivered to its own question. */

@@ -27,6 +27,12 @@ record EvidenceQuery(String command, String side, String language, String contex
 
     String reference() { return selector.substring(REFERENCES.length()); }
 
+    static EvidenceSource.LineRange sourceRange(String selector) {
+        if (!LINES.matcher(selector).matches()) return null;
+        var range = EvidenceSource.LineRange.parse(selector);
+        return range.last() >= range.first() ? range : null;
+    }
+
     static String normalizeSelector(String selector) {
         if (!selector.startsWith(REFERENCES)) return selector;
         var construction = CONSTRUCTION.matcher(selector.substring(REFERENCES.length()));
@@ -54,10 +60,13 @@ record EvidenceQuery(String command, String side, String language, String contex
         if (alternative >= 0) {
             fallback = fields[3].substring(alternative + FALLBACK.length());
             fields[3] = fields[3].substring(0, alternative);
-            boolean range = LINES.matcher(fallback).matches();
+            var range = sourceRange(fallback);
+            var primaryRange = sourceRange(fields[3]);
             boolean near = fallback.startsWith(NEAR) && ANCHOR.matcher(fallback.substring(NEAR.length())).matches();
-            boolean narrower = fields[3].equals("all") && (range || named(fallback, SYMBOL) || named(fallback, DECLARATION))
-                    || named(fields[3], SYMBOL) && (range || near);
+            boolean narrower = fields[3].equals("all") && (range != null || named(fallback, SYMBOL) || named(fallback, DECLARATION))
+                    || named(fields[3], SYMBOL) && (range != null || near)
+                    || primaryRange != null && range != null && range.first() >= primaryRange.first()
+                        && range.last() <= primaryRange.last() && !range.equals(primaryRange);
             if (!narrower) throw new IOException("selector: expected a narrower file selector after " + FALLBACK);
         }
         if (file && fields[3].startsWith(DECLARATION) && !named(fields[3], DECLARATION))
@@ -79,6 +88,10 @@ record EvidenceQuery(String command, String side, String language, String contex
 
     EvidenceQuery fallbackQuery() {
         return new EvidenceQuery(command, side, language, context, resource, fallback, reason, "");
+    }
+
+    EvidenceQuery atPath(String path) {
+        return new EvidenceQuery(command, side, language, context, path, selector, reason, fallback);
     }
 
     List<String> key() { return List.of(command, side, language, context, resource, selector, fallback); }

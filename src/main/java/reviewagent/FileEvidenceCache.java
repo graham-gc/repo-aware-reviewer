@@ -36,10 +36,10 @@ final class FileEvidenceCache {
         boolean whole = query.selector().equals("all");
         int first = 1, last = Integer.MAX_VALUE;
         if (!whole) {
-            if (!EvidenceQuery.LINES.matcher(query.selector()).matches()) return Set.of();
-            String[] range = query.selector().split(":");
-            first = Integer.parseInt(range[0]); last = Integer.parseInt(range[1]);
-            if (last < first || last - first >= 200) return Set.of();
+            var range = EvidenceQuery.sourceRange(query.selector());
+            if (range == null) return Set.of();
+            first = range.first();
+            last = range.last();
         }
         String revision = query.side().equals("base") ? scope.baseCommit() : scope.targetCommit();
         List<Part> parts = catalog.sources().stream()

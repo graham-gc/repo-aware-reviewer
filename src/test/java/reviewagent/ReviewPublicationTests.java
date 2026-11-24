@@ -302,19 +302,19 @@ final class ReviewPublicationTests {
             var pipeline = new ReviewPipeline(executor, Clock.systemUTC());
             Path legacy = pipeline.run(options);
             require(Main.reviewExitCode(legacy) == 0 && Files.exists(legacy.resolve("adjudication/R1-1-response.md"))
-                    && Files.readString(legacy.resolve("timings.md")).contains("Actual launched attempts: 7\n"),
+                    && Files.readString(legacy.resolve("timings.md")).contains("Actual launched attempts: 8\n"),
                     "an otherwise valid legacy decision without linked trigger and outcome gets independent adjudication");
             Files.writeString(response, positive.replace("</verification>", linkedProof(excerpt, excerpt) + "</verification>"));
             Path direct = pipeline.run(options);
             require(Main.reviewExitCode(direct) == 0 && !Files.exists(direct.resolve("adjudication"))
-                    && Files.readString(direct.resolve("timings.md")).contains("Actual launched attempts: 5\n")
+                    && Files.readString(direct.resolve("timings.md")).contains("Actual launched attempts: 6\n")
                     && Files.readString(direct.resolve("verified-findings.md")).equals(Files.readString(legacy.resolve("verified-findings.md"))),
                     "default deep verification saves grouping and adjudication and preserves the published claim and citations");
 
             Files.writeString(discoveries, "<findings>" + finding.repeat(2) + "</findings>");
             Path duplicate = pipeline.run(options);
             require(Main.reviewExitCode(duplicate) == 0 && !Files.exists(duplicate.resolve("adjudication"))
-                    && Files.readString(duplicate.resolve("timings.md")).contains("Actual launched attempts: 5\n")
+                    && Files.readString(duplicate.resolve("timings.md")).contains("Actual launched attempts: 6\n")
                     && Files.readString(duplicate.resolve("coverage.md")).contains("Verification reused for R1-2 from R1-1")
                     && Files.readString(duplicate.resolve("verified-findings.md")).equals(Files.readString(direct.resolve("verified-findings.md"))),
                     "two identical claims reuse validated source proof and publish a single finding without another request");
@@ -411,7 +411,8 @@ final class ReviewPublicationTests {
                           *'Correctness and regressions.'*) [ "$2" = alpha ] || exit 94 ;;
                           *'Business contracts and compatibility.'*) [ "$2" = beta ] || exit 95 ;;
                           *'Requirements compliance.'*) [ "$2" = beta ] || exit 95 ;;
-                          *'Boundary conditions and error handling.'*|*'Security and isolation.'*) [ "$2" = gamma ] || exit 96 ;;
+                          *'Failure handling and recovery.'*|*'Security and isolation.'*|*'Boundary inputs and data conversion.'*)
+                            [ "$2" = gamma ] || exit 96 ;;
                           *) exit 93 ;;
                         esac ;;
                       *) [ "$#" -eq 1 ] && [ "$1" = '--model=judge' ] || exit 97 ;;
@@ -420,7 +421,8 @@ final class ReviewPublicationTests {
                     case "$prompt" in
                       'You are the discovery stage'*)
                         case "$prompt" in
-                          *'Requirements compliance.'*|*'Security and isolation.'*) printf '<findings/>'; exit ;;
+                          *'Requirements compliance.'*|*'Security and isolation.'*|*'Boundary inputs and data conversion.'*)
+                            printf '<findings/>'; exit ;;
                         esac
                         if [ "$2" = gamma ] && [ -f "$root/fail-discovery" ]; then
                           printf 'REQUEST_FILE|target|calculator.py|all|Check the input guard.\n'

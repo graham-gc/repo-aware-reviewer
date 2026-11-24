@@ -11,6 +11,7 @@ final class PromptFactory {
             whether the supplied sources can refute the trigger or establish the trigger, outcome and change
             attribution. When a claim depends on compatibility or an external consumer, check whether the
             affected consumer still exists or is supported. Compare the relevant base and target behavior.
+            Follow any guard, recovery branch or later write that could change the observable outcome.
             If the supplied evidence settles this candidate, give the verdict in this reply.
             If a decisive premise cannot be checked, stop that candidate before broader analysis. Return
             INSUFFICIENT_EVIDENCE with the exact missing premise in <nextCheck> and request all identifiable
@@ -111,6 +112,9 @@ final class PromptFactory {
                 followed only by the smallest set of evidence request lines needed together. Omit candidate
                 findings and change summary in this reply. The CLI will collect the evidence and restart this
                 role on the same changes. If the material is sufficient, complete discovery in this reply.
+                Use the latest delivery update and cite recovered sources by their resolved paths. If some
+                sources remain unavailable, review the questions that the delivered material can answer. Leave
+                blocked questions open and do not repeat unavailable requests.
                 Gaps discovered later for specific candidates use the ordinary evidence handoff below.
 
                 """.formatted(ReviewOutput.Discovery.NEEDS_EVIDENCE_PREFIX);
@@ -148,8 +152,9 @@ final class PromptFactory {
 
                 FINDING FORMAT
                 Use every field once. Anchor to the changed code that introduces or exposes the failure.
-                Use an exact repository-relative path and positive inclusive target lines. For a single line,
-                set endLine equal to line. Cite other participating files in evidence.
+                Copy the full repository-relative <path> verbatim from the changed paths. Never add ./ or ../.
+                Use positive inclusive target lines. For a single line, set endLine equal to line.
+                Cite other participating files in evidence.
                 Rate severity by the supported impact and scope: CRITICAL, HIGH, MEDIUM, or LOW.
                 Reserve HIGH and CRITICAL for supported material loss, exposure, or disruption.
                 Escape XML characters or use CDATA for literal source. Use only the outer Markdown fence.
@@ -169,16 +174,22 @@ final class PromptFactory {
                 ```
 
                 EVIDENCE HANDOFF
-                Write one unbulleted VERIFY_QUESTION|N|Exact question per candidate. N is the
-                candidate's one-based position in this reply's <findings>. Name the specific premises
-                that could confirm or refute the claim. For compatibility or cross-component claims, check
-                both the affected consumer and any support requirement the claim depends on.
-                If missing context could change a candidate, request every identifiable, unsupplied excerpt
-                needed to decide those premises together. Give the pinned side, exact path and narrowest usable
-                selector. Start each candidate's request reason with [finding:N] and describe the premise it checks.
-                Candidate read: `REQUEST_FILE|target|{tracked path}|{first:last}|[finding:1] Check the caller guard`.
-                Baseline read: `REQUEST_FILE|base|{tracked path}|all|[finding:1] Compare the earlier behavior`.
-                If no source for a missing premise is known, name the gap in VERIFY_QUESTION.
+                List each premise that could change the verdict as VERIFY_PREMISE|N|P|Decisive question.
+                N is the candidate's one-based position in <findings>; P is a positive number unique to
+                that candidate. Use VERIFY_QUESTION|N|Exact question only for an additional overarching check.
+                For an observable failure, cover the reachable entry, the faulty operation, and any downstream
+                guard or recovery that could change the final result. For a compatibility claim, identify the
+                affected consumer and its support requirement. An absence claim needs the complete relevant
+                registration or lookup scope.
+                For each premise, cite the known source locations in the finding's evidence and request all
+                identifiable excerpts still needed together. Include unchanged callees, guards and fallback
+                behavior when they could change the verdict. Reuse complete diff hunks already in evidence.
+                Use the pinned side and the narrowest scope that can decide the question. If you know a symbol
+                but cannot locate its uses, request a scoped literal references search. State the gap in the
+                premise when no source is known. Begin each request reason with [finding:N] [premise:P].
+                Candidate read: `REQUEST_FILE|target|{tracked path}|{first:last}|[finding:1] [premise:1] Check the caller guard`.
+                Baseline read: `REQUEST_FILE|base|{tracked path}|all|[finding:1] [premise:2] Compare the earlier behavior`.
+                Reference search: `REQUEST_FILE|target|{directory}|references:{symbol}|[finding:1] [premise:1] Locate callers to inspect`.
                 Keep commentary and acceptance assessments out of the response.
                 """ + summary + handoff + """
 
@@ -724,8 +735,10 @@ final class PromptFactory {
                 EVIDENCE REQUEST SYNTAX
                 Use one unbulleted line per request, in the response location specified for this task.
                 `REQUEST_FILE|{side}|{path or directory/glob}|{selector}|{reason}`
-                Use an inclusive range of up to 200 lines, all for a small file, or a symbol or declaration
-                selector documented by the file's module (up to 200 lines).
+                Use the smallest inclusive first:last range that answers the question, all for a small file,
+                or a symbol or declaration selector documented by the file's module. The CLI supplies the
+                selected source when it fits the remaining evidence byte budget.
+                If a shorter range would independently answer the question, add ;fallback=first:last.
                 `REQUEST_LANGUAGE|{side}|{language}|{context}|{resource}|{selector}|{reason}`
                 Use REQUEST_LANGUAGE for provider-specific queries with the registered language ID, a tracked
                 context file, and a resource and selector supported by that provider. The CLI performs the reads.

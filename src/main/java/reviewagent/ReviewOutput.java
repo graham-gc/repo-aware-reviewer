@@ -56,6 +56,7 @@ final class ReviewOutput {
     record Discovery(List<ReviewFinding> findings, String notes, EvidenceNeeded evidenceNeeded) {
         static final String CHANGE_SUMMARY_PREFIX = "CHANGE_SUMMARY|";
         static final String NEEDS_EVIDENCE_PREFIX = "DISCOVERY_NEEDS_EVIDENCE|";
+        static final String VERIFY_PREMISE_PREFIX = "VERIFY_PREMISE|";
         private static final String VERIFY_QUESTION_PREFIX = "VERIFY_QUESTION|";
 
         record EvidenceNeeded(String question, String requests) { }
@@ -92,6 +93,23 @@ final class ReviewOutput {
             }
             questions.keySet().removeAll(ambiguous);
             return questions;
+        }
+
+        Map<String, Map<Integer, String>> candidatePremises() {
+            var plans = new LinkedHashMap<String, Map<Integer, String>>();
+            for (String line : notes.lines().map(String::strip).toList()) {
+                if (!line.startsWith(VERIFY_PREMISE_PREFIX)) continue;
+                String[] fields = line.split("\\|", 4);
+                if (fields.length != 4 || !fields[1].matches("[1-9][0-9]{0,8}")
+                        || !fields[2].matches("[1-9][0-9]{0,8}") || fields[3].isBlank()) continue;
+                int owner = Integer.parseInt(fields[1]);
+                if (owner > findings.size()) continue;
+                String id = findings.get(owner - 1).id();
+                var premises = plans.computeIfAbsent(id, unused -> new LinkedHashMap<>());
+                premises.merge(Integer.parseInt(fields[2]), fields[3].strip(),
+                        (first, next) -> first.equals(next) ? first : "");
+            }
+            return plans;
         }
     }
 

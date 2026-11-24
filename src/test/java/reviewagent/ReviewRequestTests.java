@@ -227,15 +227,23 @@ final class ReviewRequestTests {
         var contract = Files.readString(run.resolve("discovery/R2-prompt.md"));
         var boundary = Files.readString(run.resolve("discovery/R3-prompt.md"));
         var security = Files.readString(run.resolve("discovery/R5-prompt.md"));
+        var conversion = Files.readString(run.resolve("discovery/R6-prompt.md"));
         check(correct.contains("### Plain.java at ") && !contract.contains("### Plain.java at ") && !boundary.contains("### Plain.java at ")
                 && contract.contains("+    int value() { return 3; }") && boundary.contains("+    int value() { return 3; }")
                 && contract.contains("### docs/design.md at ") && boundary.contains("### Guard.java at ")
                 && contract.contains("boundaryValue = 190923") && boundary.contains("boundaryValue = 190923"),
                 "focused discovery drops duplicate views but retains all changed lines and context outside the diff");
         check(!Files.exists(run.resolve("discovery/R4-prompt.md"))
+                && correct.contains("returned result or persisted state")
+                && contract.contains("consumer's contract") && contract.contains("compatibility aliases")
+                && security.contains("identity and untrusted data") && security.contains("affected read, write or renderer")
+                && boundary.contains("Failure handling and recovery.") && boundary.contains("partial success")
+                && conversion.contains("Boundary inputs and data conversion.") && conversion.contains("format round trips")
+                && conversion.contains("boundaryValue = 190923")
+                && !boundary.contains("Boundary inputs and data conversion.") && !conversion.contains("Failure handling and recovery.")
                 && !boundary.contains("Security and isolation.")
-                && security.contains("Security and isolation.") && !security.contains("Boundary conditions and error handling."),
-                "ordinary failure paths and security are separate roles and explicit requirements are opt-in by input");
+                && security.contains("Security and isolation.") && !security.contains("Failure handling and recovery."),
+                "recovery and conversion are distinct roles, transferred checks have evidence instructions, and requirements are opt-in by input");
         String boundaryInstructions = boundary.substring(0, boundary.indexOf("EVIDENCE FOLLOWS"));
         check(boundaryInstructions.indexOf("REQUIRED RESPONSE") < boundaryInstructions.indexOf("SCOPE")
                 && boundaryInstructions.contains("fenced <findings/> block")
@@ -261,12 +269,12 @@ final class ReviewRequestTests {
                 && requirements.contains("Return the configured limit in the public response.")
                 && requirements.contains("identify the explicit rule and the changed implementation")
                 && !requirements.contains("Business contracts and compatibility.")
-                && List.of(correct, contract, boundary, security, requirements).stream().allMatch(prompt ->
+                && List.of(correct, contract, boundary, security, conversion, requirements).stream().allMatch(prompt ->
                         prompt.indexOf("REQUIRED RESPONSE") < prompt.indexOf("SCOPE")
                                 && prompt.contains("VERIFY_QUESTION|N|")
                                 && !prompt.contains("Use these requirement assessment labels"))
                 && correct.contains("plain CHANGE_SUMMARY| line")
-                && List.of(contract, boundary, security, requirements).stream().noneMatch(prompt -> prompt.contains("plain CHANGE_SUMMARY| line")),
+                && List.of(contract, boundary, security, conversion, requirements).stream().noneMatch(prompt -> prompt.contains("plain CHANGE_SUMMARY| line")),
                 "each role has a self-contained assignment and a candidate response contract");
         String localizedBoundary = Files.readString(withRequirement.resolve("discovery/R3-prompt.md"));
         check(localizedBoundary.startsWith(boundaryInstructions)
@@ -276,7 +284,7 @@ final class ReviewRequestTests {
 
     private void discoveryPreflight() throws Exception {
         write("worker.py", "result = 0\n");
-        write("policy/guard.txt", "PINNED_PREFLIGHT_GUARD\n");
+        write("policy/guard.txt", "# guard example\n".repeat(289) + "PINNED_PREFLIGHT_GUARD\nOUTSIDE_REQUESTED_RANGE\n");
         commit("base");
         write("worker.py", "result = 1\n");
         commit("change worker behavior");
@@ -287,7 +295,7 @@ final class ReviewRequestTests {
                 request() {
                   printf '%s\\n' '<findings/>' 'DISCOVERY_NEEDS_EVIDENCE|Does the worker guard reject the input?' \\
                     'REQUEST_FILE|target|policy|index|Locate the pinned policy' \\
-                    'REQUEST_FILE|target|policy/guard.txt|all|Read the pinned guard'
+                    'REQUEST_FILE|target|policy/guard.txt|90:290|Read the pinned guard'
                   if [ -f "$fixture/missing" ]; then
                     printf '%s\\n' 'REQUEST_FILE|target|policy/missing.txt|all|Read the other required guard'
                   fi
@@ -298,11 +306,13 @@ final class ReviewRequestTests {
                   fi
                 }
                 case "$prompt" in
-                  *'Boundary conditions and error handling.'*)
+                  *'Failure handling and recovery.'*)
                     case "$prompt" in
                       *'PINNED_PREFLIGHT_GUARD'*)
                         touch "$fixture/restarted"
                         if [ -f "$fixture/repeat" ]; then request
+                        elif [ -f "$fixture/missing" ]; then
+                          printf '%s\n' '<findings><finding><title>Worker return value changes</title><severity>LOW</severity><path>worker.py</path><line>1</line><endLine>1</endLine><trigger>The worker is evaluated.</trigger><impact>The value is one.</impact><evidence>worker.py:1 sets the result.</evidence><diffRelation>The patch changes zero to one.</diffRelation></finding></findings>'
                         else printf '<findings/>'; fi ;;
                       *) request ;;
                     esac ;;
@@ -313,6 +323,8 @@ final class ReviewRequestTests {
                     printf '<findings/>' ;;
                   *'Inspect the supplemental evidence'*) exit 90 ;;
                   'You are the discovery stage'*) printf '<findings/>' ;;
+                  'You are the independent candidate verification'*)
+                    printf '<verification><status>REJECTED</status><reason>The return value is intentional.</reason></verification>' ;;
                   *) exit 91 ;;
                 esac
                 """);
@@ -320,39 +332,43 @@ final class ReviewRequestTests {
         var run = pipeline.run(options(false, "--review-mode", "deep", "--agent-timeout-seconds", "6"));
         Path restarted = run.resolve("discovery/round-2/R3-prompt.md");
         String prompt = Files.readString(restarted);
-        check(Main.reviewExitCode(run) == 0 && calls(run, 5)
+        check(Main.reviewExitCode(run) == 0 && calls(run, 6)
                 && prompt.contains("PINNED_PREFLIGHT_GUARD") && !prompt.contains("WORKTREE_ONLY_GUARD")
+                && prompt.contains("(lines 90–290)") && !prompt.contains("OUTSIDE_REQUESTED_RANGE")
                 && prompt.contains("+result = 1")
                 && !Files.exists(run.resolve("discovery/round-2/R1-prompt.md"))
                 && !Files.exists(run.resolve("discovery/S1-prompt.md")),
-                "the same initial role restarts with pinned sources while another role is running");
+                "the same initial role restarts with the complete 201-line pinned range while another role is running");
         pipeline.run(options(false, "--review-mode", "deep", "--agent-timeout-seconds", "6", "--resume", run.toString()));
         check(calls(run, 0), "preflight and resumed initial results both reuse checkpoints");
         Files.delete(root.resolve("parallel"));
 
         Files.createFile(root.resolve("missing"));
         var blocked = review("--review-mode", "deep");
-        check(Main.reviewExitCode(blocked) == 3 && calls(blocked, 4)
+        String partialPrompt = Files.readString(blocked.resolve("discovery/round-2/R3-prompt.md"));
+        check(Main.reviewExitCode(blocked) == 3
                 && Files.readString(blocked.resolve("review-status.md")).contains("policy/missing.txt")
-                && !Files.exists(blocked.resolve("discovery/round-2"))
+                && partialPrompt.contains("Unavailable: REQUEST_FILE|target|policy/missing.txt")
+                && partialPrompt.contains("PINNED_PREFLIGHT_GUARD")
+                && Files.readString(blocked.resolve("candidates.md")).contains("Worker return value changes")
                 && !Files.exists(blocked.resolve("discovery/S1-prompt.md")),
-                "a partial evidence group remains incomplete without restarting or triggering supplemental discovery");
+                "partial delivery advances the original reviewer, keeps supported candidates, and preserves the coverage gap");
         Files.delete(root.resolve("missing"));
         Files.createFile(root.resolve("bad-request"));
         var invalid = review("--review-mode", "deep");
         String coverage = Files.readString(invalid.resolve("coverage.md"));
         String status = Files.readString(invalid.resolve("review-status.md"));
-        check(Main.reviewExitCode(invalid) == 3 && calls(invalid, 4)
-                && coverage.contains("target policy/guard.txt all: INCLUDED")
+        check(Main.reviewExitCode(invalid) == 3 && calls(invalid, 6)
+                && coverage.contains("target policy/guard.txt 90:290: INCLUDED")
                 && status.contains("context: expected a tracked Python source")
                 && status.contains("path: no tracked directory at the selected revision")
                 && status.contains("reason: missing required field")
-                && !Files.exists(invalid.resolve("discovery/round-2")),
+                && Files.exists(invalid.resolve("discovery/round-2/R3-prompt.md")),
                 "initial discovery keeps valid pinned sources and identifies malformed fields without claiming coverage");
         Files.delete(root.resolve("bad-request"));
         Files.createFile(root.resolve("repeat"));
         var repeated = review("--review-mode", "deep");
-        check(Main.reviewExitCode(repeated) == 3 && calls(repeated, 5)
+        check(Main.reviewExitCode(repeated) == 3 && calls(repeated, 6)
                 && Files.readString(repeated.resolve("review-status.md")).contains("evidence already supplied")
                 && !Files.exists(repeated.resolve("discovery/round-3")),
                 "a repeated material request without new evidence stops the affected reviewer");
@@ -363,7 +379,7 @@ final class ReviewRequestTests {
                 prompt=$(cat)
                 case "$prompt" in
                   *UNTRUSTED_TOOL_REPLY*) exit 90 ;;
-                  'You are the discovery stage'*'Boundary conditions and error handling.'*)
+                  'You are the discovery stage'*'Failure handling and recovery.'*)
                     case "$prompt" in *'You have no tools. Do not call tools, emit tool calls,'*) ;; *) exit 91 ;; esac
                     if [ -f "$fixture/always-tool" ] || [ ! -f "$fixture/returned-tool" ]; then
                       touch "$fixture/returned-tool"
@@ -381,7 +397,7 @@ final class ReviewRequestTests {
                 """);
         var recovered = pipeline.run(options(false, "--review-mode", "deep"));
         Path first = recovered.resolve("discovery");
-        check(Main.reviewExitCode(recovered) == 0 && calls(recovered, 6)
+        check(Main.reviewExitCode(recovered) == 0 && calls(recovered, 7)
                 && Files.readString(first.resolve("R3-stdout.log")).contains("UNTRUSTED_TOOL_REPLY")
                 && Files.readString(first.resolve("R3-restart-attempts/attempt-0001/call-prompt.md"))
                         .equals(Files.readString(first.resolve("R3-prompt.md")))
@@ -395,12 +411,12 @@ final class ReviewRequestTests {
 
         Files.createFile(root.resolve("always-tool"));
         var persistent = review("--review-mode", "deep");
-        check(Main.reviewExitCode(persistent) == 3 && calls(persistent, 5)
+        check(Main.reviewExitCode(persistent) == 3 && calls(persistent, 6)
                 && Files.readString(persistent.resolve("review-status.md")).contains("discovery/R3 [INVALID_OUTPUT]")
                 && Files.isRegularFile(persistent.resolve("discovery/R3-restart-response.md")),
                 "a repeated tool reply gets one restart and leaves that reviewer incomplete");
         var atBudget = review("--review-mode", "deep", "--agent-max-calls-per-task", "1");
-        check(Main.reviewExitCode(atBudget) == 3 && calls(atBudget, 4)
+        check(Main.reviewExitCode(atBudget) == 3 && calls(atBudget, 5)
                 && Files.readString(atBudget.resolve("review-status.md")).contains("discovery/R3 [INVALID_OUTPUT]")
                 && !Files.exists(atBudget.resolve("discovery/R3-restart-attempts")),
                 "the restart uses the original task call budget");
@@ -410,6 +426,7 @@ final class ReviewRequestTests {
         write("alpha.py", "result = 0\n");
         write("beta.py", "result = 0\n");
         write("delivery_policy.txt", "PINNED_POLICY: unfinished items are blocked\n");
+        write("recovery/worker.py", "def resume_delivery():\n    return 'PINNED_RECOVERY'\n");
         commit("base");
         write("alpha.py", "result = 1\n");
         write("beta.py", "result = 1\n");
@@ -471,7 +488,7 @@ final class ReviewRequestTests {
         String findings = "<findings>\n" + alpha + beta + "</findings>\n";
         Files.writeString(reply, findings + request + "Read the delivery policy\n");
         var baseline = review("--review-mode", "deep");
-        check(Main.reviewExitCode(baseline) == 0 && calls(baseline, 8)
+        check(Main.reviewExitCode(baseline) == 0 && calls(baseline, 9)
                 && Files.exists(baseline.resolve("verification/round-2/R1-1-response.md")),
                 "an unmarked discovery request retains the existing verification follow-up");
 
@@ -482,7 +499,7 @@ final class ReviewRequestTests {
                 + "REQUEST_FILE|target|delivery_policy.txt|1:1|[finding:19] Invalid candidate number\n");
         var delivered = review("--review-mode", "deep");
         String firstPrompt = Files.readString(delivered.resolve("verification/R1-1-prompt.md"));
-        check(Main.reviewExitCode(delivered) == 0 && calls(delivered, 7)
+        check(Main.reviewExitCode(delivered) == 0 && calls(delivered, 8)
                 && firstPrompt.contains("PINNED_POLICY:")
                 && firstPrompt.contains("REQUEST_FILE|base|delivery_policy.txt|all — supplied as SRC-")
                 && firstPrompt.contains("REQUEST_FILE|target|delivery_policy.txt|all — supplied as SRC-")
@@ -499,10 +516,36 @@ final class ReviewRequestTests {
                     "both runs preserve the independent verdict for each candidate");
         }
 
+        String planned = findings + """
+                VERIFY_PREMISE|1|1|Does the entry guard block unfinished work?
+                REQUEST_FILE|target|delivery_policy.txt|all|[finding:1] [premise:1] Check the entry guard
+                VERIFY_PREMISE|1|2|Can a recovery path still deliver the work?
+                REQUEST_FILE|target|delivery_policy.txt|all|[finding:1] [premise:2] Check the recovery rule
+                REQUEST_FILE|target|recovery|references:resume_delivery|[finding:1] [premise:2] Locate the recovery behavior
+                VERIFY_PREMISE|1|3|Is an external override supported?
+                VERIFY_PREMISE|19|1|Unrelated premise beyond the candidate count
+                """;
+        Files.writeString(reply, planned);
+        var byPremise = review("--review-mode", "deep");
+        String plannedPrompt = Files.readString(byPremise.resolve("verification/R1-1-prompt.md"));
+        String otherPrompt = Files.readString(byPremise.resolve("verification/R1-2-prompt.md"));
+        int guard = plannedPrompt.indexOf("Premise 1 — Does the entry guard block unfinished work?");
+        int recovery = plannedPrompt.indexOf("Premise 2 — Can a recovery path still deliver the work?");
+        int override = plannedPrompt.indexOf("Premise 3 — Is an external override supported?");
+        check(Main.reviewExitCode(byPremise) == 0 && calls(byPremise, 8) && guard >= 0 && recovery > guard && override > recovery
+                && plannedPrompt.substring(guard, recovery).contains("REQUEST_FILE|target|delivery_policy.txt|all — supplied as SRC-")
+                && plannedPrompt.substring(recovery, override).contains("REQUEST_FILE|target|delivery_policy.txt|all — supplied as SRC-")
+                && plannedPrompt.substring(recovery, override).contains("REQUEST_FILE|target|recovery|references:resume_delivery — supplied as SRC-")
+                && plannedPrompt.substring(override).startsWith("Premise 3 — Is an external override supported?\n- Discovery did not name a source.")
+                && plannedPrompt.contains("PINNED_RECOVERY") && !plannedPrompt.contains("Unrelated premise beyond")
+                && !otherPrompt.contains("PINNED_RECOVERY") && !otherPrompt.contains("Premise 1 —")
+                && !Files.exists(byPremise.resolve("verification/round-2")),
+                "the first verifier sees both supporting groups and the unlocated premise, scoped to the originating candidate");
+
         String samePath = findings.replace("<path>beta.py</path>", "<path>alpha.py</path>");
         Files.writeString(reply, samePath + request + "[finding:1] Read the delivery policy\n");
         var batched = review("--review-mode", "deep", "--batched-verification");
-        check(Main.reviewExitCode(batched) == 0 && calls(batched, 7)
+        check(Main.reviewExitCode(batched) == 0 && calls(batched, 8)
                 && Files.readString(batched.resolve("verification/R1-1-prompt.md")).contains("PINNED_POLICY:")
                 && !Files.readString(batched.resolve("verification/R1-2-prompt.md")).contains("PINNED_POLICY:")
                 && !Files.exists(batched.resolve("verification/batch-R1-1-prompt.md"))
@@ -512,7 +555,7 @@ final class ReviewRequestTests {
         Files.writeString(reply, samePath + request + "[finding:1] Read the delivery policy\n"
                 + request + "[finding:2] Check the same policy for the second candidate\n");
         var shared = review("--review-mode", "deep", "--batched-verification");
-        check(Main.reviewExitCode(shared) == 0 && calls(shared, 6)
+        check(Main.reviewExitCode(shared) == 0 && calls(shared, 7)
                 && Files.readString(shared.resolve("verification/batch-R1-1-prompt.md")).contains("PINNED_POLICY:")
                 && !Files.exists(shared.resolve("verification/round-2")),
                 "the same fulfilled file request can serve two explicitly associated candidates in one batch");
@@ -520,7 +563,7 @@ final class ReviewRequestTests {
         Files.writeString(reply, samePath);
         Files.createFile(root.resolve("recover-batch-gap"));
         var recovered = review("--review-mode", "deep", "--batched-verification");
-        check(Main.reviewExitCode(recovered) == 0 && calls(recovered, 7)
+        check(Main.reviewExitCode(recovered) == 0 && calls(recovered, 8)
                 && !Files.exists(recovered.resolve("verification/R1-1-response.md"))
                 && !Files.exists(recovered.resolve("verification/R1-2-response.md")),
                 "candidate-owned evidence requests bypass both stale individual fallbacks");
@@ -532,11 +575,11 @@ final class ReviewRequestTests {
         }
         Files.delete(root.resolve("recover-batch-gap"));
 
-        Files.writeString(reply, findings + "VERIFY_QUESTION|1|Does the project require legacy delivery?\n"
-                + "REQUEST_FILE|base|retention_agreement.txt|all|[finding:1] Check the support requirement\n");
+        Files.writeString(reply, findings + "VERIFY_PREMISE|1|1|Does the project require legacy delivery?\n"
+                + "REQUEST_FILE|base|retention_agreement.txt|all|[finding:1] [premise:1] Check the support requirement\n");
         var unavailable = review("--review-mode", "deep");
         String unavailablePrompt = Files.readString(unavailable.resolve("verification/R1-1-prompt.md"));
-        check(Main.reviewExitCode(unavailable) == 0 && calls(unavailable, 6)
+        check(Main.reviewExitCode(unavailable) == 0 && calls(unavailable, 7)
                 && unavailablePrompt.contains("REQUEST_FILE|base|retention_agreement.txt|all — unavailable: No regular tracked file")
                 && unavailablePrompt.contains("If a decisive premise cannot be checked, stop that candidate before broader analysis.")
                 && Files.readString(unavailable.resolve("coverage.md")).contains("- R1-1 — INSUFFICIENT_EVIDENCE.")
@@ -546,7 +589,7 @@ final class ReviewRequestTests {
         Files.writeString(reply, Files.readString(reply) + request + "[finding:1] Check the caller's delivery guard\n");
         var refuted = review("--review-mode", "deep");
         String refutedPrompt = Files.readString(refuted.resolve("verification/R1-1-prompt.md"));
-        check(Main.reviewExitCode(refuted) == 0 && calls(refuted, 7)
+        check(Main.reviewExitCode(refuted) == 0 && calls(refuted, 8)
                 && refutedPrompt.contains("REQUEST_FILE|base|retention_agreement.txt|all — unavailable:")
                 && refutedPrompt.contains("REQUEST_FILE|target|delivery_policy.txt|all — supplied as SRC-")
                 && Files.readString(refuted.resolve("coverage.md")).contains("- R1-1 — REJECTED.")
@@ -557,7 +600,7 @@ final class ReviewRequestTests {
         Files.createFile(root.resolve("bad-supplemental"));
         var partial = review("--review-mode", "deep");
         String supplementalPrompt = Files.readString(partial.resolve("discovery/S1-prompt.md"));
-        check(Main.reviewExitCode(partial) == 3 && calls(partial, 7)
+        check(Main.reviewExitCode(partial) == 3 && calls(partial, 8)
                 && supplementalPrompt.indexOf("REQUIRED RESPONSE") < supplementalPrompt.indexOf("Inspect the supplemental evidence")
                 && !Files.exists(partial.resolve("discovery/S1-repair-prompt.md"))
                 && Files.readString(partial.resolve("review-status.md")).contains("discovery/S1 [INVALID_OUTPUT]")
@@ -574,13 +617,15 @@ final class ReviewRequestTests {
         commit("update worker");
         var findings = new StringBuilder("<findings>\n");
         for (int number = 1; number <= 4; number++) {
-            findings.append("""
+            String finding = """
                     <finding><title>Fixture check %d</title><severity>MEDIUM</severity>
                       <path>worker.py</path><line>1</line><endLine>1</endLine><trigger>Condition %d holds.</trigger>
                       <impact>The state changes.</impact><evidence>The changed assignment.</evidence>
                       <diffRelation>The assignment is changed.</diffRelation>
                     </finding>
-                    """.formatted(number, number));
+                    """.formatted(number, number);
+            if (number >= 3) Files.writeString(root.resolve("finding-" + number + ".xml"), "<findings>\n" + finding + "</findings>");
+            else findings.append(finding);
         }
         Files.writeString(root.resolve("findings.xml"), findings.append("</findings>\n").toString());
         Files.writeString(model, """
@@ -591,16 +636,20 @@ final class ReviewRequestTests {
                     case "$prompt" in
                       *'Correctness and regressions.'*) touch "$fixture/discovery-1" ;;
                       *'Business contracts and compatibility.'*) touch "$fixture/discovery-2" ;;
-                      *'Boundary conditions and error handling.'*) touch "$fixture/discovery-3" ;;
+                      *'Failure handling and recovery.'*) touch "$fixture/discovery-3" ;;
                       *'Security and isolation.'*) touch "$fixture/discovery-5" ;;
+                      *'Boundary inputs and data conversion.'*) touch "$fixture/discovery-6" ;;
                     esac
                     while [ ! -e "$fixture/discovery-1" ] || [ ! -e "$fixture/discovery-2" ] ||
-                          [ ! -e "$fixture/discovery-3" ] || [ ! -e "$fixture/discovery-5" ]; do
+                          [ ! -e "$fixture/discovery-3" ] || [ ! -e "$fixture/discovery-5" ] ||
+                          [ ! -e "$fixture/discovery-6" ]; do
                       sleep 0.02
                     done ;;
                 esac
                 case "$prompt" in
                   *'Correctness and regressions. Trace control flow'*) cat "$fixture/findings.xml"; exit ;;
+                  *'Failure handling and recovery.'*) cat "$fixture/finding-3.xml"; exit ;;
+                  *'Boundary inputs and data conversion.'*) cat "$fixture/finding-4.xml"; exit ;;
                   'You are the discovery stage'*) printf '<findings/>'; exit ;;
                   'You are the independent candidate verification stage'*) ;;
                   *) exit 91 ;;
@@ -630,11 +679,13 @@ final class ReviewRequestTests {
                 fi
                 """);
         var run = pipeline.run(options(false, "--review-mode", "deep", "--agent-timeout-seconds", "6"));
-        check(Main.reviewExitCode(run) == 0 && calls(run, 9)
+        check(Main.reviewExitCode(run) == 0 && calls(run, 10)
                 && Files.readString(run.resolve("timings.md")).contains("| 4 | VERIFICATION_READY_TASKS")
-                && Files.readString(run.resolve("timings.md")).contains("| 4 | DISCOVERY_READY_TASKS (maximum 4)")
-                && Files.exists(run.resolve("verification/round-2/R1-1-response.md")),
-                "default discovery runs all four independent roles together and verification releases only the candidate with new evidence");
+                && Files.readString(run.resolve("timings.md")).contains("| 5 | DISCOVERY_READY_TASKS (maximum 5)")
+                && Files.exists(run.resolve("verification/round-2/R1-1-response.md"))
+                && Files.exists(run.resolve("verification/R3-1-response.md"))
+                && Files.exists(run.resolve("verification/R6-1-response.md")),
+                "five initial roles run independently, both split roles reach verification, and only the affected candidate restarts");
     }
 
     private void discoveryBudget() throws Exception {
@@ -653,16 +704,16 @@ final class ReviewRequestTests {
         check(Main.reviewExitCode(run) == 0, "budgeted deep discovery completes all partitions");
         var discovery = run.resolve("discovery");
         try (var files = Files.list(discovery)) {
-            var requests = files.filter(file -> file.getFileName().toString().matches("R[1235]-P[0-9]+-prompt\\.md"))
+            var requests = files.filter(file -> file.getFileName().toString().matches("R[12356]-P[0-9]+-prompt\\.md"))
                     .sorted().toList();
-            check(requests.size() >= 8, "all active deep reviewers receive partitioned requests");
+            check(requests.size() >= 10, "all active deep reviewers receive partitioned requests");
             for (var request : requests) {
                 var prompt = Files.readString(request);
                 check(Files.size(request) <= 320_000 && prompt.contains("Retain this baseline review rule.")
                         && !prompt.contains("### zz-dependencies.lock at "),
                         "bounded requests preserve baseline rules and defer the oversized full source");
             }
-            for (int reviewer : List.of(1, 2, 3, 5)) {
+            for (int reviewer : List.of(1, 2, 3, 5, 6)) {
                 String prefix = "R" + reviewer + "-";
                 var addedLines = new ArrayList<String>();
                 for (var request : requests) {
@@ -785,18 +836,18 @@ final class ReviewRequestTests {
 
         Files.createFile(root.resolve("escalate"));
         var deep = review("--review-mode", "scoped-rules");
-        check(Main.reviewExitCode(deep) == 0 && calls(deep, 5)
+        check(Main.reviewExitCode(deep) == 0 && calls(deep, 6)
                 && Files.readString(deep.resolve("coverage.md")).contains("Repository-rule partition C1 was not assessed")
                 && Files.readString(deep.resolve("discovery/R1-prompt.md")).contains("BASELINE_RULE:"),
                 "an unassessed repository-rule partition falls back to full deep review");
 
         var automatic = review();
         var automaticCoverage = Files.readString(automatic.resolve("coverage.md"));
-        check(Main.reviewExitCode(automatic) == 0 && calls(automatic, 4)
+        check(Main.reviewExitCode(automatic) == 0 && calls(automatic, 5)
                 && !Files.exists(automatic.resolve("focused"))
                 && automaticCoverage.contains("Trusted repository review rules supplied"),
                 "automatic review uses independent deep discovery for trusted repository rules");
-        for (String id : List.of("R1", "R2", "R3")) {
+        for (String id : List.of("R1", "R2", "R3", "R5", "R6")) {
             check(Files.readString(automatic.resolve("discovery/" + id + "-prompt.md")).contains("BASELINE_RULE:"),
                     "each independent reviewer receives the trusted baseline rules");
         }

@@ -155,11 +155,18 @@ final class GoLanguageTests {
         require(!result.markdown().contains("v9.0.0"), "go.sum entries cannot select dependency versions");
         var proto = collector.collect(evidence, "REQUEST_LANGUAGE|target|go|api/service.go|example.com/Proto/schemas|file:contract.proto|Inspect protobuf contract", 0, 0);
         require(proto.markdown().contains("message RpcRequest") && proto.markdown().contains("```proto"), "proto-only schema directories do not require generated Go files");
-        var huge = collector.collect(evidence, "REQUEST_LANGUAGE|target|go|api/service.go|example.com/Proto/api|symbol:HugeRequest|Inspect large generated type", 0, 0);
-        require(huge.hasMaterial() && huge.coverage().contains("INDEX_ONLY") && huge.markdown().contains("huge.pb.go")
-                && !huge.markdown().contains("  Field0 int"), "oversized declarations supply navigation, not a false claim of complete source coverage");
+        String declaration = "REQUEST_LANGUAGE|target|go|api/service.go|example.com/Proto/api|symbol:HugeRequest|Inspect large generated type";
+        var huge = collector.collect(evidence, declaration, 0, 0);
+        require(huge.coverage().contains("INCLUDED") && huge.markdown().contains("  Field219 int"),
+                "Go symbols over 200 lines are supplied when the complete declaration fits");
+        var tight = new EvidenceBundle(scope, evidence.changedFiles(), "", "", 2_600, null, EvidenceCatalog.empty());
+        var navigation = collector.collect(tight, declaration, 0, 0);
+        require(navigation.hasMaterial() && navigation.coverage().contains("INDEX_ONLY") && navigation.markdown().contains("huge.pb.go")
+                && !navigation.markdown().contains("  Field0 int"), "a declaration that exceeds the byte budget supplies navigation only");
         require(collector.collect(evidence, "REQUEST_LANGUAGE|target|go|api/service.go|example.com/Proto/api|file:huge.pb.go:1:20|Read decisive fields", 0, 0)
                 .markdown().contains("  Field0 int"), "a follow-up request can read a bounded range after index-only fallback");
+        require(collector.collect(evidence, "REQUEST_LANGUAGE|target|go|api/service.go|example.com/Proto/api|file:huge.pb.go:2:222|Read the complete struct", 0, 0)
+                .markdown().contains("  Field219 int"), "Go file ranges are bounded by bytes");
         var index = new EvidenceIndex(evidence, result.markdown());
         var metadataCitation = List.of(new EvidenceIndex.Citation("Go repository package index at " + scope.targetCommit(), "api/service_test.go [test variant]"));
         index.validate(metadataCitation);

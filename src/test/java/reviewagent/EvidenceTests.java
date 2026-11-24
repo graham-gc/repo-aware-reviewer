@@ -73,8 +73,12 @@ final class EvidenceTests {
         var git = new GitClient(repo, executor);
         var options = CliOptions.parse(new String[]{"review", "--repo", repo.toString(), "--base", "HEAD", "--branch", "HEAD"});
         ReviewScope scope = git.resolve(options);
-        var evidence = new EvidenceBundle(scope, List.of("Worker.java"), "", "", 12_000, null, EvidenceCatalog.empty());
+        var evidence = new EvidenceBundle(scope, List.of("Worker.java"), "", "", 2_500, null, EvidenceCatalog.empty());
         var collector = new SupplementalEvidence(git, executor, java.util.Map.of());
+        var room = new EvidenceBundle(scope, evidence.changedFiles(), "", "", 12_000, null, EvidenceCatalog.empty());
+        var full = collector.collect(room, "REQUEST_FILE|target|Worker.java|symbol:run|Read the complete method", 0, 0);
+        require(full.catalog().sources().size() == 1 && full.catalog().sources().getFirst().text().lines().count() > 200,
+                "a long method is supplied in full when it fits the evidence budget");
         String overload = "REQUEST_FILE|target|Worker.java|declaration:Worker#dispatch|Check all overload signatures";
         String requests = """
                 REQUEST_FILE|target|Worker.java|declaration:Worker.Task|Read the record components
@@ -258,7 +262,7 @@ final class EvidenceTests {
                         case "$prompt" in
                             *'Correctness and regressions.'*) printf '%s\\n' 'FIRST_XML' 'REJECTED_XML' ;;
                             *'Business contracts and compatibility.'*) printf '%s\\n' 'DUPLICATE_XML' 'INSUFFICIENT_XML' ;;
-                            *'Boundary conditions and error handling.'*) printf '%s\\n' 'SEPARATE_XML' ;;
+                            *'Failure handling and recovery.'*) printf '%s\\n' 'SEPARATE_XML' ;;
                         esac
                         printf '%s\\n' '</findings>' '```'
                         ;;

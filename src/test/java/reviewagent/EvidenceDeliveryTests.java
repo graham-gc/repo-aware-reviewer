@@ -17,8 +17,88 @@ final class EvidenceDeliveryTests {
         fileCoverage();
         cachedRecipientDelivery();
         sharedBatchBudget();
+        pinnedPathRecovery();
         constructorReferences();
         pipelineDeliveryAndResume();
+    }
+
+    private static void pinnedPathRecovery() throws Exception {
+        Path repo = Files.createTempDirectory("evidence-pinned-path-");
+        try {
+            git(repo, "init", "-q");
+            Files.createDirectories(repo.resolve("service/api"));
+            Files.createDirectories(repo.resolve("service/http"));
+            Files.createDirectories(repo.resolve("db/versions"));
+            Files.writeString(repo.resolve("service/api/dupe.py"), "HTTP = 1\n");
+            Files.writeString(repo.resolve("service/http/dupe.py"), "HTTP = 2\n");
+            Files.writeString(repo.resolve("service/api/relay.py"), "RELAY = True\n");
+            Files.createSymbolicLink(repo.resolve("service/relay.py"), Path.of("api/relay.py"));
+            String actual = "db/versions/003_add_jobs_table.py";
+            String successor = "db/versions/004_change_jobs.py";
+            String migration = "from alembic import op\nrevision: str = '%s'\ndown_revision: str | None = %s\n";
+            Files.writeString(repo.resolve(actual), migration.formatted("job_schema_v3", "None"));
+            Files.writeString(repo.resolve("db/versions/003_add_jobs_archive.py"),
+                    "\"\"\"\nrevision = 'job_schema_v3'\n\"\"\"\n" + migration.formatted("jobs_archive", "'job_schema_v3'"));
+            git(repo, "add", "--all");
+            git(repo, "commit", "-qm", "base");
+            Files.writeString(repo.resolve(successor), migration.formatted("job_schema_v4", "'job_schema_v3'"));
+            Files.writeString(repo.resolve("service/api/route.py"), "PINNED_ROUTE = True\n");
+            git(repo, "add", "--all");
+            git(repo, "commit", "-qm", "target");
+            Files.writeString(repo.resolve("service/api/route.py"), "WORKTREE_ROUTE = False\n");
+
+            var executor = new ProcessExecutor();
+            var client = new GitClient(repo, executor);
+            var scope = client.resolve(CliOptions.parse(new String[]{"review", "--repo", repo.toString()}));
+            var collector = new SupplementalEvidence(client, executor, java.util.Map.of());
+            var evidence = new EvidenceBundle(scope, List.of(successor), "", "", 50_000, null, EvidenceCatalog.empty());
+            var session = new EvidenceSession(evidence, collector, 0, 0);
+            String route = "REQUEST_FILE|target|service/route.py|all|Trace the route";
+            String parent = "REQUEST_FILE|target|db/versions/003_add_jobs.py|all|[finding:1] [premise:1] Check predecessor revision";
+            String anchor = "REQUEST_FILE|target|" + successor + "|all|[finding:1] [premise:2] Read the successor";
+            session.load(route, "Route");
+            session.load(anchor, "Previously collected successor");
+            session.loadDiscovery(parent + "\n" + anchor, "Migration chain");
+            var routeDelivery = session.discoveryDelivery(route, EvidenceCatalog.empty());
+            var parentDelivery = session.discoveryDelivery(parent, EvidenceCatalog.empty());
+            var routeSource = session.catalog().select(routeDelivery.sources()).sources().getFirst();
+            var predecessor = session.catalog().select(parentDelivery.sources()).sources().getFirst();
+            require(routeDelivery.missing().isEmpty() && routeDelivery.recoveries().getFirst().contains("service/route.py -> service/api/route.py")
+                    && routeSource.path().equals("service/api/route.py") && routeSource.text().equals("PINNED_ROUTE = True\n")
+                    && routeSource.revision().equals(scope.targetCommit()), "an exact filename recovers only the pinned regular source");
+            require(parentDelivery.missing().isEmpty() && predecessor.path().equals(actual)
+                    && parentDelivery.recoveries().getFirst().contains("matches revision job_schema_v3")
+                    && session.coverage().contains("db/versions/003_add_jobs.py -> " + actual),
+                    "a related reusable request binds the Alembic predecessor by declared identity");
+            require(collector.collect(evidence, parent + "\n" + anchor, 0, 0).recoveredPaths().size() == 1,
+                    "a successor collected later in the same batch can also establish identity");
+
+            String unsafe = route.replace("|target|", "|base|") + "\n"
+                    + "REQUEST_FILE|target|service/dupe.py|all|Find the right implementation\n"
+                    + "REQUEST_FILE|target|service/relay.py|all|Read the pinned regular relay\n"
+                    + "REQUEST_FILE|target|other/route.py|all|Read this unrelated scope\n";
+            session.load(unsafe, "Unresolved paths");
+            var unresolved = session.discoveryDelivery(unsafe, EvidenceCatalog.empty());
+            require(unresolved.sources().isEmpty() && unresolved.recoveries().isEmpty() && unresolved.missing().size() == 4
+                    && unresolved.missing().toString().contains("Pinned path candidates (verify identity): service/api/dupe.py, service/http/dupe.py"),
+                    "recovery cannot cross revisions, select a duplicate filename, replace a symlink, or escape an unrelated directory");
+            var similarOnly = collector.collect(evidence, parent, 0, 0);
+            require(similarOnly.catalog().sources().isEmpty() && similarOnly.recoveredPaths().isEmpty()
+                    && similarOnly.coverage().contains("Pinned path candidates"), "similar migration names remain navigation hints without an identity link");
+
+            Files.writeString(repo.resolve("db/versions/duplicate_revision.py"), migration.formatted("job_schema_v3", "None"));
+            git(repo, "add", "--all");
+            git(repo, "commit", "-qm", "ambiguous predecessor");
+            var ambiguousScope = client.resolve(CliOptions.parse(new String[]{"review", "--repo", repo.toString()}));
+            var ambiguous = collector.collect(new EvidenceBundle(ambiguousScope, List.of(successor), "", "", 50_000, null, EvidenceCatalog.empty()),
+                    parent + "\n" + anchor, 0, 0);
+            require(ambiguous.recoveredPaths().isEmpty() && ambiguous.coverage().contains("Ambiguous Alembic revision job_schema_v3"),
+                    "two tracked files declaring the same revision identity remain unresolved");
+        } finally {
+            try (var paths = Files.walk(repo)) {
+                for (Path path : paths.sorted(java.util.Comparator.reverseOrder()).toList()) Files.deleteIfExists(path);
+            }
+        }
     }
 
     private static EvidenceSource file(String revision, int first, String text, boolean eof) {
@@ -33,12 +113,12 @@ final class EvidenceDeliveryTests {
         var whole = file("head", 1, BODY, true);
         var base = file("base", 1, "The baseline document has different text.\n", true);
         require(whole.id().equals(file("head", 1, BODY, false).id()), "file-extent metadata does not replace immutable source IDs");
-        for (String selector : List.of("all", "1:1", "1:200"))
+        for (String selector : List.of("all", "1:1", "1:201"))
             require(lookup("target", selector, List.of(base, whole)).equals(Set.of(whole.id())), "whole native source covers its ranges and EOF-clipped requests");
         require(lookup("base", "all", List.of(base, whole)).equals(Set.of(base.id()))
                 && lookup("base", "all", List.of(whole)).isEmpty(), "reuse never crosses pinned revisions");
-        require(lookup("target", "3:4", List.of(whole)).isEmpty() && lookup("target", "1:201", List.of(whole)).isEmpty(),
-                "out-of-file and oversized requests retain their original validation boundary");
+        require(lookup("target", "3:4", List.of(whole)).isEmpty() && lookup("target", "2:1", List.of(whole)).isEmpty(),
+                "out-of-file starts and reversed ranges cannot be reused");
         var first = file("head", 1, "first line of source\nsecond line of source\n", false);
         var adjacent = file("head", 3, "third line of source\nfourth line of source\n", true);
         var gap = file("head", 4, "fourth line of source\n", true);
@@ -127,7 +207,7 @@ final class EvidenceDeliveryTests {
             Files.writeString(repo.resolve("caller.py"), "result = worker.submit(payload)\n");
             git(repo, "add", "--all");
             git(repo, "commit", "-qm", "base");
-            String target = "# expanded implementation\n".repeat(105) + "result = record_delivery()\n";
+            String target = "# expanded\n".repeat(205) + "result = record_delivery()\n";
             Files.writeString(repo.resolve("worker.py"), target);
             git(repo, "commit", "-qam", "target");
             var executor = new ProcessExecutor();
@@ -170,6 +250,32 @@ final class EvidenceDeliveryTests {
                             && source.role(EvidenceSource.Role.TARGET))
                     && EvidenceText.bytes(partial.markdown()) <= tight.supplementBudget(),
                     "a whole file that genuinely cannot fit leaves a gap and preserves other evidence");
+
+            String range = requested.replace("target|worker.py|all", "target|worker.py|6:206");
+            var ranged = new EvidenceSession(evidence, collector, 0, 0);
+            ranged.load(range, "Collect full range with other reads");
+            String selection = "REQUEST_FILE|target|worker.py|6:206|Inspect target behavior";
+            var delivered = ranged.delivery(selection, EvidenceCatalog.empty());
+            var exact = ranged.catalog().select(delivered).sources().getFirst();
+            require(delivered.size() == 1 && exact.firstLine() == 6 && exact.text().lines().count() == 201
+                    && exact.text().endsWith("result = record_delivery()")
+                    && ranged.coverage().contains("target worker.py 6:206: INCLUDED (used remaining batch budget)"),
+                    "an exact range over 200 lines fits the remaining batch budget and can be reused");
+
+            var tooLarge = collector.collect(tight, range, 3, 0);
+            require(tooLarge.coverage().contains("target worker.py 6:206: UNAVAILABLE (Requested material needs ")
+                    && tooLarge.catalog().sources().stream().anyMatch(source -> source.path().equals("caller.py"))
+                    && !tooLarge.resolvedSources().containsKey("REQUEST_FILE|target|worker.py|6:206"),
+                    "a range that exceeds the byte budget is unavailable without losing the other reads");
+
+            String fallback = range.replace("6:206|", "6:206;fallback=206:206|");
+            var full = collector.collect(evidence, fallback, 3, 0);
+            var narrower = collector.collect(tight, fallback, 3, 0);
+            require(full.coverage().contains("6:206: INCLUDED (used remaining batch budget)")
+                    && narrower.coverage().contains("6:206: INCLUDED (fallback 206:206)")
+                    && narrower.catalog().sources().stream().anyMatch(source -> source.firstLine() == 206
+                            && source.text().equals("result = record_delivery()")),
+                    "the explicitly sufficient fallback is used only after the complete range cannot fit");
         } finally {
             try (var paths = Files.walk(repo)) {
                 for (Path path : paths.sorted(java.util.Comparator.reverseOrder()).toList()) Files.delete(path);

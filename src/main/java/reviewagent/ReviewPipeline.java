@@ -12,6 +12,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 final class ReviewPipeline {
     private final ProcessExecutor executor;
@@ -218,14 +219,12 @@ final class ReviewPipeline {
             var notesByReviewer = new LinkedHashMap<String, String>();
             var requestsByCandidate = new LinkedHashMap<String, List<EvidenceRequest>>();
             var questionsByCandidate = new LinkedHashMap<String, String>();
+            var premisesByCandidate = new LinkedHashMap<String, Map<Integer, String>>();
             StringBuilder rawCandidates = new StringBuilder();
             for (var response : responses) {
                 String id = response.id();
                 var outcome = response.outcome();
-                if (!response.gap().isEmpty()) {
-                    executionIssues.add(id + " — " + response.gap());
-                    continue;
-                }
+                if (!response.gap().isEmpty()) executionIssues.add(id + " — " + response.gap());
                 if (!outcome.valid()) {
                     Path path = runDirectory.relativize(response.directory()).resolve(id);
                     executionIssues.add(path + " [" + outcome.failureKind() + "]; see " + path + "-state.properties");
@@ -240,17 +239,19 @@ final class ReviewPipeline {
                     }
                     continue;
                 }
+                if (!response.usable()) continue;
                 ReviewOutput.Discovery parsed = response.discovery();
                 findings.addAll(parsed.findings());
                 requestsByCandidate.putAll(parsed.candidateRequests());
                 questionsByCandidate.putAll(parsed.candidateQuestions());
+                premisesByCandidate.putAll(parsed.candidatePremises());
                 if (renderLocally && (id.equals("R1") || id.startsWith("R1-P"))
                         && !parsed.changeSummary().isBlank()) changeSummaries.add(parsed.changeSummary());
                 notesByReviewer.put(id, parsed.notes());
                 discoveryNotes.append("\n## ").append(id).append("\n\n").append(parsed.notes());
                 rawCandidates.append("\n## ").append(id).append("\n\n").append(outcome.response()).append('\n');
             }
-            if (responses.stream().noneMatch(InitialDiscovery.Result::completed)) {
+            if (responses.stream().noneMatch(InitialDiscovery.Result::usable)) {
                 write(runDirectory.resolve("coverage.md"), evidence.coverage() + route + supplemental.coverage());
                 write(runDirectory.resolve("supplemental-evidence.md"), supplemental.markdown());
                 throw new ReviewStageException("All independent discovery reviewers failed; see discovery task artifacts");
@@ -303,6 +304,7 @@ final class ReviewPipeline {
                     findings.addAll(parsed.findings());
                     requestsByCandidate.putAll(parsed.candidateRequests());
                     questionsByCandidate.putAll(parsed.candidateQuestions());
+                    premisesByCandidate.putAll(parsed.candidatePremises());
                     discoveryNotes.append("\n## ").append(id).append("\n\n").append(parsed.notes());
                     rawCandidates.append("\n## ").append(id).append("\n\n").append(response).append('\n');
                     supplemental.load(parsed.notes(), "Supplemental discovery evidence requests");
@@ -314,7 +316,7 @@ final class ReviewPipeline {
             progress.step(5, totalSteps, findings.isEmpty() ? "No candidate findings to verify"
                     : "Verifying candidate issues (0 of " + findings.size() + " complete)");
             List<ReviewOutput.Decision> preliminary = quality.verify(findings,
-                    supplemental.verificationBriefs(questionsByCandidate, requestsByCandidate));
+                    supplemental.verificationBriefs(questionsByCandidate, premisesByCandidate, requestsByCandidate));
             verifiedSnapshot = preliminary;
             String verificationCoverage = ReviewQuality.coverage("Individual candidate verification", preliminary);
             verificationCoverage += "\nCandidates: " + findings.size() + ". Confirmed before deduplication: "

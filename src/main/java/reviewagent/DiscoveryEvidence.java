@@ -12,16 +12,15 @@ final class DiscoveryEvidence {
     enum Focus {
         CORRECTNESS("R1", 0, """
                 Correctness and regressions. Trace control flow and state changes on normal execution paths.
-                For each candidate, identify the deciding implementation and the incorrect result or state.
+                Trace valid operations to the returned result or persisted state in the affected supported implementation.
                 """),
         CONTRACT("R2", 1, """
-                Business contracts and compatibility. Compare observable behavior with the pinned baseline,
-                public interfaces, established business rules, and consumers. For each candidate, identify
-                the specific behavior the consumer relies on and what the change breaks.
+                Business contracts and compatibility. Compare pinned base and target public behavior and business rules.
+                Check the consumer's contract, old and new interface registrations, and any compatibility aliases.
                 """),
-        BOUNDARY("R3", 2, """
-                Boundary conditions and error handling. Check edge inputs, failure paths, fallbacks, and resource cleanup.
-                For each candidate, identify the boundary condition and the observable failure that follows.
+        FAILURE_RECOVERY("R3", 2, """
+                Failure handling and recovery. Check partial success, errors, retries, fallbacks, rollback and cleanup.
+                Trace a failure through the enabled configuration, affected state or resources, and the caller's result.
                 """),
         REQUIREMENTS("R4", 1, """
                 Requirements compliance. Compare target behavior with the supplied requirements or business knowledge.
@@ -29,8 +28,12 @@ final class DiscoveryEvidence {
                 Leave general policy questions and full acceptance assessment outside this task.
                 """),
         SECURITY("R5", 2, """
-                Security and isolation. Trace trust boundaries, authorization, user and tenant isolation, and sensitive data handling.
-                For each candidate, identify the affected control, the changed behavior, and the security consequence.
+                Security and isolation. Check authorization, user and tenant isolation, and sensitive data handling.
+                Trace identity and untrusted data through enabled paths from their source to the affected read, write or renderer.
+                """),
+        INPUT_CONVERSION("R6", 2, """
+                Boundary inputs and data conversion. Check empty, repeated or extreme values and format round trips.
+                Trace the input contract, validation and conversion through to the consuming code and its observable result.
                 """);
 
         static final int MODEL_SLOTS = 3;
@@ -57,7 +60,8 @@ final class DiscoveryEvidence {
                 case CORRECTNESS -> true;
                 case CONTRACT, REQUIREMENTS -> path.contains("/tests/") || path.contains("/test/") || path.contains("/docs/")
                         || path.endsWith(".md") || path.endsWith("_test.go");
-                case BOUNDARY, SECURITY -> FocusedReview.hasRiskSignal(source.path()) || FocusedReview.hasRiskSignal(source.text());
+                case FAILURE_RECOVERY, SECURITY, INPUT_CONVERSION ->
+                        FocusedReview.hasRiskSignal(source.path()) || FocusedReview.hasRiskSignal(source.text());
             };
         }
     }

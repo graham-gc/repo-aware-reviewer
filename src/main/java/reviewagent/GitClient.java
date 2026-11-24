@@ -152,8 +152,13 @@ final class GitClient {
         BlobTooLargeException() { super("File exceeds the available byte budget"); }
     }
 
+    static final class MissingTrackedFileException extends IOException {
+        MissingTrackedFileException() { super("No regular tracked file at that revision"); }
+    }
+
     String regularBlobAt(String commit, String path, int maxBytes) throws IOException, InterruptedException {
         String entry = run("--literal-pathspecs", "ls-tree", "--full-tree", "-z", commit, "--", path);
+        if (entry.isEmpty()) throw new MissingTrackedFileException();
         int tab = entry.indexOf('\t');
         if (tab < 0 || !entry.substring(tab + 1).equals(path + "\0")
                 || !(entry.startsWith("100644 blob ") || entry.startsWith("100755 blob "))) {

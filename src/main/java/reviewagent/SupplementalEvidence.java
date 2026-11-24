@@ -12,13 +12,12 @@ import java.util.regex.Pattern;
 
 final class SupplementalEvidence {
     private static final int MAX_SOURCE_BYTES = 1_000_000;
-    private static final int MAX_SOURCE_LINES = 200;
     private static final int MAX_REFERENCE_FILES = 12;
     private static final int MAX_REFERENCE_EXCERPTS = 6;
     private static final int REFERENCE_CONTEXT = 10;
 
     record Result(String markdown, String coverage, boolean hasMaterial, EvidenceCatalog catalog,
-                  Map<String, Set<String>> resolvedSources, Map<String, String> failures) {
+                  Map<String, Set<String>> resolvedSources, Map<String, String> failures, Map<String, String> recoveredPaths) {
     }
 
     private record Excerpt(String markdown, String status, EvidenceCatalog catalog) {
@@ -77,6 +76,11 @@ final class SupplementalEvidence {
 
     Result collect(EvidenceBundle evidence, String candidates, int maxRequests, int maxKnowledgeQueries)
             throws InterruptedException {
+        return collect(evidence, candidates, maxRequests, maxKnowledgeQueries, candidates);
+    }
+
+    Result collect(EvidenceBundle evidence, String candidates, int maxRequests, int maxKnowledgeQueries, String requestGroup)
+            throws InterruptedException {
         var requests = new LinkedHashMap<List<String>, EvidenceQuery>();
         var requestKeys = new LinkedHashMap<List<String>, String>();
         var invalidLines = new ArrayList<String>();
@@ -106,6 +110,9 @@ final class SupplementalEvidence {
         int remaining = evidence.supplementBudget() - EvidenceText.bytes(heading + knowledge.markdown()) - 220;
         int total = maxRequests == 0 ? requests.size() : Math.min(requests.size(), maxRequests);
         var pending = new ArrayList<>(requests.values().stream().limit(total).toList());
+        var missingPaths = new java.util.HashSet<EvidenceQuery>();
+        var recoveredPaths = new LinkedHashMap<String, String>();
+        var recovery = new EvidencePathRecovery(git, repository, MAX_SOURCE_BYTES);
         int included = 0;
         boolean material = knowledge.suppliedSections() > 0;
         EvidenceCatalog catalog = knowledge.catalog();
@@ -119,9 +126,7 @@ final class SupplementalEvidence {
             var query = pending.get(i);
             boolean deferred = i >= total;
             int quota = deferred ? remaining : Math.min(remaining, Math.max(256, remaining / (total - i)));
-            boolean canDefer = !deferred && quota < remaining && query.operation() == EvidenceQuery.Operation.READ_FILE
-                    && (query.selector().equals("all") || query.selector().startsWith(EvidenceQuery.DECLARATION)
-                        || !query.fallback().isEmpty());
+            boolean canDefer = !deferred && quota < remaining && query.operation() == EvidenceQuery.Operation.READ_FILE;
             String revision = query.side().equals("base") ? evidence.scope().baseCommit() : evidence.scope().targetCommit();
             String label = EvidenceText.oneLine(query.label());
             String status;
@@ -139,6 +144,7 @@ final class SupplementalEvidence {
                     throw new IOException("No room in the supplemental evidence budget");
                 }
                 Excerpt excerpt;
+                EvidencePathRecovery.Resolution resolution = null;
                 if (query.operation() == EvidenceQuery.Operation.FIND_FILES) {
                     excerpt = new Excerpt(new RepositoryBrowser(repository).source(revision, query.resource(), quota), "INDEX_ONLY");
                 } else if (query.operation() == EvidenceQuery.Operation.FIND_REFERENCES) {
@@ -147,7 +153,14 @@ final class SupplementalEvidence {
                     if (evidence.scopedKnowledge() != null && evidence.scopedKnowledge().isSourcePath(query.resource())) {
                         throw new IOException("Use a knowledge query for the scoped knowledge document");
                     }
-                    excerpt = repositoryFile(evidence.scope(), revision, query, quota);
+                    var file = query;
+                    if (missingPaths.contains(query)) {
+                        resolution = recovery.resolve(revision, query, EvidenceRequest.parse(requestGroup), available,
+                                path -> eligiblePath(path) && (evidence.scopedKnowledge() == null
+                                        || !evidence.scopedKnowledge().isSourcePath(path)));
+                        file = query.atPath(resolution.path());
+                    }
+                    excerpt = repositoryFile(evidence.scope(), revision, file, quota, canDefer);
                 } else {
                     LanguageModule module = languages.module(query.language());
                     var browser = new RepositoryBrowser(repository);
@@ -170,7 +183,8 @@ final class SupplementalEvidence {
                         pending.add(query);
                         continue;
                     }
-                    throw new IOException("Requested material exceeds the supplemental evidence budget");
+                    throw new IOException("Requested material needs " + bytes + " bytes; "
+                            + quota + " bytes remain in the supplemental evidence budget");
                 }
                 prompt.append(excerpt.markdown());
                 catalog = catalog.plus(excerpt.catalog());
@@ -180,9 +194,24 @@ final class SupplementalEvidence {
                 remaining -= bytes;
                 included++;
                 status = excerpt.status() + (deferred ? " (used remaining batch budget)" : "");
+                if (resolution != null) {
+                    String note = "Resolved path " + query.side() + " " + query.resource() + " -> " + resolution.path()
+                            + " (" + resolution.basis() + ")";
+                    recoveredPaths.put(requestKeys.get(query.key()), note);
+                    status += "; " + note;
+                    if (EvidenceText.bytes("\n- " + note + "\n") <= remaining) {
+                        prompt.append("\n- ").append(note).append('\n');
+                        remaining -= EvidenceText.bytes("\n- " + note + "\n");
+                    }
+                }
             } catch (IOException unavailable) {
-                // Give every admitted request its initial share before spending unclaimed room on whole files.
-                if (canDefer && unavailable instanceof GitClient.BlobTooLargeException) {
+                if (!deferred && unavailable instanceof GitClient.MissingTrackedFileException) {
+                    missingPaths.add(query);
+                    pending.add(query);
+                    continue;
+                }
+                // Give every admitted request its initial share before spending unclaimed room on larger reads.
+                if (canDefer && query.selector().equals("all") && unavailable instanceof GitClient.BlobTooLargeException) {
                     pending.add(query);
                     continue;
                 }
@@ -203,7 +232,7 @@ final class SupplementalEvidence {
                 + ". Skipped by request limit: " + (requests.size() - total) + ". See `coverage.md` for details.\n";
         return new Result(prompt.append(summary).append(knowledge.markdown()).toString(),
                 coverage.append(summary).append(knowledge.coverage()).toString(), material, catalog,
-                Map.copyOf(resolved), Map.copyOf(failures));
+                Map.copyOf(resolved), Map.copyOf(failures), Map.copyOf(recoveredPaths));
     }
 
     private Excerpt references(EvidenceBundle evidence, String revision, EvidenceQuery query, int quota)
@@ -270,17 +299,18 @@ final class SupplementalEvidence {
                 + (construction ? "(?=\\s*[<(])" : callOnly ? "(?=\\s*\\()" : "(?![\\p{L}\\p{N}_$-])"));
     }
 
-    private Excerpt repositoryFile(ReviewScope scope, String revision, EvidenceQuery query, int quota)
+    private Excerpt repositoryFile(ReviewScope scope, String revision, EvidenceQuery query, int quota, boolean canDefer)
             throws IOException, InterruptedException {
         if (!eligiblePath(query.resource()))
             throw new IOException("path: not eligible tracked source, test, schema, or documentation");
         if (query.fallback().startsWith(EvidenceQuery.NEAR))
-            return symbolExcerpt(scope, revision, query.resource(), query.selector(), query.fallback(), quota);
+            return symbolExcerpt(scope, revision, query.resource(), query.selector(), query.fallback(), quota, canDefer);
         if (query.fallback().isEmpty()) return repositoryFile(scope, revision, query.resource(), query.selector(), quota);
         try {
             var requested = repositoryFile(scope, revision, query.resource(), query.selector(), quota);
-            if (EvidenceText.bytes(requested.markdown()) <= quota) return requested;
+            if (canDefer || EvidenceText.bytes(requested.markdown()) <= quota) return requested;
         } catch (IOException unavailable) {
+            if (canDefer && query.selector().equals("all") && unavailable instanceof GitClient.BlobTooLargeException) throw unavailable;
             // The request explicitly names a smaller location that can answer the same question.
         }
         var fallback = repositoryFile(scope, revision, query.resource(), query.fallback(), quota);
@@ -296,18 +326,13 @@ final class SupplementalEvidence {
         if (selector.startsWith(EvidenceQuery.DECLARATION))
             return declarationExcerpts(scope, revision, path, selector.substring(EvidenceQuery.DECLARATION.length()));
         if (selector.startsWith(EvidenceQuery.SYMBOL))
-            return symbolExcerpt(scope, revision, path, selector, "", quota);
-        if (!EvidenceQuery.LINES.matcher(selector).matches()) {
-            throw new IOException("selector: expected all, a line range, symbol:, or declaration:");
-        }
-        String[] endpoints = selector.split(":");
-        int first = Integer.parseInt(endpoints[0]);
-        int last = Integer.parseInt(endpoints[1]);
-        if (last < first || last - first >= MAX_SOURCE_LINES)
-            throw new IOException("selector: requested range must contain between 1 and 200 lines");
+            return symbolExcerpt(scope, revision, path, selector, "", quota, false);
+        var range = EvidenceQuery.sourceRange(selector);
+        if (range == null)
+            throw new IOException("selector: expected all, a positive first:last range in order, symbol:, or declaration:");
         var lines = git.regularBlobAt(revision, path, MAX_SOURCE_BYTES).lines().toList();
-        if (first > lines.size()) throw new IOException("selector: requested range is beyond the end of the file");
-        return new Excerpt(fileExcerpt(scope, revision, path, lines, first, Math.min(last, lines.size())), "INCLUDED");
+        if (range.first() > lines.size()) throw new IOException("selector: requested range is beyond the end of the file");
+        return new Excerpt(fileExcerpt(scope, revision, path, lines, range.first(), Math.min(range.last(), lines.size())), "INCLUDED");
     }
 
     private Excerpt declarationExcerpts(ReviewScope scope, String revision, String path, String name)
@@ -317,8 +342,7 @@ final class SupplementalEvidence {
         var lines = source.lines().toList();
         var excerpts = new ArrayList<EvidenceSource>();
         for (var span : spans) {
-            if (span.first() < 1 || span.last() < span.first() || span.last() > lines.size()
-                    || span.last() - span.first() >= MAX_SOURCE_LINES)
+            if (span.first() < 1 || span.last() < span.first() || span.last() > lines.size())
                 throw new IOException("Requested declaration has no bounded source range; request exact lines");
             excerpts.add(fileExcerpt(scope, revision, path, lines, span.first(), span.last()));
         }
@@ -328,7 +352,8 @@ final class SupplementalEvidence {
                 "INCLUDED (pinned declarations)", catalog);
     }
 
-    private Excerpt symbolExcerpt(ReviewScope scope, String revision, String path, String selector, String fallback, int quota)
+    private Excerpt symbolExcerpt(ReviewScope scope, String revision, String path, String selector, String fallback, int quota,
+                                  boolean canDefer)
             throws IOException, InterruptedException {
         String source = git.regularBlobAt(revision, path, MAX_SOURCE_BYTES);
         var span = languages.forPath(path).locate(source, selector.substring(EvidenceQuery.SYMBOL.length()));
@@ -336,13 +361,9 @@ final class SupplementalEvidence {
         int first = span.first();
         int last = Math.min(span.last(), lines.size());
         if (first < 1 || last < first) throw new IOException("Symbol has no usable source range");
-        if (span.last() - first < MAX_SOURCE_LINES) {
-            var full = fileExcerpt(scope, revision, path, lines, first, last);
-            if (fallback.isEmpty() || EvidenceText.bytes(full.markdown()) <= quota)
-                return new Excerpt(full, "INCLUDED (lines " + first + "–" + last + ")");
-        }
-        if (fallback.isEmpty())
-            throw new IOException("Method spans more than 200 lines; request the relevant line range instead");
+        var full = fileExcerpt(scope, revision, path, lines, first, last);
+        if (fallback.isEmpty() || canDefer || EvidenceText.bytes(full.markdown()) <= quota)
+            return new Excerpt(full, "INCLUDED (lines " + first + "–" + last + ")");
         int hit = uniqueReferenceLine(lines, first, last, fallback.substring(EvidenceQuery.NEAR.length()));
         var excerpt = fileExcerpt(scope, revision, path, lines, Math.max(first, hit - REFERENCE_CONTEXT),
                 Math.min(last, hit + REFERENCE_CONTEXT));

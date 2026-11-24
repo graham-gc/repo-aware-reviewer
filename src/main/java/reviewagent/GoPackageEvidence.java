@@ -19,12 +19,18 @@ final class GoPackageEvidence {
     }
     record Package(Tree tree, String directory, String provenance) { }
 
+    private static final class BudgetExceeded extends IOException {
+        BudgetExceeded() {
+            super("Requested Go evidence exceeds the remaining byte budget; request an index, symbol or smaller range");
+        }
+    }
+
     static LanguageModule.Evidence evidence(Package pkg, String selector, int maxBytes) throws IOException, InterruptedException {
         try {
             return new LanguageModule.Evidence(render(pkg, selector, maxBytes), selector.equals("index")
                     ? "INDEX_ONLY (package navigation; implementation not supplied)" : "INCLUDED");
         } catch (IOException missing) {
-            if (!selector.startsWith("symbol:") || !(missing.getMessage().contains("200 lines")
+            if (!selector.startsWith("symbol:") || !(missing instanceof BudgetExceeded
                     || missing.getMessage().contains("ambiguous") || missing.getMessage().contains("symbol is absent"))) throw missing;
             String note = "Requested Go declaration was not supplied: " + EvidenceText.oneLine(missing.getMessage())
                     + ". Navigation index supplied instead; request a specific file/range.\n\n";
@@ -119,7 +125,6 @@ final class GoPackageEvidence {
                 index.append("  ").append(declaration.kind()).append(' ').append(declaration.name()).append(" lines ")
                         .append(declaration.first()).append(':').append(declaration.last()).append('\n');
                 if (!wanted.isEmpty() && (declaration.name().equals(wanted) || (!wanted.contains(".") && declaration.name().endsWith("." + wanted)))) {
-                    if (declaration.last() - declaration.first() >= 200) throw new IOException("Go declaration spans more than 200 lines; request a range");
                     matches.add(range(pkg.tree().title(path, source), source,
                             Integer.toString(declaration.first()), Integer.toString(declaration.last())));
                 }
@@ -131,15 +136,15 @@ final class GoPackageEvidence {
         return bounded(note + matches.getFirst(), maxBytes);
     }
 
-    static String range(String title, String source, String first, String last) throws IOException {
+    private static String range(String title, String source, String first, String last) throws IOException {
         return range(title, source, first, last, "go");
     }
 
     private static String range(String title, String source, String first, String last, String language) throws IOException {
-        if (!first.matches("[1-9][0-9]{0,6}") || !last.matches("[1-9][0-9]{0,6}")) throw new IOException("Invalid source line range");
-        int from = Integer.parseInt(first), to = Integer.parseInt(last);
-        if (to < from || to - from >= 200) throw new IOException("Requested range must contain between 1 and 200 lines");
-        var lines = source.lines().skip(from - 1L).limit(to - from + 1L).toList();
+        var range = EvidenceQuery.sourceRange(first + ":" + last);
+        if (range == null) throw new IOException("Expected a positive first:last source range in order");
+        int from = range.first();
+        var lines = source.lines().skip(from - 1L).limit(range.last() - from + 1L).toList();
         if (lines.isEmpty()) throw new IOException("Requested range is beyond the end of the file");
         return EvidenceText.block(title + " (lines " + from + "–" + (from + lines.size() - 1) + ")", language, String.join("\n", lines));
     }
@@ -149,7 +154,7 @@ final class GoPackageEvidence {
                 && java.util.Arrays.stream(path.split("/", -1)).noneMatch(part -> part.isEmpty() || part.equals(".") || part.equals("..") || part.startsWith("."));
     }
     static String bounded(String text, int maxBytes) throws IOException {
-        if (EvidenceText.bytes(text) > maxBytes) throw new IOException("Requested Go evidence exceeds the remaining byte budget; request an index, symbol or smaller range");
+        if (EvidenceText.bytes(text) > maxBytes) throw new BudgetExceeded();
         return text;
     }
     static String sha256(String text) {
