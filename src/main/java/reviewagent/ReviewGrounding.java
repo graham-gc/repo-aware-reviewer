@@ -129,6 +129,7 @@ final class ReviewGrounding {
         for (var premise : support.premises()) {
             boolean proved = switch (premise.basis()) {
                 case IMPLEMENTATION -> index.hasTarget(premise.citations()) || index.hasBaseline(premise.citations());
+                case DOCUMENTATION -> index.hasPinnedDocumentation(premise.citations());
                 case CONTRACT -> index.hasContract(premise.citations());
                 case OUTCOME, SEVERITY -> index.hasPinnedTarget(premise.citations());
                 case ASSUMPTION -> false;

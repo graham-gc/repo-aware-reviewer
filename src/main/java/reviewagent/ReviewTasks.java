@@ -32,9 +32,13 @@ final class ReviewTasks {
         }
     }
 
-    record Task(String id, String prompt, Validator validator, String model, String schema) {
+    record Task(String id, String prompt, Validator validator, String model, String schema, IncrementalReview.Entry cache) {
         Task(String id, String prompt, Validator validator) { this(id, prompt, validator, null); }
         Task(String id, String prompt, Validator validator, String model) { this(id, prompt, validator, model, null); }
+        Task(String id, String prompt, Validator validator, String model, String schema) {
+            this(id, prompt, validator, model, schema, null);
+        }
+        Task withCache(IncrementalReview.Entry entry) { return new Task(id, prompt, validator, model, schema, entry); }
     }
 
     record Outcome(String response, String error, String failureKind) {
@@ -163,6 +167,7 @@ final class ReviewTasks {
                 try {
                     state(directory, task, "RUNNING", "");
                     String response = invoke(task, agent, budget, directory, resume);
+                    if (task.cache() != null) task.cache().save(response);
                     Files.deleteIfExists(directory.resolve(task.id() + "-error.txt"));
                     state(directory, task, "SUCCEEDED", "");
                     agent.timings().task(budget.calls() == 0, true);
@@ -251,6 +256,26 @@ final class ReviewTasks {
             // An explicit resume may execute a failed task again. It still uses the original prompt
             // and the same validation policy, without turning a cached failure into a repair request.
             if (!task.validator().allowOutputCorrection()) response = null;
+        }
+        if (response == null && task.cache() != null) {
+            String saved;
+            try { saved = task.cache().read(); }
+            catch (IOException unreadable) { saved = null; }
+            if (saved != null) {
+                boolean valid = true;
+                try { validate(task, saved, directory, agent.timings(), true); }
+                catch (IOException invalid) {
+                    if (invalid instanceof ArtifactIOException) throw invalid;
+                    valid = false;
+                }
+                if (valid) {
+                    AtomicFiles.write(promptFile, task.prompt());
+                    AtomicFiles.write(responseFile, saved);
+                    AtomicFiles.write(directory.resolve(task.id() + "-incremental.txt"), "Validated response reused from the previous review.\n");
+                    agent.timings().incremental();
+                    return saved;
+                }
+            }
         }
         boolean responseFromCache = response != null;
         if (response == null) {

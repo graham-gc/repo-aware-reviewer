@@ -17,7 +17,8 @@ final class SupplementalEvidence {
     private static final int REFERENCE_CONTEXT = 10;
 
     record Result(String markdown, String coverage, boolean hasMaterial, EvidenceCatalog catalog,
-                  Map<String, Set<String>> resolvedSources, Map<String, String> failures, Map<String, String> recoveredPaths) {
+                  Map<String, Set<String>> resolvedSources, Map<String, String> failures, Map<String, String> recoveredPaths,
+                  Set<String> missingDirectories) {
     }
 
     private record Excerpt(String markdown, String status, EvidenceCatalog catalog) {
@@ -67,6 +68,27 @@ final class SupplementalEvidence {
         } catch (IOException invalid) { return Set.of(); }
     }
 
+    record RecoveredDelivery(Set<String> sources, String description) { }
+
+    RecoveredDelivery recoverCollected(EvidenceBundle evidence, EvidenceRequest request, List<EvidenceRequest> related)
+            throws InterruptedException {
+        try {
+            var query = EvidenceQuery.parse(request.text(), languages);
+            if (query.operation() != EvidenceQuery.Operation.READ_FILE) return null;
+            String revision = query.side().equals("base") ? evidence.scope().baseCommit() : evidence.scope().targetCommit();
+            var recovery = new EvidencePathRecovery(git, repository, MAX_SOURCE_BYTES);
+            var resolved = recovery.resolve(revision, query, related, evidence.catalog(),
+                    path -> eligiblePath(path) && (evidence.scopedKnowledge() == null
+                            || !evidence.scopedKnowledge().isSourcePath(path)));
+            var available = reusable(evidence, query.atPath(resolved.path()));
+            if (available.isEmpty()) return null;
+            return new RecoveredDelivery(available, "Resolved path " + query.side() + " " + query.resource()
+                    + " -> " + resolved.path() + " (" + resolved.basis() + ")");
+        } catch (IOException unresolved) {
+            return null;
+        }
+    }
+
     private Set<String> reusable(EvidenceBundle evidence, EvidenceQuery query) {
         if (!eligiblePath(query.resource()) || evidence.scopedKnowledge() != null && evidence.scopedKnowledge().isSourcePath(query.resource())) return Set.of();
         var covering = FileEvidenceCache.covering(query, evidence.scope(), evidence.catalog());
@@ -111,8 +133,10 @@ final class SupplementalEvidence {
         int total = maxRequests == 0 ? requests.size() : Math.min(requests.size(), maxRequests);
         var pending = new ArrayList<>(requests.values().stream().limit(total).toList());
         var missingPaths = new java.util.HashSet<EvidenceQuery>();
+        var missingDirectories = new java.util.LinkedHashSet<String>();
         var recoveredPaths = new LinkedHashMap<String, String>();
         var recovery = new EvidencePathRecovery(git, repository, MAX_SOURCE_BYTES);
+        var browser = new RepositoryBrowser(repository);
         int included = 0;
         boolean material = knowledge.suppliedSections() > 0;
         EvidenceCatalog catalog = knowledge.catalog();
@@ -126,7 +150,8 @@ final class SupplementalEvidence {
             var query = pending.get(i);
             boolean deferred = i >= total;
             int quota = deferred ? remaining : Math.min(remaining, Math.max(256, remaining / (total - i)));
-            boolean canDefer = !deferred && quota < remaining && query.operation() == EvidenceQuery.Operation.READ_FILE;
+            boolean matchingFiles = query.operation() == EvidenceQuery.Operation.READ_MATCHING_FILES;
+            boolean canDefer = !deferred && quota < remaining && (matchingFiles || query.operation() == EvidenceQuery.Operation.READ_FILE);
             String revision = query.side().equals("base") ? evidence.scope().baseCommit() : evidence.scope().targetCommit();
             String label = EvidenceText.oneLine(query.label());
             String status;
@@ -146,9 +171,18 @@ final class SupplementalEvidence {
                 Excerpt excerpt;
                 EvidencePathRecovery.Resolution resolution = null;
                 if (query.operation() == EvidenceQuery.Operation.FIND_FILES) {
-                    excerpt = new Excerpt(new RepositoryBrowser(repository).source(revision, query.resource(), quota), "INDEX_ONLY");
+                    excerpt = new Excerpt(browser.source(revision, query.resource(), quota), "INDEX_ONLY");
                 } else if (query.operation() == EvidenceQuery.Operation.FIND_REFERENCES) {
-                    excerpt = references(evidence, revision, query, quota);
+                    try {
+                        excerpt = references(evidence, revision, query, quota);
+                    } catch (IOException unavailable) {
+                        String parent = browser.parentOfMissingScope(revision, query.resource());
+                        if (parent.isEmpty()) throw unavailable;
+                        excerpt = references(evidence, revision, query.atPath(parent), quota);
+                        resolution = new EvidencePathRecovery.Resolution(parent, "same literal reference searched in the nearest tracked parent");
+                    }
+                } else if (matchingFiles) {
+                    excerpt = matchingFiles(evidence, revision, query.resource(), quota);
                 } else if (query.operation() == EvidenceQuery.Operation.READ_FILE) {
                     if (evidence.scopedKnowledge() != null && evidence.scopedKnowledge().isSourcePath(query.resource())) {
                         throw new IOException("Use a knowledge query for the scoped knowledge document");
@@ -163,7 +197,6 @@ final class SupplementalEvidence {
                     excerpt = repositoryFile(evidence.scope(), revision, file, quota, canDefer);
                 } else {
                     LanguageModule module = languages.module(query.language());
-                    var browser = new RepositoryBrowser(repository);
                     if (query.selector().equals("index") && !module.capabilities().contains(LanguageModule.Capability.FILE_INDEX)
                             && browser.directory(revision, query.resource())) {
                         excerpt = new Excerpt(browser.source(revision, query.resource(), quota), "INDEX_ONLY (repository navigation fallback)");
@@ -211,11 +244,19 @@ final class SupplementalEvidence {
                     continue;
                 }
                 // Give every admitted request its initial share before spending unclaimed room on larger reads.
-                if (canDefer && query.selector().equals("all") && unavailable instanceof GitClient.BlobTooLargeException) {
+                if (canDefer && (matchingFiles || query.selector().equals("all")) && unavailable instanceof GitClient.BlobTooLargeException) {
                     pending.add(query);
                     continue;
                 }
                 String reason = EvidenceText.oneLine(unavailable.getMessage());
+                if (query.operation() == EvidenceQuery.Operation.FIND_FILES
+                        && unavailable instanceof RepositoryBrowser.MissingDirectoryException) {
+                    missingDirectories.add(requestKeys.get(query.key()));
+                    try {
+                        String parent = browser.parentOfMissingScope(revision, query.resource());
+                        if (!parent.isEmpty()) reason += "; nearest tracked parent: " + parent;
+                    } catch (IOException ignored) { /* Preserve the original lookup failure. */ }
+                }
                 failures.put(requestKeys.get(query.key()), reason);
                 status = "UNAVAILABLE (" + reason + ")";
                 String note = "- " + label + ": " + status + "\n";
@@ -232,7 +273,28 @@ final class SupplementalEvidence {
                 + ". Skipped by request limit: " + (requests.size() - total) + ". See `coverage.md` for details.\n";
         return new Result(prompt.append(summary).append(knowledge.markdown()).toString(),
                 coverage.append(summary).append(knowledge.coverage()).toString(), material, catalog,
-                Map.copyOf(resolved), Map.copyOf(failures), Map.copyOf(recoveredPaths));
+                Map.copyOf(resolved), Map.copyOf(failures), Map.copyOf(recoveredPaths), Set.copyOf(missingDirectories));
+    }
+
+    private Excerpt matchingFiles(EvidenceBundle evidence, String revision, String pattern, int quota)
+            throws IOException, InterruptedException {
+        var matches = RepositoryBrowser.pathsMatching(pattern);
+        var paths = repository.paths(revision).stream().filter(matches).filter(this::eligiblePath)
+                .filter(path -> evidence.scopedKnowledge() == null || !evidence.scopedKnowledge().isSourcePath(path))
+                .sorted().toList();
+        if (paths.isEmpty()) throw new IOException("No eligible tracked files match the pattern at the pinned revision");
+        var sources = new ArrayList<EvidenceSource>();
+        var text = new StringBuilder();
+        for (String path : paths) {
+            var file = repositoryFile(evidence.scope(), revision, path, "all", quota);
+            int bytes = EvidenceText.bytes(file.markdown());
+            if (bytes > quota) throw new GitClient.BlobTooLargeException();
+            text.append(file.markdown());
+            sources.addAll(file.catalog().sources());
+            quota -= bytes;
+        }
+        return new Excerpt(text.toString(), "INCLUDED (complete contents of " + paths.size() + " matching tracked files)",
+                new EvidenceCatalog(sources, true));
     }
 
     private Excerpt references(EvidenceBundle evidence, String revision, EvidenceQuery query, int quota)

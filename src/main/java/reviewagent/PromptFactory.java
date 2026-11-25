@@ -44,6 +44,9 @@ final class PromptFactory {
             <basis>, and <citations>, with every <citation> inside that <citations> container. Include base or diff
             evidence for change attribution in the top-level <citations>. Omit both linked citation fields when there
             is no confirmed finding. Keep the outcome within what the cited code proves.
+            Link executable code or test evidence in triggerCitations and outcomeCitations. Put README or
+            guide citations under a separate DOCUMENTATION premise. For an advertised name, prove the
+            actual registration or dispatch with source, and limit any claim about real callers to the supplied evidence.
             Ask only for evidence needed for the specific unresolved fact. Treat broader policy and external usage
             as separate questions. REQUEST_KNOWLEDGE searches only a configured scoped knowledge base.
             When a follow-up provides only part of the requested evidence, resolve whatever the supplied source
@@ -94,12 +97,21 @@ final class PromptFactory {
     }
 
     String supplementalDiscovery(EvidenceBundle evidence) {
+        return supplementalDiscovery(evidence, java.util.Set.of());
+    }
+
+    String supplementalDiscovery(EvidenceBundle evidence, java.util.Set<String> newSources) {
+        String focus = newSources.isEmpty() ? "" : """
+                The newly delivered evidence for this pass is: %s.
+                Use the other supplied sources to check the implications of those blocks.
+                """.formatted(evidence.catalog().select(newSources).sources().stream().map(evidence.catalog()::reference)
+                .collect(java.util.stream.Collectors.joining(", ")));
         return discovery(evidence, """
                 Inspect the supplemental evidence and newly supplied business rules for concrete regressions.
                 This pass runs after evidence collection.
                 Use the relevant changed code to trace behavior revealed by that material.
                 Leave any remaining gap in the candidate evidence or its verification question.
-                """, false, true);
+                """ + focus, false, true);
     }
 
     private String discovery(EvidenceBundle evidence, String assignment, boolean includeChangeSummary, boolean supplemental) {
@@ -109,12 +121,14 @@ final class PromptFactory {
                 for this role's assigned question. If a concrete missing source prevents answering it and
                 you can identify the source now, stop immediately. Return the fenced <findings/> block, then
                 %sExact question blocked by the missing source
-                followed only by the smallest set of evidence request lines needed together. Omit candidate
+                followed only by the smallest set of evidence request lines needed together. Write these
+                lines as plain text after the closing XML fence. Omit candidate
                 findings and change summary in this reply. The CLI will collect the evidence and restart this
                 role on the same changes. If the material is sufficient, complete discovery in this reply.
                 Use the latest delivery update and cite recovered sources by their resolved paths. If some
-                sources remain unavailable, review the questions that the delivered material can answer. Leave
-                blocked questions open and do not repeat unavailable requests.
+                sources remain unavailable, review the questions that the delivered material can answer.
+                When delivered source answers the same premise as a failed directory lookup, cite the actual
+                implementation by path and line. Leave blocked questions open and do not repeat unavailable requests.
                 Gaps discovered later for specific candidates use the ordinary evidence handoff below.
 
                 """.formatted(ReviewOutput.Discovery.NEEDS_EVIDENCE_PREFIX);
@@ -122,8 +136,8 @@ final class PromptFactory {
                 ? "These requests prepare verification. They cannot schedule more discovery.\n" + EvidenceRequest.PATH_GUIDANCE
                 : fileRequestLimit() + evidenceRequestInstructions(evidence, false);
         String summary = includeChangeSummary ? """
-                After the XML, add one plain %s line describing the main functional change shown
-                by the diff. Keep candidate allegations and requirement verdicts out of that line.
+                Only after completing the review, add one plain %s line describing the main functional
+                change shown by the diff. Omit it from a DISCOVERY_NEEDS_EVIDENCE reply.
                 """.formatted(ReviewOutput.Discovery.CHANGE_SUMMARY_PREFIX) : "";
         return """
                 You are the discovery stage of a read-only code review.
@@ -180,7 +194,9 @@ final class PromptFactory {
                 For an observable failure, cover the reachable entry, the faulty operation, and any downstream
                 guard or recovery that could change the final result. For a compatibility claim, identify the
                 affected consumer and its support requirement. An absence claim needs the complete relevant
-                registration or lookup scope.
+                registration or lookup scope. For a removed public name, request the old registration,
+                the complete target registration including aliases, and any concrete caller or documented
+                contract used by the claim. A reference search locates evidence for those checks.
                 For each premise, cite the known source locations in the finding's evidence and request all
                 identifiable excerpts still needed together. Include unchanged callees, guards and fallback
                 behavior when they could change the verdict. Reuse complete diff hunks already in evidence.
@@ -350,8 +366,8 @@ final class PromptFactory {
                 If any required proof is missing, use INSUFFICIENT_EVIDENCE and name the exact missing premise.
                 In <source>, copy the actual reference printed before an included block's title, such as SRC-17.
                 DIFF, BASE_SOURCE, TARGET_SOURCE and CONTRACT identify block kinds. In <lines>, copy the block-relative
-                numbers printed next to the selected code. Select the smallest contiguous excerpt that proves the
-                claim and contains at least 12 normalized characters of source text.
+                numbers printed next to the selected code. Select the smallest nonblank excerpt within that block
+                that proves the claim. For <quote>, copy at least 12 normalized characters verbatim.
 
                 For CONFIRMED, use the complete structure below, replacing the example descriptions with verified
                 values. The SRC references and ranges in this example are illustrative. Copy the actual references
@@ -401,6 +417,9 @@ final class PromptFactory {
                 Classify support as REACHABLE_FAILURE, EXPLICIT_DEFENSIVE_REQUIREMENT, HARDENING or UNRESOLVED.
                 For a reachable failure, enumerate EVERY necessary premise and trace its producer, caller and consumer.
                 %s
+                Use DOCUMENTATION with pinned documentation quotations for what a manual, README or guide
+                actually says. Prove reachable behavior separately with implementation, and cite a supplied
+                rule as CONTRACT only when it governs the review.
                 A CONFIRMED verdict cannot contain an ASSUMPTION, HARDENING or UNRESOLVED support.
                 Prove that the producer can emit the claimed invalid state and that the consumer can expose the
                 claimed effect despite later guards. If the failure requires prior state, prove that precondition.
@@ -419,7 +438,7 @@ final class PromptFactory {
                 proofExample, id, groundedPublication ? "MEDIUM" : "HIGH",
                 batch ? "</verification></verifications>" : "</verification>",
                 groundedPublication ? GROUNDED_PUBLICATION.strip()
-                        : "Prove each premise using IMPLEMENTATION or CONTRACT quotations; unproved premises use ASSUMPTION.");
+                        : "Prove each premise using IMPLEMENTATION, DOCUMENTATION or CONTRACT quotations; unproved premises use ASSUMPTION.");
     }
 
     private static String verificationSources(EvidenceBundle evidence, EvidenceIndex index, String path, String supplemental) {
@@ -549,18 +568,22 @@ final class PromptFactory {
                 Both non-confirmed statuses omit <finding>. Use <support>HARDENING</support> for a hardening observation.
                 Support values are REACHABLE_FAILURE, EXPLICIT_DEFENSIVE_REQUIREMENT, HARDENING and UNRESOLVED.
                 Each optional <premise> inside <premises> has <statement>, <basis> and <citations>. Basis values are
-                IMPLEMENTATION, CONTRACT, OUTCOME, SEVERITY and ASSUMPTION. Confirmation requires proved premises;
+                IMPLEMENTATION, DOCUMENTATION, CONTRACT, OUTCOME, SEVERITY and ASSUMPTION. Confirmation requires proved premises;
                 omit assumptions and use REACHABLE_FAILURE or EXPLICIT_DEFENSIVE_REQUIREMENT for confirmed findings.
-                A local API invariant proved by source or a test uses IMPLEMENTATION; CONTRACT requires a supplied rule.
+                Use DOCUMENTATION for what pinned repository documentation says. Use IMPLEMENTATION to prove
+                actual behavior. CONTRACT requires a supplied rule governing this review.
 
                 CONFIRMATION AND CITATIONS
                 %s
                 Use a BASE_SOURCE excerpt, removed DIFF lines or a new-file DIFF header in top-level <citations> for
-                attribution. If existing behavior became reachable, also cite the changed entry point. For an unmet
+                attribution. Diff headers of existing files and context without removed lines do not establish
+                this by themselves. For an added method in an existing file, compare against the supplied
+                BASE_SOURCE declaration or registration scope. If existing behavior became reachable, cite the
+                changed entry point as well. For an unmet
                 requirement, cite the exact CONTRACT clause. Use TARGET_SOURCE or added DIFF lines for target behavior.
                 Each <citation> has <source> and exactly one of <lines>first:last</lines> or <quote>. Use the listed SRC
-                reference and block-relative lines, or a verbatim excerpt from that block. Use a contiguous excerpt
-                of at least 12 characters after whitespace normalization. Keep target file coordinates for findings.
+                reference and block-relative lines for the smallest nonblank excerpt that proves the claim. If using
+                <quote>, copy a verbatim excerpt of at least 12 normalized characters. Keep target file coordinates for findings.
                 Give each <finding> the child fields <title>, <severity>, <path>, <line>, <endLine>, <trigger>, <impact>,
                 <evidence> and <diffRelation>. The parent <relation> is the category; explain its source basis in
                 <diffRelation>. Anchor to the smallest decisive changed-file span. Set <endLine> equal to <line> for
@@ -737,7 +760,8 @@ final class PromptFactory {
                 `REQUEST_FILE|{side}|{path or directory/glob}|{selector}|{reason}`
                 Use the smallest inclusive first:last range that answers the question, all for a small file,
                 or a symbol or declaration selector documented by the file's module. The CLI supplies the
-                selected source when it fits the remaining evidence byte budget.
+                selected source when it fits the remaining evidence byte budget. For a narrow wildcard
+                pattern, use the selector glob for the complete matching contents or index for names only.
                 If a shorter range would independently answer the question, add ;fallback=first:last.
                 `REQUEST_LANGUAGE|{side}|{language}|{context}|{resource}|{selector}|{reason}`
                 Use REQUEST_LANGUAGE for provider-specific queries with the registered language ID, a tracked

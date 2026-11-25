@@ -20,6 +20,7 @@ final class ReviewTaskIsolationTests {
         batchIsolation();
         incompleteReportAndResume();
         translationPreservesSourceText();
+        translationRetriesOnlyRejectedFields();
         initialSilenceDoesNotRetry();
         completionUsesLatestVerdict();
         fallbackRetainsMixedResults();
@@ -79,10 +80,10 @@ final class ReviewTaskIsolationTests {
                 """;
         var translator = new ReportTranslation(source);
         String prompt = translator.prompt();
-        String reply = prompt.lines().filter(line -> line.startsWith("FIELD|")).map(line -> {
-                    var field = line.split("\\|", 4);
-                    String value = field[3];
-                    if (field[2].equals("TRIGGER")) {
+        String reply = prompt.lines().filter(line -> line.startsWith("TRANSLATION|")).map(line -> {
+                    var field = line.split("\\|", 3);
+                    String value = field[2];
+                    if (value.endsWith("…")) {
                         var markers = java.util.regex.Pattern.compile("⟦[0-9]+⟧").matcher(value).results()
                                 .map(java.util.regex.MatchResult::group).toList();
                         value = "以有效的 " + markers.get(1) + " 和非空的 " + markers.get(2) + " 调用 " + markers.getFirst() + "…";
@@ -100,7 +101,7 @@ final class ReviewTaskIsolationTests {
                 && chinese.contains("触发条件 — 以有效的 `diagram_id` 和非空的 `name` 调用 `rename_bpmn_diagram`…")
                 && chinese.contains("证据 — 可达故障: src/runner.py:18 @ 0123456789012345678901234567890123456789 — 保护条件被绕过。")
                 && !prompt.contains("REACHABLE_FAILURE") && !prompt.contains("0123456789012345678901234567890123456789")
-                && prompt.contains("|EVIDENCE_CLAIMS|The guard is bypassed.")
+                && !prompt.contains("FIELD|") && prompt.lines().anyMatch(row -> row.matches("TRANSLATION\\|F[0-9]+\\|The guard is bypassed\\."))
                 && chinese.contains("```python\nreturn approved\n```"), "translation preserves locations, links, code and quotations");
         fails(() -> translator.apply(reply.replace("⟦1⟧", "other/file.py:9")));
         fails(() -> translator.apply(reply.replace("⟦1⟧", "⟦0⟧")));
@@ -112,6 +113,30 @@ final class ReviewTaskIsolationTests {
         require(comparison.apply(comparisonReply).equals("比较 `base_mode` → `target_mode`，见 [源码](docs/a(b).md)。"),
                 "a translated link label remains bound to its original destination");
         fails(() -> comparison.apply(comparisonReply.replace("⟦0⟧ → ⟦1⟧", "⟦1⟧ → ⟦0⟧")));
+    }
+
+    private static void translationRetriesOnlyRejectedFields() throws Exception {
+        Path dir = Files.createTempDirectory("report-translation-field-retry-");
+        String report = "Run `worker.run()` now.\nA backend accepts the request.\nKeep another line.\n";
+        Files.writeString(dir.resolve("report.md"), report);
+        var agent = shell(dir, """
+                prompt=$(cat)
+                if printf '%s\\n' "$prompt" | grep -q '^TRANSLATION|F1|'; then
+                  printf '%s\\n' 'TRANSLATION|F1|现在运行 ⟦0⟧。' 'TRANSLATION|F2|⟦0⟧ 接受请求。' 'TRANSLATION|F3|保留另一行。'
+                else
+                  printf '%s\\n' "$prompt" | grep -q '^TRANSLATION|F2|A backend accepts the request\\.' || exit 21
+                  printf '%s\\n' "$prompt" | grep -q '^TRANSLATION|F3|' && exit 22
+                  printf '%s\\n' "$prompt" | grep -q '⟦0⟧' && exit 23
+                  printf '%s\\n' 'TRANSLATION|F2|后端接受请求。'
+                fi
+                """);
+        try (var progress = new CommandProgress("translation", new java.io.PrintStream(java.io.OutputStream.nullOutputStream()))) {
+            require(ReportTranslation.publish(dir, OutputLanguage.ZH_CN, agent, progress, 9, false)
+                    && Files.readString(dir.resolve("report.md")).equals("现在运行 `worker.run()`。\n后端接受请求。\n保留另一行。\n")
+                    && Files.readString(dir.resolve("report-en.md")).equals(report)
+                    && agent.timings().markdown(dir, OutputLanguage.EN).contains("Actual launched attempts: 2"),
+                    "a foreign marker only retries its own field, preserving both accepted translations and source references");
+        }
     }
 
     private static void initialSilenceDoesNotRetry() throws Exception {
@@ -170,7 +195,7 @@ final class ReviewTaskIsolationTests {
                 REPORT
                     ;;
                   'Translate the final review report'*) printf '%s\\n' "$prompt" | sed -n \
-                    -E 's/^FIELD[|]([^|]+)[|][^|]+[|]/TRANSLATION|\\1|/p' | sed -e 's/Review incomplete:/审查未完成：/' \
+                    '/^TRANSLATION[|]/p' | sed -e 's/Review incomplete:/审查未完成：/' \
                      -e 's/Check not completed/检查未完成/' -e 's/did not complete verification/未完成复核/'
                     ;;
                   *) exit 88 ;;

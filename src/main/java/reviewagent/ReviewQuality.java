@@ -35,6 +35,9 @@ final class ReviewQuality {
     private final int stages;
     private final Map<String, Set<String>> retainedEvidence = new LinkedHashMap<>();
     private final Map<String, PublicationQuestion> pendingPublicationQuestions = new LinkedHashMap<>();
+    private IncrementalReview incremental;
+
+    void incremental(IncrementalReview value) { incremental = value; }
 
     private record PublicationQuestion(String candidate, String question, String requests) { }
 
@@ -91,18 +94,29 @@ final class ReviewQuality {
 
     private Map<String, List<ReadyCheck>> verificationAliases(List<ReadyCheck> checks,
                                                                Map<String, EvidenceSession.VerificationBrief> briefs) {
-        record Input(ReviewFinding claim, EvidenceSession.VerificationBrief brief) { }
+        record Input(String path, int line, int endLine, ReviewFinding.Severity severity, String title, String trigger,
+                     String impact, String evidence, String relation, EvidenceSession.VerificationBrief brief) { }
         var representatives = new LinkedHashMap<Input, String>();
         var aliases = new LinkedHashMap<String, List<ReadyCheck>>();
         for (var check : checks) {
             var finding = check.candidate;
             if (finding.severity().compareTo(ReviewFinding.Severity.MEDIUM) < 0) continue;
-            var input = new Input(finding.withId(""), briefs.getOrDefault(finding.id(), EvidenceSession.VerificationBrief.EMPTY));
+            var input = new Input(finding.path(), finding.line(), finding.endLine(), finding.severity(),
+                    finding.title(), finding.trigger(), finding.impact(), finding.evidence(), finding.diffRelation(),
+                    briefs.getOrDefault(finding.id(), EvidenceSession.VerificationBrief.EMPTY));
             String representative = representatives.putIfAbsent(input, finding.id());
             if (representative != null)
                 aliases.computeIfAbsent(representative, unused -> new ArrayList<>()).add(check);
         }
         return aliases;
+    }
+
+    private static boolean sharedVerificationAnchor(ReviewFinding first, ReviewFinding next) {
+        return first.path().equals(next.path()) && first.line() == next.line() && first.endLine() == next.endLine()
+                && first.severity().compareTo(ReviewFinding.Severity.MEDIUM) >= 0
+                && first.severity() == next.severity() && first.trigger().equals(next.trigger())
+                && first.impact().equals(next.impact()) && first.diffRelation().equals(next.diffRelation())
+                && !first.id().split("-", 2)[0].equals(next.id().split("-", 2)[0]);
     }
 
     private List<ReviewTasks.Job> releaseAliases(ReadyCheck check, List<ReadyCheck> aliases,
@@ -216,6 +230,7 @@ final class ReviewQuality {
 
         Map<String, List<ReviewOutput.Decision>> related = new LinkedHashMap<>();
         Set<String> covered = new LinkedHashSet<>();
+        var sharedProofs = new LinkedHashMap<String, List<ReviewOutput.Decision>>();
         var published = new ArrayList<ReviewOutput.Decision>();
         var directNotes = new StringBuilder();
         var sharingNotes = new StringBuilder();
@@ -240,10 +255,25 @@ final class ReviewQuality {
                 sharingNotes.append("- ").append(representative).append(" is the publication task for ")
                         .append(String.join(", ", awaiting)).append(" (identical independently verified claim and proof).\n");
             }
+            if (gated && members.stream().noneMatch(member -> member.verdict().status() == ReviewOutput.Status.REJECTED
+                    || member.verdict().status() == ReviewOutput.Status.DISPUTED)) {
+                var awaiting = members.stream().filter(member -> !covered.contains(member.verdict().candidate().id()))
+                        .filter(member -> PublicationGate.ready(member, index, target)).toList();
+                if (awaiting.size() > 1 && awaiting.stream().map(member -> member.verdict().confirmed().severity()).distinct().count() == 1) {
+                    var representative = PublicationGate.representative(awaiting, index, target);
+                    if (representative != null) {
+                        var aliases = awaiting.stream().filter(member -> member != representative).toList();
+                        sharedProofs.put(representative.verdict().candidate().id(), aliases);
+                        aliases.forEach(member -> covered.add(member.verdict().candidate().id()));
+                    }
+                }
+            }
         }
 
         var tasks = positives.stream().filter(candidate -> !covered.contains(candidate.id())).toList();
-        var preparation = preparePublication(tasks, related);
+        var potentialTasks = new ArrayList<>(tasks);
+        sharedProofs.values().stream().flatMap(List::stream).map(alias -> alias.verdict().confirmed()).forEach(potentialTasks::add);
+        var preparation = preparePublication(potentialTasks, related);
         String assessedEvidence = "\nINDEPENDENTLY AUDITED REQUIREMENT ASSESSMENT\n"
                 + "Recheck any contradiction between the proposed finding and this assessment against the source.\n" + assessment;
         VerificationPrompt publicationPrompt = (candidate, view) ->
@@ -255,9 +285,29 @@ final class ReviewQuality {
                         + "\n" + PromptFactory.publicationContext(related.get(candidate.id()), view.index()),
                 assessedEvidence);
         Function<ReviewFinding, Set<String>> publicationEvidence = candidate -> groupEvidence(related.get(candidate.id()));
-        published.addAll(verifyDeep(tasks, publicationPrompt, publicationBatch, publicationEvidence,
-                "adjudication", 7, "Adjudicating findings before publication", false, Map.of(),
-                ids -> (int) ids.stream().map(id -> related.get(id).getFirst().verdict().candidate().id()).distinct().count(), preparation));
+        java.util.function.ToIntFunction<List<String>> publicationWork = ids ->
+                (int) ids.stream().map(id -> related.get(id).getFirst().verdict().candidate().id()).distinct().count();
+        var ruled = verifyDeep(tasks, publicationPrompt, publicationBatch, publicationEvidence,
+                "adjudication", 7, "Adjudicating findings before publication", false, Map.of(), publicationWork, preparation);
+        published.addAll(ruled);
+        var fallback = new ArrayList<ReviewFinding>();
+        if (!sharedProofs.isEmpty()) {
+            var finalIndex = session.index();
+            for (var decision : ruled) {
+                String id = decision.verdict().candidate().id();
+                for (var alias : sharedProofs.getOrDefault(id, List.of())) {
+                    if (PublicationGate.representative(List.of(decision, alias), finalIndex, target) == null
+                            || decision.verdict().confirmed().severity() != alias.verdict().confirmed().severity()) {
+                        fallback.add(alias.verdict().confirmed());
+                        continue;
+                    }
+                    sharingNotes.append("- ").append(id).append(" is the publication task for ")
+                            .append(alias.verdict().candidate().id()).append(" (shared pinned trigger and outcome).\n");
+                }
+            }
+            published.addAll(verifyDeep(fallback, publicationPrompt, publicationBatch, publicationEvidence,
+                    "adjudication", 7, "Checking findings with a distinct publication verdict", false, Map.of(), publicationWork, preparation));
+        }
         String note = (directNotes.isEmpty() ? "" : "\n## Publication from independent verification\n\n" + directNotes)
                 + (sharingNotes.isEmpty() ? "" : "\n## Shared publication adjudication\n\n" + sharingNotes);
         return new Adjudication(resolveConflicts(published, groups, OutputLanguage.EN), groups, note);
@@ -361,9 +411,7 @@ final class ReviewQuality {
             java.util.function.ToIntFunction<List<String>> workCount, PublicationPreparation preparation)
             throws IOException, InterruptedException {
         boolean batchEnabled = options.batchedVerification();
-        if (!candidateVerification && !batchEnabled)
-            return verifyRounds(findings, individual, requiredSources, folder, stage, description,
-                    Followups.DECISIVE, Map.of(), Map.of(), workCount, preparation);
+        if (findings.isEmpty()) return List.of();
         var root = Files.createDirectories(directory.resolve(folder));
         var available = preparation == null ? session.catalog() : preparation.original();
         String supplemental = preparation == null ? session.markdown() : preparation.supplemental();
@@ -382,6 +430,8 @@ final class ReviewQuality {
         var grouped = new LinkedHashSet<String>();
         var initial = new ArrayList<ReviewTasks.Job>();
         int maximum = Math.min(options.maxEvidenceBytes(), agent.promptBudget().bytes());
+        boolean autoBatch = !batchEnabled && candidateVerification && !options.incremental()
+                && PublicationGate.enabledFor(options) && options.verificationEvidence() != CliOptions.VerificationEvidenceMode.FULL;
         if (batchEnabled) {
             var paths = new LinkedHashMap<String, List<ReadyCheck>>();
             for (var check : representatives)
@@ -407,12 +457,27 @@ final class ReviewQuality {
                     batch.members().forEach(member -> grouped.add(member.candidate().id()));
                 }
             }
+        } else if (autoBatch) {
+            var peers = representatives.stream().collect(Collectors.groupingBy(check -> check.candidate.path(),
+                    LinkedHashMap::new, Collectors.toList()));
+            for (var checksOnPath : peers.values()) {
+                if (checksOnPath.size() < 2 || checksOnPath.stream().noneMatch(first -> checksOnPath.stream()
+                        .anyMatch(next -> sharedVerificationAnchor(first.candidate, next.candidate)))) continue;
+                var plan = VerificationBatch.plan(checksOnPath.stream().map(check -> initialMember(check, briefs)).toList(),
+                        render, maximum, ReviewQuality::sharedVerificationAnchor);
+                for (var member : plan.members()) members.put(member.candidate().id(), member);
+                for (var batch : plan.batches()) {
+                    batches.put(batch.id(), new VerificationBatch.Validation(batch));
+                    batch.members().forEach(member -> grouped.add(member.candidate().id()));
+                }
+            }
         }
 
         // Keep the original queue priority: a batch occupies its first member's slot.
         for (var check : representatives) {
             String id = check.candidate.id();
-            var member = batchEnabled ? members.get(id) : initialMember(check, briefs);
+            var member = members.get(id);
+            if (member == null) member = initialMember(check, briefs);
             var job = check.prepare(member);
             var validation = batches.get("batch-" + id);
             if (validation != null) {
@@ -557,7 +622,12 @@ final class ReviewQuality {
                     VerificationEvidence.select(evidence, available(), supplemental(), candidate, pinned, true)));
             agent.timings().prepared(path.resolve(candidate.id()), fullBytes, selectedBytes, offered.size(), view.totalSources());
             AtomicFiles.write(path.resolve(candidate.id() + "-evidence.md"), view.manifest(fullBytes, selectedBytes));
-            return new ReviewTasks.Job(path, member.task());
+            var task = member.task();
+            var unit = incremental != null && candidateVerification && round == 1 && !options.batchedVerification()
+                    ? incremental.unit(candidate) : null;
+            if (unit != null) task = task.withCache(incremental.entry(unit, "verification/" + task.id(), task.prompt(),
+                    task.model(), view.bundle().catalog(), true));
+            return new ReviewTasks.Job(path, task);
         }
 
         private String promptText(VerificationEvidence supplied) {

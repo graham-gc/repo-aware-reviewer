@@ -14,6 +14,7 @@ import java.util.List;
 final class AgentStabilityTests {
     static void run() throws Exception {
         policies();
+        claudeStreaming();
         retriesAndArtifacts();
         sharedBudget();
         independentFailures();
@@ -23,6 +24,66 @@ final class AgentStabilityTests {
         checkpointsAndStorage();
         discoveryRecovery();
         sharedStageFailure();
+    }
+
+    private static void claudeStreaming() throws Exception {
+        Path dir = Files.createTempDirectory("review-claude-stream-");
+        try {
+            Path command = dir.resolve("claude");
+            Files.writeString(command, """
+                    #!/bin/sh
+                    input=$(cat)
+                    case " $* " in
+                      *' --output-format json --json-schema '*)
+                        printf '%s\n' '{"type":"result","structured_output":{"ok":true}}'
+                        exit ;;
+                      *' --output-format stream-json --verbose --include-partial-messages '*) ;;
+                      *) exit 91 ;;
+                    esac
+                    printf '%s\n' '{"type":"system","subtype":"init"}'
+                    printf '%s\n' '{"type":"stream_event","event":{"type":"message_start"}}'
+                    printf '%s' '{"type":"stream_event","event":{"type":"content_block_delta",'
+                    sleep 0.02
+                    printf '%s\n' '"delta":{"type":"thinking_delta","thinking":"private diagnostic text"}}}'
+                    sleep 0.02
+                    printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"ignored partial"}}}'
+                    case "$input" in
+                      partial) exit ;;
+                      rate) printf '%s\n' '{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["API Error: 429"]}'
+                        exit 1 ;;
+                    esac
+                    printf '%s' '{"type":"result","subtype":"success","is_error":false,"result":"<findings/>","duration_ms":100,"duration_api_ms":75,"ttft_stream_ms":14,"ttft_ms":20,"num_turns":1}'
+                    """);
+            require(command.toFile().setExecutable(true), "can launch the local Claude fixture");
+            var timeout = Duration.ofSeconds(5);
+            var runner = new AgentRunner(new ProcessExecutor(), command.toString(), AgentRunner.defaultArguments(), dir, timeout,
+                    new AgentPolicy(0, 1, timeout, Duration.ZERO));
+            try (var task = runner.task(null, null, 2, "request", null, false)) {
+                require(runner.invoke("request", dir.resolve("R5")).equals("<findings/>"), "existing validators receive the terminal text only");
+            }
+            String execution = Files.readString(dir.resolve("R5-execution.log"));
+            require(execution.contains("claudeApiDurationMillis=75\n") && execution.contains("claudeTtftStreamMillis=14\n")
+                    && execution.matches("(?s).*firstThinkingDeltaMillis=[0-9]+\\n.*firstTextDeltaMillis=[0-9]+\\n.*")
+                    && Files.readString(dir.resolve("R5-stdout.log")).equals("<findings/>")
+                    && runner.timings().markdown(dir, OutputLanguage.EN).contains("## Claude stream timing"),
+                    "timing uses live thinking and text events without retaining thinking contents");
+            for (var expected : java.util.Map.of("partial", AgentCallException.Kind.STRUCTURED_OUTPUT,
+                    "rate", AgentCallException.Kind.RATE_LIMIT).entrySet()) {
+                try (var task = runner.task(null, null, 2, expected.getKey(), null, false)) {
+                    runner.invoke(expected.getKey(), dir.resolve(expected.getKey()));
+                    throw new AssertionError("Incomplete or failed stream was accepted");
+                } catch (AgentCallException failure) {
+                    require(failure.kind() == expected.getValue(), "incomplete and failed streams retain their failure classification");
+                }
+            }
+            try (var task = runner.task(null, "{}", 2, "schema", null, false)) {
+                require(runner.invoke("schema").contains("\"structured_output\""), "schema tasks retain their structured stdout contract");
+            }
+        } finally {
+            try (var paths = Files.walk(dir)) {
+                for (Path path : paths.sorted(java.util.Comparator.reverseOrder()).toList()) Files.delete(path);
+            }
+        }
     }
 
     private static void policies() {

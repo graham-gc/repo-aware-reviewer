@@ -1,5 +1,6 @@
 package reviewagent;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -9,7 +10,7 @@ import java.util.LinkedHashMap;
 
 /** Shared request counts and byte budget across discovery, verification and adjudication. */
 final class EvidenceSession {
-    record Delivery(Set<String> sources, List<String> missing, List<String> recoveries) { }
+    record Delivery(Set<String> sources, Set<String> requestedSources, List<String> missing, List<String> recoveries) { }
     private final EvidenceBundle evidence;
     private final SupplementalEvidence collector;
     private final int fileLimit;
@@ -17,6 +18,7 @@ final class EvidenceSession {
     private final Set<String> seen = new LinkedHashSet<>();
     private final Map<String, Set<String>> fulfilled = new LinkedHashMap<>();
     private final Map<String, String> failures = new LinkedHashMap<>();
+    private final Set<String> missingDirectories = new LinkedHashSet<>();
     private final Map<String, String> recoveredPaths = new LinkedHashMap<>();
     private final Map<String, String> initialRequests = new LinkedHashMap<>();
     private final StringBuilder markdown = new StringBuilder();
@@ -35,6 +37,12 @@ final class EvidenceSession {
 
     boolean requestOnly(String response) { return collector.requestOnly(evidence, response); }
 
+    void recordEarlyDiscovery(Set<String> sources) {
+        coverage.append("\n- S1 started on collected evidence while an initial reviewer was still completing its checks.\n");
+        coverage.append("  - Supplemental sources: ").append(catalog().select(sources).sources().stream()
+                .map(EvidenceSource::id).collect(java.util.stream.Collectors.joining(", "))).append(".\n");
+    }
+
     void recordInitialRequests(String candidate, String requests) { initialRequests.put(candidate, requests); }
     String initialRequests(String candidate) { return initialRequests.getOrDefault(candidate, ""); }
 
@@ -44,6 +52,24 @@ final class EvidenceSession {
 
     void loadDiscovery(String replies, String phase) throws InterruptedException {
         load(replies, phase, replies);
+    }
+
+    void loadDiscovery(String replies, String phase, String pending) throws InterruptedException {
+        String group = pending + "\n" + replies;
+        load(replies, phase, group);
+        if (pending.isBlank()) return;
+        var related = EvidenceRequest.parse(group);
+        var available = bundle(catalog(), 0);
+        for (var request : EvidenceRequest.parse(pending)) {
+            String failure = failures.getOrDefault(request.key(), "");
+            if (fulfilled.containsKey(request.key()) || !failure.startsWith("No regular tracked file")) continue;
+            var recovered = collector.recoverCollected(available, request, related);
+            if (recovered == null) continue;
+            fulfilled.put(request.key(), recovered.sources());
+            failures.remove(request.key());
+            recoveredPaths.put(request.key(), recovered.description());
+            coverage.append("- Earlier request fulfilled by later pinned evidence: ").append(recovered.description()).append(".\n");
+        }
     }
 
     private boolean load(String replies, String phase, String requestGroup) throws InterruptedException {
@@ -105,6 +131,7 @@ final class EvidenceSession {
         catalog = catalog.plus(result.catalog());
         result.resolvedSources().forEach((key, ids) -> { if (!ids.isEmpty()) fulfilled.put(key, ids); });
         failures.putAll(result.failures());
+        missingDirectories.addAll(result.missingDirectories());
         recoveredPaths.putAll(result.recoveredPaths());
         coverage.append(result.coverage());
         return result.hasMaterial();
@@ -121,6 +148,64 @@ final class EvidenceSession {
 
     List<String> outstandingDiscovery(String requests, EvidenceCatalog supplied) {
         return delivery(requests, supplied, true, true).missing();
+    }
+
+    List<String> outstandingDiscovery(List<String> batches, EvidenceCatalog supplied, ReviewOutput.Discovery review) {
+        if (missingDirectories.isEmpty() || review.findings().isEmpty())
+            return outstandingDiscovery(String.join("\n", batches), supplied);
+        var stillRequested = EvidenceRequest.parse(review.notes()).stream().map(EvidenceRequest::key)
+                .collect(java.util.stream.Collectors.toSet());
+        var unresolved = new StringBuilder();
+        for (String batch : batches) {
+            var requests = EvidenceRequest.parse(batch);
+            for (var request : requests) {
+                String key = request.key();
+                var replacement = missingDirectories.contains(key) && !stillRequested.contains(key)
+                        ? citedNavigationReplacement(request, requests, supplied, review.findings()) : null;
+                if (replacement == null) unresolved.append(request.text()).append('\n');
+                else coverage.append("- Unavailable directory index superseded in this review: ").append(key)
+                        .append(". The reviewer cited pinned source for the same premise: ")
+                        .append(supplied.reference(replacement)).append(" (").append(replacement.path()).append(").\n");
+            }
+        }
+        return outstandingDiscovery(unresolved.toString(), supplied);
+    }
+
+    private EvidenceSource citedNavigationReplacement(EvidenceRequest index, List<EvidenceRequest> batch,
+                                                       EvidenceCatalog supplied, List<ReviewFinding> findings) {
+        int finding = index.findingTag(), premise = index.discoveryPremise();
+        if (finding == 0 || premise == 0) return null;
+        String[] directory = index.key().split("\\|", 4);
+        String revision = directory[1].equals("base") ? evidence.scope().baseCommit() : evidence.scope().targetCommit();
+        String missing = directory[2].endsWith("/") ? directory[2] : directory[2] + "/";
+        for (var alternative : batch) {
+            String[] search = alternative.key().split("\\|", 4);
+            if (search.length != 4 || !search[0].equals("REQUEST_FILE") || !search[1].equals(directory[1])
+                    || !search[3].startsWith("references:") || alternative.findingTag() != finding
+                    || alternative.discoveryPremise() != premise) continue;
+            String scope = search[2].endsWith("/") ? search[2] : search[2] + "/";
+            if (scope.equals("./") || !missing.startsWith(scope)) continue;
+            for (var source : supplied.select(fulfilled.getOrDefault(alternative.key(), Set.of())).sources()) {
+                // An exact-scope reference request can already have been recovered to its pinned parent.
+                if (source.authoritative() && source.revision().equals(revision) && source.role(EvidenceSource.Role.IMPLEMENTATION)
+                        && (missing.equals(scope) || source.path().startsWith(scope))
+                        && findings.stream().anyMatch(candidate -> cites(candidate.evidence(), source, supplied))) return source;
+            }
+        }
+        return null;
+    }
+
+    private static boolean cites(String evidence, EvidenceSource source, EvidenceCatalog supplied) {
+        if (VerificationEvidence.mentioned(evidence, source.id())
+                || VerificationEvidence.mentioned(evidence, supplied.reference(source))) return true;
+        var coordinates = java.util.regex.Pattern.compile("(?<![\\p{L}\\p{N}_/.-])"
+                + java.util.regex.Pattern.quote(source.path()) + ":([1-9][0-9]{0,6})(?![0-9])").matcher(evidence);
+        long end = source.firstLine() + source.text().lines().count();
+        while (coordinates.find()) {
+            int line = Integer.parseInt(coordinates.group(1));
+            if (line >= source.firstLine() && line < end) return true;
+        }
+        return false;
     }
     record VerificationBrief(String question, Map<Integer, String> premises, Map<Integer, List<VerificationRead>> reads) {
         static final VerificationBrief EMPTY = new VerificationBrief("", Map.of(), Map.of());
@@ -197,6 +282,70 @@ final class EvidenceSession {
         return byCandidate;
     }
 
+    void prepareLookupEvidence(List<ReviewFinding> findings, Map<String, List<EvidenceRequest>> requests)
+            throws InterruptedException {
+        StringBuilder reads = new StringBuilder();
+        for (var finding : findings) {
+            var path = finding.path();
+            if (path.contains("|") || path.lines().count() != 1) continue;
+            var owner = new LinkedHashSet<Integer>();
+            var lookups = new LinkedHashMap<Integer, List<EvidenceQuery>>();
+            for (var request : requests.getOrDefault(finding.id(), List.of())) {
+                try {
+                    var query = EvidenceQuery.parse(request.text(), LanguageRegistry.defaults());
+                    int premise = request.discoveryPremise();
+                    if (premise == 0 || !query.side().equals("target")) continue;
+                    switch (query.operation()) {
+                        case READ_FILE -> { if (query.resource().equals(path)) owner.add(premise); }
+                        case FIND_REFERENCES -> {
+                            if (query.resource().equals(path) || RepositoryBrowser.pathsMatching(query.resource()).test(path))
+                                lookups.computeIfAbsent(premise, unused -> new ArrayList<>()).add(query);
+                        }
+                        default -> { }
+                    }
+                } catch (IOException invalid) {
+                    // Collection records malformed requests. They cannot justify an expanded read.
+                }
+            }
+            // A partial registration excerpt plus reference hits cannot establish absence. When the
+            // same premise requests both and the diff removes the referenced name, read both versions.
+            for (var source : evidence.catalog().sources()) {
+                if (!source.role(EvidenceSource.Role.DIFF) || !source.path().equals(path)) continue;
+                boolean removed = owner.stream().flatMap(id -> lookups.getOrDefault(id, List.of()).stream())
+                        .anyMatch(query -> source.text().lines().anyMatch(line -> line.startsWith("-")
+                                && !line.startsWith("---") && VerificationEvidence.mentioned(line, query.reference())));
+                if (!removed) continue;
+                String baseline = source.baselinePath().isEmpty() ? path : source.baselinePath();
+                if (baseline.contains("|") || baseline.lines().count() != 1) continue;
+                reads.append("REQUEST_FILE|base|").append(baseline).append("|all|Inspect the prior registration or lookup.\n")
+                        .append("REQUEST_FILE|target|").append(path).append("|all|Check the complete changed lookup for aliases.\n");
+                break;
+            }
+        }
+        if (!reads.isEmpty()) load(reads.toString(), "Pinned lookup evidence for independent verification");
+    }
+
+    void prepareAttributionEvidence(List<ReviewFinding> findings) throws InterruptedException {
+        var patches = new LinkedHashMap<String, EvidenceSource>();
+        for (var source : evidence.catalog().sources()) {
+            if (source.role(EvidenceSource.Role.DIFF) && source.role(EvidenceSource.Role.IMPLEMENTATION))
+                patches.putIfAbsent(source.path(), source);
+        }
+        var paths = new LinkedHashSet<String>();
+        for (var finding : findings) {
+            var diff = patches.get(finding.path());
+            if (diff == null || EvidenceIndex.newFileDiff(diff)) continue;
+            String base = diff.baselinePath();
+            if (!base.isEmpty() && !base.contains("|") && RepositoryPathPolicy.allowed(base)) paths.add(base);
+        }
+        if (!paths.isEmpty()) {
+            String requests = paths.stream().map(path ->
+                    "REQUEST_FILE|base|" + path + "|all|Establish the prior implementation for change attribution")
+                    .collect(java.util.stream.Collectors.joining("\n"));
+            load(requests, "Pinned base implementations for first verification");
+        }
+    }
+
     Set<String> deliverScoped(String requester, String requests, EvidenceCatalog supplied) {
         return deliverFollowup(requester, requests, supplied, false);
     }
@@ -232,13 +381,18 @@ final class EvidenceSession {
 
     private Delivery delivery(String requests, EvidenceCatalog supplied, boolean includeNavigation, boolean suppliedOnly) {
         var result = new LinkedHashSet<String>();
+        var requested = new LinkedHashSet<String>();
         var missing = new LinkedHashSet<String>();
         var recoveries = new LinkedHashSet<String>();
         var visible = supplied.sources().stream().map(EvidenceSource::id).collect(java.util.stream.Collectors.toSet());
         var available = catalog();
         var suppliedBundle = bundle(supplied, 0);
         for (EvidenceRequest request : EvidenceRequest.parse(requests)) {
-            if (!collector.reusable(suppliedBundle, request.text()).isEmpty()) continue;
+            var present = collector.reusable(suppliedBundle, request.text());
+            if (!present.isEmpty()) {
+                requested.addAll(present);
+                continue;
+            }
             boolean fulfilledRequest = false;
             for (String id : fulfilled.getOrDefault(request.key(), Set.of())) {
                 var source = available.source(id);
@@ -246,6 +400,7 @@ final class EvidenceSession {
                 boolean alreadySupplied = visible.contains(id) || FileEvidenceCache.alreadySupplied(source, supplied);
                 if (!alreadySupplied && suppliedOnly) continue;
                 fulfilledRequest = true;
+                requested.add(id);
                 if (!alreadySupplied) result.add(id);
             }
             if (!fulfilledRequest) {
@@ -255,7 +410,7 @@ final class EvidenceSession {
                 recoveries.add(recoveredPaths.get(request.key()));
             }
         }
-        return new Delivery(java.util.Collections.unmodifiableSet(result), List.copyOf(missing), List.copyOf(recoveries));
+        return new Delivery(java.util.Collections.unmodifiableSet(result), Set.copyOf(requested), List.copyOf(missing), List.copyOf(recoveries));
     }
 
     void recordDelivery(String requester, Set<String> ids) {
@@ -276,6 +431,13 @@ final class EvidenceSession {
         for (var request : EvidenceRequest.parse(requests))
             coverage.append("  - Question and requested evidence: ").append(EvidenceText.oneLine(request.text())).append('\n');
         recordDelivery(requester, ids);
+    }
+
+    void recordRepackedDiscovery(String requester, List<String> omitted) {
+        coverage.append("- ").append(requester)
+                .append(": Repacked initial review within budget. All supplied diffs, rules, and requested sources were preserved.\n");
+        for (String title : omitted) coverage.append("  - Optional context available on request: ")
+                .append(EvidenceText.oneLine(title)).append(".\n");
     }
 
     private EvidenceBundle bundle(EvidenceCatalog sources, int budget) {

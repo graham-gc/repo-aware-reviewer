@@ -10,10 +10,11 @@ record EvidenceRequest(int line, String text) {
     private static final Pattern DISCOVERY_OWNER = Pattern.compile("\\[finding:([1-9][0-9]{0,8})\\]\\h+\\S");
     private static final Pattern DISCOVERY_PREMISE = Pattern.compile("\\[premise:([1-9][0-9]{0,8})\\]\\h+");
     static final String PATH_GUIDANCE = """
-            Use the literal base for the old revision or target for the new one. Use repository-relative paths
-            supported by the evidence for that revision. Replace fields in braces and sample paths with real
-            values. To locate an unknown file, use REQUEST_FILE with the literal index and a known directory
-            or a glob. The root directory is the literal dot: `REQUEST_FILE|target|.|index|Locate the implementation`.
+            Use the literal base for the old revision or target for the new one. Copy the full path from the
+            repository root exactly as supplied for that revision, including every directory. Replace the
+            fields in braces with real values. If the full file path was not supplied, search for a known symbol
+            or request an index in a known directory. The root directory is the literal dot:
+            `REQUEST_FILE|target|.|index|Locate the implementation`.
             File indexes supply names only. Request the relevant source before drawing a conclusion.
             """;
     static final String SCOPED_GUIDANCE = """
@@ -61,7 +62,17 @@ record EvidenceRequest(int line, String text) {
         if (navigationOnly() || count == 5 && !text.startsWith("REQUEST_FILE|")) return 0;
         String[] fields = text.split("\\|", count);
         if (fields.length != count || count == 5 && fields[3].startsWith("references:") && discoveryPremise() == 0) return 0;
-        var owner = DISCOVERY_OWNER.matcher(fields[count - 1].stripLeading());
+        return findingTag(fields[count - 1]);
+    }
+
+    int findingTag() {
+        int count = fieldCount();
+        String[] fields = text.split("\\|", count);
+        return fields.length == count ? findingTag(fields[count - 1]) : 0;
+    }
+
+    private static int findingTag(String reason) {
+        var owner = DISCOVERY_OWNER.matcher(reason.stripLeading());
         return owner.lookingAt() ? Integer.parseInt(owner.group(1)) : 0;
     }
 

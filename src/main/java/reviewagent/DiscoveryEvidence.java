@@ -34,6 +34,13 @@ final class DiscoveryEvidence {
         INPUT_CONVERSION("R6", 2, """
                 Boundary inputs and data conversion. Check empty, repeated or extreme values and format round trips.
                 Trace the input contract, validation and conversion through to the consuming code and its observable result.
+                """),
+        CROSS_FILE_CORRECTNESS("R7", 0, """
+                Cross-file correctness and regressions. Trace normal control flow and state changes that depend on
+                another file, runtime wiring, implicit dispatch, a configuration, or a repository-wide convention.
+                Check interactions between old and new parts of the cumulative diff. Also check file-local
+                correctness for each changed path absent from the file-local reviewer list. Include the
+                functional change summary when the response asks for it.
                 """);
 
         static final int MODEL_SLOTS = 3;
@@ -50,6 +57,7 @@ final class DiscoveryEvidence {
 
         static List<Focus> active(CliOptions options) {
             return java.util.Arrays.stream(values())
+                    .filter(focus -> focus != CROSS_FILE_CORRECTNESS)
                     .filter(focus -> focus != REQUIREMENTS || options.requirement() != null || options.knowledge() != null)
                     .toList();
         }
@@ -57,11 +65,10 @@ final class DiscoveryEvidence {
         boolean keepSource(EvidenceSource source) {
             String path = "/" + source.path().toLowerCase(Locale.ROOT);
             return switch (this) {
-                case CORRECTNESS -> true;
+                case CORRECTNESS, CROSS_FILE_CORRECTNESS -> true;
                 case CONTRACT, REQUIREMENTS -> path.contains("/tests/") || path.contains("/test/") || path.contains("/docs/")
                         || path.endsWith(".md") || path.endsWith("_test.go");
-                case FAILURE_RECOVERY, SECURITY, INPUT_CONVERSION ->
-                        FocusedReview.hasRiskSignal(source.path()) || FocusedReview.hasRiskSignal(source.text());
+                case FAILURE_RECOVERY, SECURITY, INPUT_CONVERSION -> false;
             };
         }
     }
@@ -69,7 +76,7 @@ final class DiscoveryEvidence {
     private static final Pattern WHOLE_HUNK = Pattern.compile("^@@ -\\d+(?:,\\d+)? \\+1(?:,(\\d+))? @@.*$");
 
     static EvidenceBundle forFocus(EvidenceBundle evidence, Focus focus) {
-        if (focus == Focus.CORRECTNESS) return evidence;
+        if (focus == Focus.CORRECTNESS || focus == Focus.CROSS_FILE_CORRECTNESS) return evidence;
         var sources = evidence.catalog().sources();
         var diffs = new HashMap<String, EvidenceSource>();
         for (var source : sources) {

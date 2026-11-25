@@ -86,6 +86,7 @@ final class ReviewRequestTests {
             new ReviewRequestTests(Files.createDirectory(fixture.resolve("followup"))).followup();
             new ReviewRequestTests(Files.createDirectory(fixture.resolve("discovery"))).discovery();
             new ReviewRequestTests(Files.createDirectory(fixture.resolve("discovery-preflight"))).discoveryPreflight();
+            new ReviewRequestTests(Files.createDirectory(fixture.resolve("discovery-navigation"))).discoveryNavigation();
             new ReviewRequestTests(Files.createDirectory(fixture.resolve("discovery-handoff"))).discoveryHandoff();
             new ReviewRequestTests(Files.createDirectory(fixture.resolve("verification-ready"))).verificationReady();
             new ReviewRequestTests(Files.createDirectory(fixture.resolve("discovery-budget"))).discoveryBudget();
@@ -230,7 +231,10 @@ final class ReviewRequestTests {
         var conversion = Files.readString(run.resolve("discovery/R6-prompt.md"));
         check(correct.contains("### Plain.java at ") && !contract.contains("### Plain.java at ") && !boundary.contains("### Plain.java at ")
                 && contract.contains("+    int value() { return 3; }") && boundary.contains("+    int value() { return 3; }")
-                && contract.contains("### docs/design.md at ") && boundary.contains("### Guard.java at ")
+                && contract.contains("### docs/design.md at ") && !boundary.contains("### Guard.java at ")
+                && !security.contains("### Guard.java at ") && !conversion.contains("### Guard.java at ")
+                && List.of(boundary, security, conversion).stream().allMatch(
+                        prompt -> prompt.contains("+    boolean authorize(boolean approved) { return approved; }"))
                 && contract.contains("boundaryValue = 190923") && boundary.contains("boundaryValue = 190923"),
                 "focused discovery drops duplicate views but retains all changed lines and context outside the diff");
         check(!Files.exists(run.resolve("discovery/R4-prompt.md"))
@@ -285,6 +289,9 @@ final class ReviewRequestTests {
     private void discoveryPreflight() throws Exception {
         write("worker.py", "result = 0\n");
         write("policy/guard.txt", "# guard example\n".repeat(289) + "PINNED_PREFLIGHT_GUARD\nOUTSIDE_REQUESTED_RANGE\n");
+        write("policy/contract.txt", "PINNED_EARLY_CONTRACT\n");
+        write("policy/late.txt", "PINNED_LATE_CONTRACT\n");
+        write("policy/late-extra.txt", "PINNED_SECOND_LATE_CONTRACT\n");
         commit("base");
         write("worker.py", "result = 1\n");
         commit("change worker behavior");
@@ -304,13 +311,17 @@ final class ReviewRequestTests {
                       'REQUEST_FILE|target|sample/policy|index|Locate the alternative policy' \\
                       'REQUEST_FILE|target|policy/guard.txt|all'
                   fi
+                  if [ -f "$fixture/parallel" ]; then printf '%s\\n' 'CHANGE_SUMMARY|Incomplete summary' '```'; fi
                 }
                 case "$prompt" in
                   *'Failure handling and recovery.'*)
                     case "$prompt" in
                       *'PINNED_PREFLIGHT_GUARD'*)
                         touch "$fixture/restarted"
-                        if [ -f "$fixture/repeat" ]; then request
+                        if [ -f "$fixture/early" ]; then
+                          while [ ! -f "$fixture/supplement-started" ]; do sleep 0.02; done
+                          printf '%s\\n' '<findings/>' 'REQUEST_FILE|target|policy/late*.txt|glob|Inspect both contracts'
+                        elif [ -f "$fixture/repeat" ]; then request
                         elif [ -f "$fixture/missing" ]; then
                           printf '%s\n' '<findings><finding><title>Worker return value changes</title><severity>LOW</severity><path>worker.py</path><line>1</line><endLine>1</endLine><trigger>The worker is evaluated.</trigger><impact>The value is one.</impact><evidence>worker.py:1 sets the result.</evidence><diffRelation>The patch changes zero to one.</diffRelation></finding></findings>'
                         else printf '<findings/>'; fi ;;
@@ -320,8 +331,18 @@ final class ReviewRequestTests {
                     if [ -f "$fixture/parallel" ]; then
                       while [ ! -f "$fixture/restarted" ]; do sleep 0.02; done
                     fi
+                    printf '%s\\n' '<findings/>'
+                    if [ -f "$fixture/early" ]; then
+                      printf '%s\\n' 'REQUEST_FILE|target|policy/contract.txt|all|Inspect the shared contract'
+                    fi ;;
+                  *'Inspect the supplemental evidence'*)
+                    [ -f "$fixture/early" ] || exit 90
+                    case "$prompt" in
+                      *'PINNED_LATE_CONTRACT'*) ;;
+                      *'PINNED_EARLY_CONTRACT'*) touch "$fixture/supplement-started" ;;
+                      *) exit 92 ;;
+                    esac
                     printf '<findings/>' ;;
-                  *'Inspect the supplemental evidence'*) exit 90 ;;
                   'You are the discovery stage'*) printf '<findings/>' ;;
                   'You are the independent candidate verification'*)
                     printf '<verification><status>REJECTED</status><reason>The return value is intentional.</reason></verification>' ;;
@@ -342,6 +363,17 @@ final class ReviewRequestTests {
         pipeline.run(options(false, "--review-mode", "deep", "--agent-timeout-seconds", "6", "--resume", run.toString()));
         check(calls(run, 0), "preflight and resumed initial results both reuse checkpoints");
         Files.delete(root.resolve("parallel"));
+
+        Files.createFile(root.resolve("early"));
+        var overlapped = pipeline.run(options(false, "--review-mode", "deep", "--agent-timeout-seconds", "6"));
+        check(Main.reviewExitCode(overlapped) == 0 && calls(overlapped, 8)
+                && Files.exists(root.resolve("supplement-started"))
+                && Files.readString(overlapped.resolve("discovery/S1-prompt.md")).contains("PINNED_EARLY_CONTRACT")
+                && !Files.readString(overlapped.resolve("discovery/S1-prompt.md")).contains("PINNED_LATE_CONTRACT")
+                && Files.readString(overlapped.resolve("discovery/S2-prompt.md")).contains("PINNED_LATE_CONTRACT")
+                && Files.readString(overlapped.resolve("discovery/S2-prompt.md")).contains("PINNED_SECOND_LATE_CONTRACT"),
+                "independent supplemental discovery starts before the slow reviewer returns and later evidence includes complete matching files");
+        Files.delete(root.resolve("early"));
 
         Files.createFile(root.resolve("missing"));
         var blocked = review("--review-mode", "deep");
@@ -420,6 +452,54 @@ final class ReviewRequestTests {
                 && Files.readString(atBudget.resolve("review-status.md")).contains("discovery/R3 [INVALID_OUTPUT]")
                 && !Files.exists(atBudget.resolve("discovery/R3-restart-attempts")),
                 "the restart uses the original task call budget");
+    }
+
+    private void discoveryNavigation() throws Exception {
+        write("service/worker.py", "result = 0\n");
+        write("service/backend/routes.py", "def run_worker():\n    return PINNED_ROUTE_RESULT\n");
+        commit("base");
+        write("service/worker.py", "result = 1\n");
+        commit("change worker behavior");
+        write("service/backend/routes.py", "def run_worker():\n    return WORKTREE_ONLY_RESULT\n");
+        Files.writeString(model, """
+                fixture=$1
+                prompt=$(cat)
+                case "$prompt" in
+                  *'Failure handling and recovery.'*)
+                    case "$prompt" in
+                      *'Previous material check (question only)'*)
+                        case "$prompt" in *PINNED_ROUTE_RESULT*) ;; *) exit 90 ;; esac
+                        location='service/backend/routes.py:1'
+                        if [ -f "$fixture/wrong-line" ]; then location='service/backend/routes.py:100'; fi
+                        printf '<findings><finding><title>Worker return value changes</title><severity>LOW</severity><path>service/worker.py</path><line>1</line><endLine>1</endLine><trigger>The worker is evaluated.</trigger><impact>The value is one.</impact><evidence>The caller is at %s.</evidence><diffRelation>The patch changes zero to one.</diffRelation></finding></findings>' "$location" ;;
+                      *)
+                        premise=1
+                        if [ -f "$fixture/other-premise" ]; then premise=2; fi
+                        printf '%s\\n' '<findings/>' 'DISCOVERY_NEEDS_EVIDENCE|Which entry can invoke the worker?' \\
+                          'REQUEST_FILE|target|service/backend/api|index|[finding:1] [premise:1] Locate the caller' \\
+                          "REQUEST_FILE|target|service/backend/api|references:run_worker|[finding:1] [premise:$premise] Find the caller definition" ;;
+                    esac ;;
+                  'You are the discovery stage'*) printf '<findings/>' ;;
+                  'You are the independent candidate verification'*)
+                    printf '<verification><status>REJECTED</status><reason>The return value is intentional.</reason></verification>' ;;
+                  *) exit 91 ;;
+                esac
+                """);
+        var recovered = review("--review-mode", "deep");
+        var prompt = Files.readString(recovered.resolve("discovery/round-2/R3-prompt.md"));
+        check(Main.reviewExitCode(recovered) == 0 && calls(recovered, 7)
+                && prompt.contains("PINNED_ROUTE_RESULT") && !prompt.contains("WORKTREE_ONLY_RESULT")
+                && prompt.contains("service/backend/api -> service/backend")
+                && Files.readString(recovered.resolve("coverage.md")).contains("Unavailable directory index superseded in this review"),
+                "a missing directory falls back to a pinned parent search and a cited result closes the navigation gap");
+        for (String marker : List.of("wrong-line", "other-premise")) {
+            Files.createFile(root.resolve(marker));
+            var unresolved = review("--review-mode", "deep");
+            check(Main.reviewExitCode(unresolved) == 3 && calls(unresolved, 7)
+                    && Files.readString(unresolved.resolve("review-status.md")).contains("service/backend/api|index"),
+                    "a source from another premise or an unprovided line cannot close the failed navigation");
+            Files.delete(root.resolve(marker));
+        }
     }
 
     private void discoveryHandoff() throws Exception {

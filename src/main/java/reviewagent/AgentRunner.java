@@ -79,6 +79,9 @@ final class AgentRunner {
             if (schema != null) {
                 selected = new ArrayList<>(selected);
                 selected.addAll(List.of("--output-format", "json", "--json-schema", schema));
+            } else if (builtInClaude()) {
+                selected = new ArrayList<>(selected);
+                selected.addAll(ClaudeStreamResponse.ARGUMENTS);
             }
             var controller = admission == null ? adaptive : admission;
             var profile = controller == null ? null : workload(selected, stage, EvidenceText.bytes(prompt));
@@ -188,6 +191,11 @@ final class AgentRunner {
         return List.of("-p", "--tools", "", "--strict-mcp-config", "--mcp-config", "{\"mcpServers\":{}}");
     }
 
+    private boolean builtInClaude() {
+        return Path.of(command.getFirst()).getFileName().toString().equals("claude")
+                && command.subList(1, command.size()).equals(defaultArguments());
+    }
+
     String invoke(String prompt, Path logPrefix) throws IOException, InterruptedException {
         Budget budget = taskBudget.get();
         if (budget == null) budget = new Budget(command,
@@ -272,19 +280,32 @@ final class AgentRunner {
         if (attempt != null) AtomicFiles.write(Path.of(attempt + "-prompt.md"), prompt);
         Path stdout = attempt == null ? null : Path.of(attempt + "-stdout.log");
         Path stderr = attempt == null ? null : Path.of(attempt + "-stderr.log");
+        var stream = builtInClaude() && command.contains("--include-partial-messages") ? new ClaudeStreamResponse() : null;
+        if (stream != null && stdout != null) AtomicFiles.write(stdout, "");
         long started = System.nanoTime();
         Instant startedAt = Instant.now();
         Integer exit = null;
         String reason = "IO_FAILURE";
         int concurrent = active.incrementAndGet();
         try {
-            CommandResult result = executor.run(command, workingDirectory, prompt, allowed, stdout, stderr);
+            CommandResult result = stream == null
+                    ? executor.run(command, workingDirectory, prompt, allowed, stdout, stderr)
+                    : executor.run(command, workingDirectory, prompt, allowed, null, stderr, java.util.Map.of(), stream);
             exit = result.exitCode();
+            if (stream != null && stream.failed()) {
+                String errors = stream.errors();
+                if (stdout != null) AtomicFiles.write(stdout, errors);
+                throw commandFailure(new CommandResult(exit, result.stdoutBytes(), result.stderr() + "\n" + errors), false);
+            }
             if (exit != 0) throw commandFailure(result, command.contains("--json-schema"));
             String response;
             try { response = result.strictUtf8Stdout(); }
             catch (CharacterCodingException invalid) {
                 throw new AgentCallException(AgentCallException.Kind.INVALID_ENCODING, "Agent command returned invalid UTF-8 on stdout", invalid);
+            }
+            if (stream != null && !response.isBlank()) {
+                response = stream.response();
+                if (stdout != null) AtomicFiles.write(stdout, response);
             }
             if (response.indexOf('\uFFFD') >= 0) throw new AgentCallException(AgentCallException.Kind.INVALID_ENCODING,
                     "Agent response contains U+FFFD (Unicode replacement character)");
@@ -311,7 +332,8 @@ final class AgentRunner {
             try {
                 active.decrementAndGet();
                 var observed = executor.observations();
-                timings.call(prefix, attempt, started, System.nanoTime(), EvidenceText.bytes(prompt), reason, observed);
+                var streamTiming = stream == null ? null : stream.timing();
+                timings.call(prefix, attempt, started, System.nanoTime(), EvidenceText.bytes(prompt), reason, observed, streamTiming);
                 if (attempt != null) {
                     byte[] input = prompt.getBytes(StandardCharsets.UTF_8);
                     String record = "executable=" + EvidenceText.oneLine(command.getFirst())
@@ -332,6 +354,7 @@ final class AgentRunner {
                             + "\nattemptDirectory=" + attempt.getParent().getFileName() + "\n";
                     record += "maxCallsPerTask=" + policy.maxCalls() + "\ntaskTimeoutSeconds=" + policy.taskTimeout().toSeconds()
                             + "\ntransportRetriesPerTask=" + policy.retries() + "\nupstreamRetryPolicy=unknown (controlled by agent command)\n";
+                    if (streamTiming != null) record += streamTiming.properties();
                     AtomicFiles.write(Path.of(attempt + "-execution.log"), record);
                     // Compatibility views point to the latest attempt; all attempt directories remain immutable.
                     for (String suffix : List.of("-stdout.log", "-stderr.log", "-execution.log")) {
@@ -370,7 +393,7 @@ final class AgentRunner {
         }
         String text = result.stderr().toLowerCase(java.util.Locale.ROOT);
         AgentCallException.Kind kind;
-        if (text.matches("(?s).*(?:\\bhttp(?: status)?[ :]+(?:401|403)\\b|invalid[_ ]api[_ ]key|authentication failed|not authenticated).*"))
+        if (text.matches("(?s).*(?:\\b(?:http(?: status)?|api error)[ :]+(?:401|403)\\b|invalid[_ ]api[_ ]key|authentication failed|not authenticated).*"))
             kind = AgentCallException.Kind.CONFIGURATION;
         else if (text.matches("(?s).*(?:prompt is too long|maximum context length|context window exceeded|input too long).*"))
             kind = AgentCallException.Kind.INPUT_LIMIT;
@@ -380,7 +403,7 @@ final class AgentRunner {
             return new AgentCallException(AgentCallException.Kind.RATE_LIMIT,
                     "Agent command was rate limited (exit code " + result.exitCode() + "); see stderr log", null, delay);
         }
-        else if (text.matches("(?s).*(?:\\b(?:http(?: status)?|status(?: code)?)[ :=]+(?:429|502|503|504)\\b|econnreset|eai_again|connection reset by peer|temporarily unavailable).*"))
+        else if (text.matches("(?s).*(?:\\b(?:http(?: status)?|status(?: code)?|api error)[ :=]+(?:429|502|503|504)\\b|econnreset|eai_again|connection reset by peer|temporarily unavailable).*"))
             kind = AgentCallException.Kind.TRANSIENT;
         else kind = AgentCallException.Kind.COMMAND_EXIT;
         return new AgentCallException(kind, "Agent command failed with exit code " + result.exitCode() + " (" + kind + "); see stderr log");

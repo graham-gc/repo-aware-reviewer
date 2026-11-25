@@ -12,7 +12,7 @@ record CliOptions(Path repo, String commit, String branch, String base, String b
                   int reviewParallelism, Duration agentTimeout, String language, java.util.Map<String, Path> languageCaches,
                   AgentPolicy agentPolicy, VerificationEvidenceMode verificationEvidence, ReviewMode reviewMode,
                   boolean focusedJsonSchema, boolean adaptiveParallelism, boolean batchedVerification,
-                  Integer reviewParallelismLimit) {
+                  Integer reviewParallelismLimit, boolean incremental, Path previousRun) {
     enum ReviewMode {
         AUTO, DEEP, SCOPED_RULES;
 
@@ -65,6 +65,8 @@ record CliOptions(Path repo, String commit, String branch, String base, String b
         KnowledgeMode knowledgeMode = KnowledgeMode.FULL;
         Path outputDir = Path.of("review-output");
         Path resumeDirectory = null;
+        boolean incremental = false;
+        Path previousRun = null;
         String agentCommand = null;
         List<String> agentArgs = new ArrayList<>();
         List<String> discoveryModels = new ArrayList<>();
@@ -104,6 +106,11 @@ record CliOptions(Path repo, String commit, String branch, String base, String b
                 case "--knowledge-mode" -> knowledgeMode = KnowledgeMode.parse(value(args, ++i, "--knowledge-mode"));
                 case "--output-dir" -> outputDir = Path.of(value(args, ++i, "--output-dir"));
                 case "--resume" -> resumeDirectory = Path.of(value(args, ++i, "--resume"));
+                case "--incremental" -> incremental = true;
+                case "--previous-run" -> {
+                    previousRun = Path.of(value(args, ++i, "--previous-run"));
+                    incremental = true;
+                }
                 case "--agent-command" -> agentCommand = value(args, ++i, "--agent-command");
                 case "--agent-arg" -> agentArgs.add(value(args, ++i, "--agent-arg"));
                 case "--discovery-model" -> {
@@ -158,6 +165,10 @@ record CliOptions(Path repo, String commit, String branch, String base, String b
         if (base != null && branch == null) {
             throw new IllegalArgumentException("--base requires --branch; use --branch <target-ref> --base <base-ref> to compare revisions");
         }
+        if (incremental && (branch == null || prepareOnly || reviewMode == ReviewMode.SCOPED_RULES))
+            throw new IllegalArgumentException("Incremental review requires --branch and --base and the deep review workflow");
+        if (previousRun != null && resumeDirectory != null)
+            throw new IllegalArgumentException("Use --previous-run for a new review or --resume to continue the same run");
         if (baseRemote != null && branch == null) {
             throw new IllegalArgumentException("--base-remote requires --branch and --base");
         }
@@ -206,7 +217,8 @@ record CliOptions(Path repo, String commit, String branch, String base, String b
                 java.util.Collections.unmodifiableMap(languageCaches),
                 new AgentPolicy(agentRetries, agentMaxCalls, taskTimeout == null ? timeout.multipliedBy(2) : taskTimeout, Duration.ofSeconds(1)),
                 verificationEvidence, reviewMode, focusedJsonSchema, adaptiveParallelism, batchedVerification,
-                explicitParallelism && !adaptiveParallelism ? Integer.valueOf(reviewParallelism) : maximumParallelism);
+                explicitParallelism && !adaptiveParallelism ? Integer.valueOf(reviewParallelism) : maximumParallelism,
+                incremental, absolute(previousRun));
     }
 
     private static Path absolute(Path path) {

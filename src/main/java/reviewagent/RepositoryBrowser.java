@@ -9,6 +9,10 @@ import java.util.regex.Pattern;
 final class RepositoryBrowser {
     private final LanguageModule.Repository repository;
 
+    static final class MissingDirectoryException extends IOException {
+        MissingDirectoryException() { super("path: no tracked directory at the selected revision"); }
+    }
+
     RepositoryBrowser(LanguageModule.Repository repository) { this.repository = repository; }
 
     boolean directory(String revision, String path) throws IOException, InterruptedException {
@@ -24,7 +28,7 @@ final class RepositoryBrowser {
         var matches = pathsMatching(query);
         List<String> matching = repository.paths(revision).stream().filter(matches).sorted().toList();
         if (matching.isEmpty() && !query.equals(".") && !isGlob(query))
-            throw new IOException("path: no tracked directory at the selected revision");
+            throw new MissingDirectoryException();
         matching = matching.stream().filter(RepositoryPathPolicy::allowed).toList();
         StringBuilder body = new StringBuilder("Tracked repository files (metadata only; all languages).\n");
         int listed = 0;
@@ -41,6 +45,21 @@ final class RepositoryBrowser {
         String block = source.markdown();
         if (EvidenceText.bytes(block) > budget) throw new IOException("Repository navigation exceeds the evidence budget");
         return source;
+    }
+
+    String parentOfMissingScope(String revision, String scope) throws IOException, InterruptedException {
+        if (scope.equals(".") || isGlob(scope)) return "";
+        String prefix = directoryPrefix(scope);
+        String path = prefix.substring(0, prefix.length() - 1);
+        var tracked = repository.paths(revision);
+        if (tracked.stream().anyMatch(file -> file.equals(path) || file.startsWith(prefix))) return "";
+        for (int slash = path.lastIndexOf('/'); slash >= 0; slash = path.lastIndexOf('/', slash - 1)) {
+            String parent = path.substring(0, slash);
+            String parentPrefix = parent + "/";
+            if (tracked.stream().anyMatch(file -> file.startsWith(parentPrefix) && RepositoryPathPolicy.allowed(file)))
+                return parent;
+        }
+        return "";
     }
 
     static Predicate<String> pathsMatching(String query) throws IOException {
@@ -65,7 +84,7 @@ final class RepositoryBrowser {
         return path + "/";
     }
 
-    private static boolean isGlob(String query) {
+    static boolean isGlob(String query) {
         return query.contains("*") || query.contains("?");
     }
 

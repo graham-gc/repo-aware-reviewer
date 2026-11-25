@@ -168,7 +168,23 @@ java -jar build/code-review-agent.jar review \
 
 审查默认自动并发。初审按参与角色数，复核按待核实的问题数，发布裁决按归并后仍需裁决的问题组数。网关在模型元数据中提供 `max_concurrent_requests` 时，阶段上限取工作量和服务并发上限中的较小值。一个阶段使用多个模型时，采用其中已知上限的最小值。缺少并发上限字段时，以工作量为上限，遇到限流再调节。需要固定并发时，给 `--review-parallelism` 传入数字。也可用 `--review-parallelism auto --review-max-parallelism 4` 给自动模式设置额外上限。
 
-### 6. 先检查范围和证据，不调用模型
+### 6. 对同一个 MR 的新提交做增量审查
+
+第一次加 `--incremental` 保存可复用的文件局部检查。将 `MR_BASE_SHA` 设为固定的 MR 基线提交，并让 `HEAD` 指向各自要审查的版本。
+
+```bash
+java -jar build/code-review-agent.jar review --repo /path/to/project \
+  --base "$MR_BASE_SHA" --branch HEAD --language zh-CN --incremental
+
+java -jar build/code-review-agent.jar review --repo /path/to/project \
+  --base "$MR_BASE_SHA" --branch HEAD --language zh-CN --previous-run /path/to/previous-run
+```
+
+报告继续覆盖 MR 的累计 diff。证据、规则和已识别的依赖未变时，复用已经完成的文件局部正确性检查。跨文件检查继续使用当前 diff。配置变化、已知依赖变化或新增引用命中会使相关检查重跑。独立复核的完整输入一致且旧结论通过当前证据校验时，也可复用。
+
+首轮会建立逐文件检查记录。上一轮缺少该记录、基线变化或旧提交不可用时，重新执行检查。用 `coverage.md` 和 `timings.md` 查看复用情况，并保留完整的本地运行目录供下一轮使用。
+
+### 7. 先检查范围和证据，不调用模型
 
 ```bash
 java -jar build/code-review-agent.jar review \

@@ -23,6 +23,9 @@ record VerificationEvidence(EvidenceBundle bundle, EvidenceIndex index, int tota
         if (full) return full(original, available, allMarkdown);
         var selected = new LinkedHashSet<String>();
         var sources = available.sources();
+        var baselinePaths = sources.stream().filter(source -> source.role(EvidenceSource.Role.DIFF)
+                && source.path().equals(candidate.path())).map(EvidenceSource::baselinePath)
+                .collect(java.util.stream.Collectors.toSet());
         String allegation = String.join("\n", candidate.title(), candidate.trigger(), candidate.impact(), candidate.evidence(), candidate.diffRelation());
         StringBuilder context = new StringBuilder(allegation);
         StringBuilder nearby = new StringBuilder();
@@ -30,7 +33,8 @@ record VerificationEvidence(EvidenceBundle bundle, EvidenceIndex index, int tota
         for (EvidenceSource source : sources) {
             boolean ownFile = source.path().equals(candidate.path()) || source.title().equals(candidate.path())
                     || source.title().startsWith(candidate.path() + " at ")
-                    || source.role(EvidenceSource.Role.DIFF) && source.baselinePath().equals(candidate.path());
+                    || source.role(EvidenceSource.Role.DIFF) && source.baselinePath().equals(candidate.path())
+                    || source.role(EvidenceSource.Role.BASELINE) && baselinePaths.contains(source.path());
             if (ownFile) {
                 anchor = true;
                 selected.add(source.id());

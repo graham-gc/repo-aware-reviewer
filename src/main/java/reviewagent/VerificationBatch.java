@@ -73,6 +73,11 @@ record VerificationBatch(List<Member> members, String prompt) {
     String id() { return "batch-" + members.getFirst().candidate().id(); }
 
     static Plan plan(List<Member> members, Prompt render, int maximumBytes) {
+        return plan(members, render, maximumBytes, (first, other) -> true);
+    }
+
+    static Plan plan(List<Member> members, Prompt render, int maximumBytes,
+                     java.util.function.BiPredicate<ReviewFinding, ReviewFinding> comparable) {
         var batches = new ArrayList<VerificationBatch>();
         var assigned = new LinkedHashSet<String>();
         for (var first : members) {
@@ -82,7 +87,8 @@ record VerificationBatch(List<Member> members, String prompt) {
             long individualBytes = EvidenceText.bytes(first.task().prompt());
             for (var other : members) {
                 if (group.size() == MAX_MEMBERS) break;
-                if (other == first || assigned.contains(other.candidate().id()) || !sharesEvidence(first, other)) continue;
+                if (other == first || assigned.contains(other.candidate().id()) || !comparable.test(first.candidate(), other.candidate())
+                        || !sharesEvidence(first, other)) continue;
                 group.add(other);
                 String proposed = render.build(group.stream().map(Member::candidate).toList(), first.view());
                 int bytes = EvidenceText.bytes(proposed);

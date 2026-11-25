@@ -101,7 +101,7 @@ final class GitClient {
         return commit(ref);
     }
 
-    record TrackedFile(String path, String objectId, long size, boolean regular) {
+    record TrackedFile(String path, String objectId, long size, boolean regular, String mode) {
     }
 
     List<TrackedFile> trackedFiles(String commit) throws IOException, InterruptedException {
@@ -118,7 +118,7 @@ final class GitClient {
             }
             boolean regular = "blob".equals(fields[1]) && ("100644".equals(fields[0]) || "100755".equals(fields[0]));
             long size = "-".equals(fields[3]) ? 0 : Long.parseLong(fields[3]);
-            files.add(new TrackedFile(entry.substring(tab + 1), fields[2], size, regular));
+            files.add(new TrackedFile(entry.substring(tab + 1), fields[2], size, regular, fields[0]));
         }
         return List.copyOf(files);
     }
@@ -133,11 +133,22 @@ final class GitClient {
     }
 
     List<String> filesMatching(String revision, List<String> literals, String pathspec) throws IOException, InterruptedException {
+        return filesMatching(revision, literals, pathspec, false);
+    }
+
+    List<String> checkedReferences(String revision, List<String> literals) throws IOException, InterruptedException {
+        return filesMatching(revision, literals, ":(top,glob)**", true);
+    }
+
+    private List<String> filesMatching(String revision, List<String> literals, String pathspec, boolean checked)
+            throws IOException, InterruptedException {
         var command = new ArrayList<>(List.of("git", "grep", "-l", "-z", "-F", "--full-name", "--no-textconv",
                 "--no-recurse-submodules"));
         for (String literal : literals) command.addAll(List.of("-e", literal));
         command.addAll(List.of(revision, "--", pathspec));
         var result = execute(command);
+        if (checked && result.exitCode() != 0 && result.exitCode() != 1)
+            throw new IOException("Git could not inspect reverse references at " + revision);
         if (result.exitCode() != 0) return List.of();
         String prefix = revision + ":";
         return Arrays.stream(result.stdout().split("\0")).filter(path -> path.startsWith(prefix))

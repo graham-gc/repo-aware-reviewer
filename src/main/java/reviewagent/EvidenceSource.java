@@ -22,13 +22,17 @@ record EvidenceSource(String id, String title, String format, String text, Strin
 
     record LineRange(int first, int last) {
         private static final Pattern SELECTOR = Pattern.compile(
-                "([1-9][0-9]{0,6})(?:\\h*[:–—-]\\h*([1-9][0-9]{0,6}))?");
+                "([1-9][0-9]*)(?:\\h*[:–—-]\\h*([1-9][0-9]*))?");
 
         static LineRange parse(String text) {
             var selector = SELECTOR.matcher(text.strip());
             if (!selector.matches()) return null;
-            int first = Integer.parseInt(selector.group(1));
-            return new LineRange(first, selector.group(2) == null ? first : Integer.parseInt(selector.group(2)));
+            try {
+                int first = Integer.parseInt(selector.group(1));
+                return new LineRange(first, selector.group(2) == null ? first : Integer.parseInt(selector.group(2)));
+            } catch (NumberFormatException outsideSupportedRange) {
+                return null;
+            }
         }
 
         String selector() { return first + ":" + last; }
@@ -72,9 +76,9 @@ record EvidenceSource(String id, String title, String format, String text, Strin
         }
         int from = range.first(), to = range.last();
         List<String> lines = text.lines().toList();
-        if (to < from || to - from >= 200 || to > lines.size()) {
-            throw new IOException("Citation range must contain 1–200 lines entirely inside the included block ("
-                    + lines.size() + " lines); these are block-relative, not repository file line numbers");
+        if (to < from || to > lines.size()) {
+            throw new IOException("Citation range must be ordered and entirely inside the included block ("
+                    + lines.size() + " lines); use block-relative line numbers");
         }
         List<Location> locations = path.isEmpty() || revision.isEmpty() ? List.of()
                 : role(Role.DIFF) ? diffLocations(lines, from, to)

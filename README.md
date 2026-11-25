@@ -168,7 +168,23 @@ Use `--review-parallelism 1` to run model requests sequentially. Resume reuses t
 
 Review concurrency is automatic by default. Initial discovery uses the active role count, verification uses the number of problems awaiting verification, and publication adjudication uses the number of remaining reconciliation groups with work to do. If the configured gateway advertises `max_concurrent_requests` in model metadata, the CLI caps the stage at the smaller of the work count and the advertised limit. A stage spanning several models uses the lowest advertised limit. Without this field, the work count sets the ceiling and the controller adjusts to provider rate-limit feedback. Set a numeric `--review-parallelism` for fixed scheduling, or add `--review-parallelism auto --review-max-parallelism 4` for an explicit additional cap.
 
-### 6. Inspect scope and evidence without calling a model
+### 6. Review the next push to the same MR
+
+Start with `--incremental` to record eligible file-local checks. Set `MR_BASE_SHA` to the pinned MR base and point `HEAD` at each version.
+
+```bash
+java -jar build/code-review-agent.jar review --repo /path/to/project \
+  --base "$MR_BASE_SHA" --branch HEAD --incremental
+
+java -jar build/code-review-agent.jar review --repo /path/to/project \
+  --base "$MR_BASE_SHA" --branch HEAD --previous-run /path/to/previous-run
+```
+
+The report continues to cover the cumulative diff. Incremental review reuses completed file-local correctness checks when their evidence, rules and tracked dependencies are unchanged. Cross-file checks run against the current diff. A change to configuration, known dependencies or a reference match can refresh an earlier file check. Individual verification responses can be reused when the complete verification inputs still match and the response passes current evidence validation.
+
+The initial incremental run establishes the file-level record. A previous run without that record, a different pinned base or an unavailable old head starts fresh. Inspect `coverage.md` and `timings.md` for reuse. Keep the complete local run directory for the next push.
+
+### 7. Inspect scope and evidence without calling a model
 
 ```bash
 java -jar build/code-review-agent.jar review \

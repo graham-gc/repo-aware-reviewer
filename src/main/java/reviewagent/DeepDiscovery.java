@@ -30,7 +30,7 @@ record DeepDiscovery(List<EvidenceBundle> batches, EvidenceBundle evidence, List
             return new DeepDiscovery(List.of(original), original, List.of(), "");
         }
         if (!requiredSources.isEmpty() && EvidenceText.bytes(
-                prompts.supplementalDiscovery(original)) <= limit) {
+                prompts.supplementalDiscovery(original, requiredSources)) <= limit) {
             return new DeepDiscovery(List.of(original), original, List.of(), "");
         }
 
@@ -45,7 +45,7 @@ record DeepDiscovery(List<EvidenceBundle> batches, EvidenceBundle evidence, List
         // Reserve language guidance for any source we might pack before budgeting diff and context bytes.
         var budgetBasis = new EvidenceBundle(fixed.scope(), fixed.changedFiles(), fixed.markdown(), fixed.coverage(),
                 fixed.supplementBudget(), fixed.scopedKnowledge(), original.catalog());
-        int room = limit - promptBytes(budgetBasis, prompts, focuses);
+        int room = limit - promptBytes(budgetBasis, prompts, focuses, requiredSources);
         if (room <= 0) {
             return new DeepDiscovery(List.of(), original,
                     List.of("Required review material exceeds the per-request evidence budget."), "");
@@ -104,7 +104,7 @@ record DeepDiscovery(List<EvidenceBundle> batches, EvidenceBundle evidence, List
                 remaining -= bytes;
             }
             var batch = bundle(original, paths, heading, selected);
-            if (!fits(batch, prompts, focuses, limit)) {
+            if (promptBytes(batch, prompts, focuses, requiredSources) > limit) {
                 gaps.add("Evidence for " + String.join(", ", paths.stream().map(EvidenceText::oneLine).toList())
                         + " exceeds the request budget after rendering.");
                 continue;
@@ -140,14 +140,15 @@ record DeepDiscovery(List<EvidenceBundle> batches, EvidenceBundle evidence, List
     }
 
     private static boolean fits(EvidenceBundle evidence, PromptFactory prompts, List<DiscoveryEvidence.Focus> focuses, int limit) {
-        return promptBytes(evidence, prompts, focuses) <= limit;
+        return promptBytes(evidence, prompts, focuses, Set.of()) <= limit;
     }
 
-    private static int promptBytes(EvidenceBundle evidence, PromptFactory prompts, List<DiscoveryEvidence.Focus> focuses) {
+    private static int promptBytes(EvidenceBundle evidence, PromptFactory prompts, List<DiscoveryEvidence.Focus> focuses,
+                                   Set<String> requiredSources) {
         // Allow the longest active assignment to receive the full partition.
         int initial = focuses.stream().mapToInt(focus -> EvidenceText.bytes(
                 prompts.independentDiscovery(evidence, focus, focus == DiscoveryEvidence.Focus.CORRECTNESS)))
                 .max().orElseThrow();
-        return Math.max(initial, EvidenceText.bytes(prompts.supplementalDiscovery(evidence)));
+        return Math.max(initial, EvidenceText.bytes(prompts.supplementalDiscovery(evidence, requiredSources)));
     }
 }

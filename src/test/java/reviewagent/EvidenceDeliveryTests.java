@@ -43,6 +43,7 @@ final class EvidenceDeliveryTests {
             git(repo, "commit", "-qm", "base");
             Files.writeString(repo.resolve(successor), migration.formatted("job_schema_v4", "'job_schema_v3'"));
             Files.writeString(repo.resolve("service/api/route.py"), "PINNED_ROUTE = True\n");
+            Files.writeString(repo.resolve("service/api/dupe.py"), "HTTP = 3\n");
             git(repo, "add", "--all");
             git(repo, "commit", "-qm", "target");
             Files.writeString(repo.resolve("service/api/route.py"), "WORKTREE_ROUTE = False\n");
@@ -72,6 +73,38 @@ final class EvidenceDeliveryTests {
                     "a related reusable request binds the Alembic predecessor by declared identity");
             require(collector.collect(evidence, parent + "\n" + anchor, 0, 0).recoveredPaths().size() == 1,
                     "a successor collected later in the same batch can also establish identity");
+
+            var successorDiff = client.changes(scope).stream().filter(change -> change.path().equals(successor)).findFirst().orElseThrow();
+            var changed = EvidenceSource.diff(successor, null, successorDiff.patch(), scope, true);
+            var pinned = new EvidenceBundle(scope, List.of(successor), "", "", 50_000, null, new EvidenceCatalog(List.of(changed), true));
+            String namedIdentity = parent.replace("Check predecessor revision", "Check the new migration's `down_revision` (`job_schema_v3`).");
+            var inspected = new EvidenceSession(pinned, collector, 0, 0);
+            inspected.loadDiscovery(namedIdentity, "Migration before first continuation");
+            require(inspected.discoveryDelivery(namedIdentity, EvidenceCatalog.empty()).missing().isEmpty()
+                    && inspected.coverage().contains("matches revision job_schema_v3"),
+                    "an explicit revision ID is accepted only when the pinned changed successor independently declares it");
+            var delayed = new EvidenceSession(evidence, collector, 0, 0);
+            delayed.loadDiscovery(namedIdentity, "First read without the successor");
+            require(!delayed.discoveryDelivery(namedIdentity, EvidenceCatalog.empty()).missing().isEmpty(),
+                    "a similar filename is unresolved without a corroborating successor");
+            String corrected = parent.replace("003_add_jobs.py", "003_add_jobs_table.py");
+            delayed.loadDiscovery(anchor + "\n" + corrected, "Later collection", namedIdentity);
+            require(delayed.outstandingDiscovery(namedIdentity, delayed.catalog()).isEmpty()
+                    && delayed.coverage().contains("Earlier request fulfilled by later pinned evidence"),
+                    "a previously failed request closes when both identity and the actual source are available");
+
+            String updated = "service/api/dupe.py";
+            var update = client.changes(scope).stream().filter(change -> change.path().equals(updated)).findFirst().orElseThrow();
+            var edited = EvidenceSource.diff(updated, null, update.patch(), scope, true);
+            var document = new EvidenceBundle(scope, List.of(updated), edited.markdown(), "", 50_000, null, new EvidenceCatalog(List.of(edited), true));
+            var beforeVerdict = new EvidenceSession(document, collector, 0, 0);
+            var candidate = new ReviewFinding("R1-1", "Changed HTTP mode", ReviewFinding.Severity.MEDIUM,
+                    updated, 1, 1, "Server starts", "Mode changes", "Compare both versions", "The mode changed");
+            beforeVerdict.prepareAttributionEvidence(List.of(candidate));
+            var verification = VerificationEvidence.select(document, beforeVerdict.catalog(), beforeVerdict.markdown(), candidate, Set.of(), false);
+            require(verification.bundle().catalog().sources().stream().anyMatch(source -> source.role(EvidenceSource.Role.BASELINE)
+                    && !source.role(EvidenceSource.Role.DIFF) && source.path().equals(updated) && source.text().equals("HTTP = 1\n")),
+                    "the first verification can cite the immutable earlier implementation");
 
             String unsafe = route.replace("|target|", "|base|") + "\n"
                     + "REQUEST_FILE|target|service/dupe.py|all|Find the right implementation\n"

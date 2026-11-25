@@ -15,6 +15,7 @@ final class VerificationEvidenceTests {
     private static final String CODE = "class Payment { boolean accept() { return Counterparty.produceReceipt().ready(); } }";
     static void run() throws Exception {
         selectionAndGrounding();
+        numberedCitationBounds();
         anchoredSelection();
         aliasAmbiguity();
         timings();
@@ -28,6 +29,27 @@ final class VerificationEvidenceTests {
     private static ReviewFinding finding(String path) {
         return new ReviewFinding("R1-1", "Receipt acceptance", ReviewFinding.Severity.MEDIUM, path, 1, 1,
                 "An incomplete receipt", "Incorrect acceptance", "Read the producer and its guard", "Changed return behavior");
+    }
+
+    private static void numberedCitationBounds() throws Exception {
+        String text = "source statement longer than twelve characters\n".repeat(239) + "\nreturn mcp\n";
+        var implementation = source(PATH, text);
+        var index = new EvidenceIndex(new EvidenceCatalog(List.of(implementation), true));
+        var wide = index.bind(List.of(EvidenceIndex.Citation.lines("SRC-1", "4:234"))).getFirst();
+        var shortLine = index.bind(List.of(EvidenceIndex.Citation.lines("SRC-1", "241:241"))).getFirst();
+        require(wide.quote().lines().count() == 231 && wide.locations().getFirst().lastLine() == 234
+                && shortLine.quote().equals("return mcp") && shortLine.locations().getFirst().firstLine() == 241,
+                "numbered citations bind to the actual block, including wide and short excerpts");
+        for (String invalid : List.of("240:240", "241:242", "234:4", "2147483648:2147483648"))
+            fails(() -> index.bind(List.of(EvidenceIndex.Citation.lines("SRC-1", invalid))));
+        fails(() -> index.bind(List.of(new EvidenceIndex.Citation("SRC-1", "return mcp"))));
+
+        var patch = EvidenceSource.diff(PATH, PATH, "@@ -1,2 +1,2 @@\n return mcp\n-x = 0\n+x = 1\n", SCOPE, true);
+        var diffIndex = new EvidenceIndex(new EvidenceCatalog(List.of(patch), true));
+        var context = diffIndex.bind(List.of(EvidenceIndex.Citation.lines("SRC-1", "2:2")));
+        var target = diffIndex.bind(List.of(EvidenceIndex.Citation.lines("SRC-1", "4:4")));
+        require(!diffIndex.hasTarget(context) && diffIndex.hasTarget(target) && !diffIndex.hasBaseline(target),
+                "even a short numbered diff citation keeps its exact changed side");
     }
     private static void selectionAndGrounding() throws Exception {
         var entries = new ArrayList<EvidenceSource>();
@@ -140,9 +162,9 @@ final class VerificationEvidenceTests {
         long second = 1_000_000_000L;
         metrics.stage(root.resolve("verification"), 0, 2 * second);
         metrics.call(root.resolve("verification/R1-1"), null, 0, second, 1000, "SUCCEEDED",
-                new ProcessExecutor.Observations(1L, 2L, 950L, null, 975L));
+                new ProcessExecutor.Observations(1L, 2L, 950L, null, 975L), null);
         metrics.call(root.resolve("verification/R2-1-repair"), null, 0, second, 2000, "TIMEOUT",
-                new ProcessExecutor.Observations(1L, 2L, null, null, null));
+                new ProcessExecutor.Observations(1L, 2L, null, null, null), null);
         metrics.task(true, true);
         metrics.unchanged();
         String report = metrics.markdown(root, OutputLanguage.EN);

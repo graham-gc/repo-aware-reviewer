@@ -10,6 +10,8 @@ import java.util.regex.Pattern;
 final class EvidencePathRecovery {
     private static final Pattern PREDECESSOR = Pattern.compile(
             "(?i)\\b(?:predecessor|down_revision|(?:previous|parent) (?:migration|revision))\\b");
+    private static final Pattern EXPECTED_PREDECESSOR = Pattern.compile(
+            "(?i)\\bdown_revision\\b[\\s`'\"=:()\\[\\]-]*([A-Za-z0-9_][A-Za-z0-9_-]*)");
     private static final Pattern MULTILINE_STRING = Pattern.compile("(?s)\"\"\".*?\"\"\"|'''.*?'''");
     private static final Pattern ALEMBIC_IMPORT = Pattern.compile("(?m)^(?:from alembic import|import alembic\\b)");
     private static final Pattern REVISION = assignment("revision");
@@ -72,6 +74,24 @@ final class EvidencePathRecovery {
                 && !source.role(EvidenceSource.Role.INDEX) && source.revision().equals(revision)).map(EvidenceSource::path)
                 .collect(java.util.stream.Collectors.toSet());
         anchors.retainAll(visible);
+        var reference = EXPECTED_PREDECESSOR.matcher(query.reason());
+        if (reference.find()) {
+            String identity = reference.group(1);
+            available.sources().stream().filter(source -> source.authoritative()
+                    && source.role(EvidenceSource.Role.DIFF) && source.revision().equals(revision))
+                    .map(EvidenceSource::path).filter(path -> !path.equals(query.resource()) && parent(path).equals(directory)
+                            && path.endsWith(".py") && eligible.test(path)).forEach(anchors::add);
+            var corroborated = new LinkedHashSet<String>();
+            for (String path : anchors) {
+                try {
+                    String code = declarations(repository.read(revision, path, sourceLimit));
+                    if (identity.equals(literal(DOWN_REVISION, code))) corroborated.add(path);
+                } catch (GitClient.MissingTrackedFileException removed) {
+                    // A deleted migration cannot corroborate a predecessor in this revision.
+                }
+            }
+            anchors.retainAll(corroborated);
+        }
         if (anchors.size() != 1) return null;
         String anchor = anchors.iterator().next();
         String successor = declarations(repository.read(revision, anchor, sourceLimit));

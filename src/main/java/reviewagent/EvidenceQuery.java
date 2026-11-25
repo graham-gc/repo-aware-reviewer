@@ -18,10 +18,11 @@ record EvidenceQuery(String command, String side, String language, String contex
     private static final Pattern ANCHOR = Pattern.compile(REFERENCE_NAME + "\\(?");
     private static final Pattern CONSTRUCTION = Pattern.compile("new[ \\t]+(" + REFERENCE_NAME + ")[ \\t]*\\(?");
 
-    enum Operation { READ_FILE, FIND_FILES, FIND_REFERENCES, LANGUAGE_RESOURCE }
+    enum Operation { READ_FILE, READ_MATCHING_FILES, FIND_FILES, FIND_REFERENCES, LANGUAGE_RESOURCE }
     Operation operation() {
         if (!command.equals("REQUEST_FILE")) return Operation.LANGUAGE_RESOURCE;
         if (selector.equals("index")) return Operation.FIND_FILES;
+        if (selector.equals("glob")) return Operation.READ_MATCHING_FILES;
         return selector.startsWith(REFERENCES) ? Operation.FIND_REFERENCES : Operation.READ_FILE;
     }
 
@@ -55,6 +56,8 @@ record EvidenceQuery(String command, String side, String language, String contex
             return new EvidenceQuery(fields[0], fields[1], fields[2], fields[3], fields[4], fields[5], fields[6], "");
         }
         boolean file = fields[0].equals("REQUEST_FILE");
+        if (file && fields[3].equals("glob") && !RepositoryBrowser.isGlob(fields[2]))
+            throw new IOException("path: the glob selector requires a repository-relative pattern");
         String fallback = "";
         int alternative = file ? fields[3].indexOf(FALLBACK) : -1;
         if (alternative >= 0) {

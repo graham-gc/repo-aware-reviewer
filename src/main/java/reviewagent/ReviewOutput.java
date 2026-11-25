@@ -137,10 +137,21 @@ final class ReviewOutput {
             if (!findings.isEmpty() || !lines.getFirst().startsWith(marker) || lines.size() < 2)
                 throw new IOException("A discovery evidence preflight requires empty findings, a question and evidence requests");
             String question = lines.getFirst().substring(marker.length()).strip();
-            var requestLines = lines.subList(1, lines.size());
+            boolean trailingFence = lines.getLast().matches("`{3,}|~{3,}");
+            int requestEnd = lines.size() - (trailingFence ? 1 : 0);
+            String summary = Discovery.CHANGE_SUMMARY_PREFIX;
+            boolean trailingSummary = requestEnd > 1 && lines.get(requestEnd - 1).startsWith(summary)
+                    && !lines.get(requestEnd - 1).substring(summary.length()).isBlank();
+            var requestLines = lines.subList(1, requestEnd - (trailingSummary ? 1 : 0));
             String requests = String.join("\n", requestLines);
-            if (question.isEmpty() || !requestLines.equals(EvidenceRequest.parse(requests).stream().map(EvidenceRequest::text).toList()))
+            if (question.isEmpty() || requestLines.isEmpty()
+                    || !requestLines.equals(EvidenceRequest.parse(requests).stream().map(EvidenceRequest::text).toList()))
                 throw new IOException("Return only the discovery preflight question and one unbulleted line per evidence request");
+            if (trailingFence || trailingSummary) {
+                ReviewXml.strict(response, "findings");
+                if (trailingFence) ResponseDiagnostics.record("Ignored a redundant final Markdown fence after validated discovery preflight requests.");
+                if (trailingSummary) ResponseDiagnostics.record("Ignored a change summary submitted before discovery was complete.");
+            }
             evidenceNeeded = new Discovery.EvidenceNeeded(question, requests);
         }
         return new Discovery(List.copyOf(findings), notes, evidenceNeeded);
