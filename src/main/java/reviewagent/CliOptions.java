@@ -8,18 +8,20 @@ import java.util.List;
 record CliOptions(Path repo, String commit, String branch, String base, String baseRemote, Duration fetchTimeout,
                   Path requirement, Path knowledge, KnowledgeMode knowledgeMode, Path outputDir, Path resumeDirectory,
                   String agentCommand, List<String> agentArgs, List<String> discoveryModels,
-                  boolean prepareOnly, int maxEvidenceBytes, int maxSupplementalRequests, int maxKnowledgeQueries,
+                  boolean prepareOnly, int maxEvidenceBytes, Integer maxPromptBytes, int maxSupplementalRequests, int maxKnowledgeQueries,
                   int reviewParallelism, Duration agentTimeout, String language, java.util.Map<String, Path> languageCaches,
                   AgentPolicy agentPolicy, VerificationEvidenceMode verificationEvidence, ReviewMode reviewMode,
-                  boolean focusedJsonSchema) {
+                  boolean focusedJsonSchema, boolean adaptiveParallelism, boolean batchedVerification,
+                  Integer reviewParallelismLimit, boolean incremental, Path previousRun) {
     enum ReviewMode {
-        AUTO, DEEP;
+        AUTO, DEEP, SCOPED_RULES;
 
         static ReviewMode parse(String value) {
             return switch (value) {
                 case "auto" -> AUTO;
                 case "deep" -> DEEP;
-                default -> throw new IllegalArgumentException("--review-mode must be auto or deep");
+                case "scoped-rules" -> SCOPED_RULES;
+                default -> throw new IllegalArgumentException("--review-mode must be auto, deep or scoped-rules");
             };
         }
     }
@@ -63,16 +65,23 @@ record CliOptions(Path repo, String commit, String branch, String base, String b
         KnowledgeMode knowledgeMode = KnowledgeMode.FULL;
         Path outputDir = Path.of("review-output");
         Path resumeDirectory = null;
+        boolean incremental = false;
+        Path previousRun = null;
         String agentCommand = null;
         List<String> agentArgs = new ArrayList<>();
         List<String> discoveryModels = new ArrayList<>();
         boolean prepareOnly = false;
         int maxEvidenceBytes = 1_000_000;
+        Integer maxPromptBytes = null;
         int maxSupplementalRequests = 0;
         int maxKnowledgeQueries = 0;
-        int reviewParallelism = 3;
+        int reviewParallelism = Integer.MAX_VALUE;
+        boolean explicitParallelism = false;
+        boolean adaptiveParallelism = true;
+        Integer maximumParallelism = null;
         ReviewMode reviewMode = ReviewMode.AUTO;
         boolean focusedJsonSchema = false;
+        boolean batchedVerification = false;
         VerificationEvidenceMode verificationEvidence = VerificationEvidenceMode.SCOPED;
         Duration timeout = Duration.ofMinutes(15);
         Duration taskTimeout = null;
@@ -97,6 +106,11 @@ record CliOptions(Path repo, String commit, String branch, String base, String b
                 case "--knowledge-mode" -> knowledgeMode = KnowledgeMode.parse(value(args, ++i, "--knowledge-mode"));
                 case "--output-dir" -> outputDir = Path.of(value(args, ++i, "--output-dir"));
                 case "--resume" -> resumeDirectory = Path.of(value(args, ++i, "--resume"));
+                case "--incremental" -> incremental = true;
+                case "--previous-run" -> {
+                    previousRun = Path.of(value(args, ++i, "--previous-run"));
+                    incremental = true;
+                }
                 case "--agent-command" -> agentCommand = value(args, ++i, "--agent-command");
                 case "--agent-arg" -> agentArgs.add(value(args, ++i, "--agent-arg"));
                 case "--discovery-model" -> {
@@ -107,12 +121,20 @@ record CliOptions(Path repo, String commit, String branch, String base, String b
                 }
                 case "--prepare-only" -> prepareOnly = true;
                 case "--max-evidence-bytes" -> maxEvidenceBytes = Integer.parseInt(value(args, ++i, "--max-evidence-bytes"));
+                case "--max-prompt-bytes" -> maxPromptBytes = Integer.parseInt(value(args, ++i, "--max-prompt-bytes"));
                 case "--max-supplemental-requests" -> maxSupplementalRequests = Integer.parseInt(value(args, ++i, "--max-supplemental-requests"));
                 case "--max-knowledge-queries" -> maxKnowledgeQueries = Integer.parseInt(value(args, ++i, "--max-knowledge-queries"));
                 case "--verification-evidence" -> verificationEvidence = VerificationEvidenceMode.parse(value(args, ++i, "--verification-evidence"));
-                case "--review-parallelism" -> reviewParallelism = Integer.parseInt(value(args, ++i, "--review-parallelism"));
+                case "--review-parallelism" -> {
+                    explicitParallelism = true;
+                    String parallelism = value(args, ++i, "--review-parallelism");
+                    adaptiveParallelism = parallelism.equals("auto");
+                    if (!adaptiveParallelism) reviewParallelism = Integer.parseInt(parallelism);
+                }
+                case "--review-max-parallelism" -> maximumParallelism = Integer.parseInt(value(args, ++i, "--review-max-parallelism"));
                 case "--review-mode" -> reviewMode = ReviewMode.parse(value(args, ++i, "--review-mode"));
                 case "--focused-json-schema" -> focusedJsonSchema = true;
+                case "--batched-verification" -> batchedVerification = true;
                 case "--agent-timeout-seconds" -> timeout = Duration.ofSeconds(Long.parseLong(value(args, ++i, "--agent-timeout-seconds")));
                 case "--agent-retries" -> agentRetries = Integer.parseInt(value(args, ++i, "--agent-retries"));
                 case "--agent-max-calls-per-task" -> agentMaxCalls = Integer.parseInt(value(args, ++i, "--agent-max-calls-per-task"));
@@ -143,6 +165,10 @@ record CliOptions(Path repo, String commit, String branch, String base, String b
         if (base != null && branch == null) {
             throw new IllegalArgumentException("--base requires --branch; use --branch <target-ref> --base <base-ref> to compare revisions");
         }
+        if (incremental && (branch == null || prepareOnly || reviewMode == ReviewMode.SCOPED_RULES))
+            throw new IllegalArgumentException("Incremental review requires --branch and --base and the deep review workflow");
+        if (previousRun != null && resumeDirectory != null)
+            throw new IllegalArgumentException("Use --previous-run for a new review or --resume to continue the same run");
         if (baseRemote != null && branch == null) {
             throw new IllegalArgumentException("--base-remote requires --branch and --base");
         }
@@ -155,10 +181,10 @@ record CliOptions(Path repo, String commit, String branch, String base, String b
         if (fetchTimeout.isZero() || fetchTimeout.isNegative()) {
             throw new IllegalArgumentException("--fetch-timeout-seconds must be positive");
         }
-        int discoveryCount = DiscoveryEvidence.Focus.values().length;
+        int discoveryCount = DiscoveryEvidence.Focus.MODEL_SLOTS;
         if (!discoveryModels.isEmpty() && discoveryModels.size() != discoveryCount)
             throw new IllegalArgumentException("Specify --discovery-model once for each of the "
-                    + discoveryCount + " initial reviewers, in order");
+                    + discoveryCount + " model slots (R1, R2, R3), in order");
         if (focusedJsonSchema && agentArgs.stream().anyMatch(arg -> arg.equals("--output-format") || arg.equals("--json-schema")
                 || arg.startsWith("--output-format=") || arg.startsWith("--json-schema=")))
             throw new IllegalArgumentException("--focused-json-schema supplies --output-format and --json-schema to the agent command");
@@ -169,9 +195,15 @@ record CliOptions(Path repo, String commit, String branch, String base, String b
         if (maxEvidenceBytes < 10_000) {
             throw new IllegalArgumentException("--max-evidence-bytes must be at least 10000");
         }
+        if (maxPromptBytes != null && maxPromptBytes < 10_000)
+            throw new IllegalArgumentException("--max-prompt-bytes must be at least 10000");
         if (maxSupplementalRequests < 0 || maxKnowledgeQueries < 0) {
             throw new IllegalArgumentException("Request count limits must be non-negative (0 means unlimited)");
         }
+        if (maximumParallelism != null && (!explicitParallelism || !adaptiveParallelism || maximumParallelism < 1)) {
+            throw new IllegalArgumentException("--review-max-parallelism requires auto mode and a positive limit");
+        }
+        if (adaptiveParallelism) reviewParallelism = maximumParallelism == null ? Integer.MAX_VALUE : maximumParallelism;
         if (reviewParallelism < 1) {
             throw new IllegalArgumentException("--review-parallelism must be at least 1");
         }
@@ -180,11 +212,13 @@ record CliOptions(Path repo, String commit, String branch, String base, String b
         }
         return new CliOptions(repo.toAbsolutePath().normalize(), commit, branch, base, baseRemote, fetchTimeout,
                 absolute(requirement), absolute(knowledge), knowledgeMode, outputDir.toAbsolutePath().normalize(), absolute(resumeDirectory),
-                agentCommand, List.copyOf(agentArgs), List.copyOf(discoveryModels), prepareOnly, maxEvidenceBytes,
+                agentCommand, List.copyOf(agentArgs), List.copyOf(discoveryModels), prepareOnly, maxEvidenceBytes, maxPromptBytes,
                 maxSupplementalRequests, maxKnowledgeQueries, reviewParallelism, timeout, language,
                 java.util.Collections.unmodifiableMap(languageCaches),
                 new AgentPolicy(agentRetries, agentMaxCalls, taskTimeout == null ? timeout.multipliedBy(2) : taskTimeout, Duration.ofSeconds(1)),
-                verificationEvidence, reviewMode, focusedJsonSchema);
+                verificationEvidence, reviewMode, focusedJsonSchema, adaptiveParallelism, batchedVerification,
+                explicitParallelism && !adaptiveParallelism ? Integer.valueOf(reviewParallelism) : maximumParallelism,
+                incremental, absolute(previousRun));
     }
 
     private static Path absolute(Path path) {

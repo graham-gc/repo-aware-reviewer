@@ -9,8 +9,10 @@ import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 final class ReviewPipeline {
     private final ProcessExecutor executor;
@@ -54,6 +56,7 @@ final class ReviewPipeline {
         EvidenceBundle evidence = new EvidenceCollector(git).collect(
                 scope, requirement, knowledge, options.knowledgeMode(), options.maxEvidenceBytes());
         String scopeText = scopeMarkdown(options, scope, requirement, knowledge);
+        OutputLanguage reportLanguage = OutputLanguage.parse(options.language());
         Path runDirectory;
         boolean resume = options.resumeDirectory() != null;
         if (resume) {
@@ -65,57 +68,46 @@ final class ReviewPipeline {
                     ? createRunDirectory(options.outputDir(), scope.targetCommit()) : preparedDirectory;
         }
 
+        write(runDirectory.resolve("scope.md"), scopeText);
         if (!resume || options.prepareOnly()) {
-            write(runDirectory.resolve("scope.md"), scopeText);
             write(runDirectory.resolve("evidence.md"), evidence.markdown());
             write(runDirectory.resolve("evidence-index.md"), evidence.catalog().manifest());
             write(runDirectory.resolve("coverage.md"), evidence.coverage());
         }
 
         if (evidence.changedFiles().isEmpty()) {
-            OutputLanguage language = OutputLanguage.parse(options.language());
-            write(runDirectory.resolve("report.md"), ReviewReport.emptyDiffReport(scope, language, requirement != null));
-            write(runDirectory.resolve("review-status.md"), "Status: SKIPPED\n\n"
-                    + language.text("No changes to review; acceptance was not assessed.", "没有需要审查的变更，未进行需求验收。") + "\n");
+            write(runDirectory.resolve("report.md"), ReviewReport.emptyDiffReport(scope, reportLanguage, requirement != null));
+            write(runDirectory.resolve("review-status.md"), "Status: SKIPPED\n\nNo changes to review; acceptance was not assessed.\n");
             write(runDirectory.resolve("coverage.md"), evidence.coverage()
                     + "\nReview and requirement assessment skipped: the baseline and target have no file differences. No model was called by this execution.\n");
             if (requirement != null) {
-                write(runDirectory.resolve("requirement-assessment.md"), ReviewReport.emptyDiffAssessment(language, true) + "\n");
+                write(runDirectory.resolve("requirement-assessment.md"), ReviewReport.emptyDiffAssessment(OutputLanguage.EN, true) + "\n");
             }
             progress.finish(totalSteps, "No changes between baseline and target; wrote report.md without model calls");
             return runDirectory;
         }
 
-        PromptFactory prompts = new PromptFactory(
-                options.language(), options.maxSupplementalRequests(), options.maxKnowledgeQueries());
+        PromptFactory prompts = new PromptFactory(options.maxSupplementalRequests(), options.maxKnowledgeQueries());
+        var discoveryFocuses = DiscoveryEvidence.Focus.active(options);
         String discoveryPrompt = prompts.discovery(evidence);
         write(runDirectory.resolve("discover-prompt.md"), discoveryPrompt);
         boolean renderLocally = requirement == null && knowledge == null;
-        List<ReviewTasks.Task> discoveries = new ArrayList<>();
-        var focuses = DiscoveryEvidence.Focus.values();
-        for (int i = 0; i < focuses.length; i++) {
-            String reviewer = "R" + (i + 1);
-            String model = options.discoveryModels().isEmpty() ? null : options.discoveryModels().get(i);
-            var focus = focuses[i];
-            boolean requestSummary = renderLocally && i == 0;
-            var view = DiscoveryEvidence.forFocus(evidence, focus);
-            String prompt = prompts.independentDiscovery(view, focus.instructions, requestSummary);
-            Path savedPrompt = runDirectory.resolve("discovery").resolve(reviewer + "-prompt.md");
-            if (resume && Files.isRegularFile(savedPrompt)) {
-                // Preserve checkpoints with the former shared view or before the optional summary.
-                String saved = Files.readString(savedPrompt, StandardCharsets.UTF_8);
-                if (!saved.equals(prompt) && (view != evidence && saved.equals(prompts.independentDiscovery(evidence, focus.instructions,
-                        requestSummary)) || requestSummary && saved.equals(prompts.independentDiscovery(evidence, focus.instructions)))) prompt = saved;
-            }
-            discoveries.add(new ReviewTasks.Task(reviewer, prompt,
-                    reply -> ReviewOutput.discovery(reply, reviewer, evidence.changedFiles()), model));
-        }
         if (options.prepareOnly()) {
             progress.step(2, totalSteps, "Preparing verification prompt");
+            var selection = AdaptiveReview.select(options, git, evidence, true);
+            if (selection.route() == AdaptiveReview.Route.REPOSITORY_RULES
+                    && FocusedReview.prepareWithRepositoryRules(evidence, options, git, prompts, runDirectory)) {
+                progress.finish(totalSteps, "Evidence and repository-rule prompts ready");
+                return runDirectory;
+            }
             Path discoveryDirectory = Files.createDirectories(runDirectory.resolve("discovery"));
-            for (ReviewTasks.Task task : discoveries) {
+            var plan = DeepDiscovery.plan(evidence, options, git, prompts, java.util.Set.of());
+            for (var request : discoveryTasks(plan, options, prompts, discoveryFocuses, renderLocally, discoveryDirectory)) {
+                var task = request.task();
                 write(discoveryDirectory.resolve(task.id() + "-prompt.md"), task.prompt());
             }
+            write(runDirectory.resolve("coverage.md"), evidence.coverage() + plan.coverage()
+                    + (plan.gaps().isEmpty() ? "" : "\n" + String.join("\n", plan.gaps()) + "\n"));
             ReviewFinding example = new ReviewFinding("example", "[candidate title]", ReviewFinding.Severity.MEDIUM,
                     evidence.changedFiles().stream().findFirst().orElse("[changed file]"), 1, 1,
                     "[trigger]", "[impact]", "[source evidence]", "[diff relationship]");
@@ -135,7 +127,7 @@ final class ReviewPipeline {
             return runDirectory;
         }
 
-        OutputLanguage outputLanguage = OutputLanguage.parse(options.language());
+        OutputLanguage outputLanguage = OutputLanguage.EN;
         var executionIssues = new ArrayList<String>();
         List<ReviewFinding> published = List.of();
         List<ReviewOutput.Decision> verifiedSnapshot = List.of();
@@ -154,93 +146,214 @@ final class ReviewPipeline {
                 options.repo(), options.agentTimeout(), options.agentPolicy(), options.reviewParallelism());
         Throwable executionFailure = null;
         try {
-            var selection = resume && Files.isDirectory(runDirectory.resolve("discovery"))
+            progress.step(1, totalSteps, "Resolving model prompt limits");
+            var resolver = new ModelPromptBudget(clock);
+            var standard = resolver.resolve(agent.commandForModel(null), options.maxPromptBytes());
+            agent.promptBudget(standard);
+            StringBuilder limits = new StringBuilder(promptLimit("Default model", standard));
+            write(runDirectory.resolve("model-prompt-limits.md"), limits.toString());
+            var selection = options.incremental() ? AdaptiveReview.Selection.deep("Incremental file and cross-file checks")
+                    : resume && Files.isDirectory(runDirectory.resolve("discovery"))
                     ? AdaptiveReview.Selection.deep("Resuming the recorded deep workflow")
                     : AdaptiveReview.select(options, git, evidence, !resume || !Files.isDirectory(runDirectory.resolve("focused")));
             String routeReason = selection.reason();
+            if (selection.route() == AdaptiveReview.Route.REPOSITORY_RULES) {
+                routeReason = FocusedReview.runWithRepositoryRules(evidence, options, git, executor, prompts, agent,
+                        runDirectory, progress, totalSteps);
+                if (routeReason == null) return publishReport(runDirectory, reportLanguage, agent, progress, totalSteps, resume);
+            }
             if (selection.route() == AdaptiveReview.Route.FOCUSED) {
-                FocusedReview.run(evidence, options, git, executor, prompts, agent, runDirectory, progress, totalSteps);
-                return runDirectory;
+                routeReason = FocusedReview.run(evidence, options, git, executor, prompts, agent, runDirectory, progress, totalSteps);
+                if (routeReason == null) return publishReport(runDirectory, reportLanguage, agent, progress, totalSteps, resume);
             }
             if (selection.route() == AdaptiveReview.Route.DOCUMENTATION) {
                 routeReason = DocumentationReview.run(selection.evidence(), options, agent, runDirectory, progress, totalSteps);
-                if (routeReason == null) return runDirectory;
+                if (routeReason == null) return publishReport(runDirectory, reportLanguage, agent, progress, totalSteps, resume);
             }
             if (selection.route() == AdaptiveReview.Route.LOCAL) {
                 write(runDirectory.resolve("coverage.md"), evidence.coverage()
                         + "\n## Review route\n\n- adaptive — " + routeReason + ".\n");
                 routeReason = AdaptiveReview.run(selection.evidence(), options, git, executor, prompts, agent, runDirectory,
                         progress, totalSteps, routeReason);
-                if (routeReason == null) return runDirectory;
+                if (routeReason == null) return publishReport(runDirectory, reportLanguage, agent, progress, totalSteps, resume);
             }
-            String route = "\n## Review route\n\n- deep — " + routeReason + ".\n";
+            Path discoveryDirectory = runDirectory.resolve("discovery");
+            int discoveryLimit = standard.bytes();
+            if (!options.discoveryModels().isEmpty()) {
+                discoveryLimit = Integer.MAX_VALUE;
+                var byModel = new java.util.LinkedHashMap<String, ModelPromptBudget.Limit>();
+                for (var focus : discoveryFocuses) {
+                    String model = options.discoveryModels().get(focus.modelSlot);
+                    var limit = byModel.get(model);
+                    if (limit == null) {
+                        limit = resolver.resolve(agent.commandForModel(model), options.maxPromptBytes());
+                        byModel.put(model, limit);
+                        agent.promptBudget(model, limit);
+                    }
+                    limits.append(promptLimit(focus.id, limit));
+                    discoveryLimit = Math.min(discoveryLimit, limit.bytes());
+                }
+                write(runDirectory.resolve("model-prompt-limits.md"), limits.toString());
+            }
+            var plan = DeepDiscovery.plan(evidence, options, git, prompts, java.util.Set.of(), discoveryLimit);
+            var deepEvidence = plan.evidence();
+            var incremental = options.incremental() ? new IncrementalReview(options, scope, runDirectory) : null;
+            var localPlan = incremental == null ? new IncrementalReview.Plan(List.of(), "")
+                    : incremental.plan(git, plan, prompts, options, Math.min(discoveryLimit, options.maxEvidenceBytes()));
+            var localPaths = localPlan.units().stream().map(IncrementalReview.Unit::path).toList();
+            var globalFocuses = localPaths.isEmpty() ? discoveryFocuses : discoveryFocuses.stream()
+                    .map(focus -> focus == DiscoveryEvidence.Focus.CORRECTNESS ? DiscoveryEvidence.Focus.CROSS_FILE_CORRECTNESS : focus).toList();
+            var discoveries = new ArrayList<>(discoveryTasks(plan, options, prompts, globalFocuses, renderLocally,
+                    discoveryDirectory, localPaths));
+            int limit = Math.min(discoveryLimit, options.maxEvidenceBytes());
+            if (!localPaths.isEmpty() && discoveries.stream().anyMatch(request -> EvidenceText.bytes(request.task().prompt()) > limit)) {
+                localPlan = incremental.fallback("The cross-file prompt and file assignment list exceed the active budget.");
+                localPaths = List.of();
+                globalFocuses = discoveryFocuses;
+                discoveries = new ArrayList<>(discoveryTasks(plan, options, prompts, globalFocuses, renderLocally, discoveryDirectory));
+            }
+            for (var unit : localPlan.units()) {
+                var focus = DiscoveryEvidence.Focus.CORRECTNESS;
+                String model = options.discoveryModels().isEmpty() ? null : options.discoveryModels().get(focus.modelSlot);
+                String prompt = prompts.independentDiscovery(unit.view(), focus, false);
+                var task = new ReviewTasks.Task(unit.id(), prompt, InitialDiscovery.validator(unit.id(), unit.view().changedFiles()), model)
+                        .withCache(incremental.entry(unit, "discovery/" + unit.id(), prompt, model, unit.view().catalog(), false));
+                discoveries.add(new InitialDiscovery.Request(task, unit.view(), unit.view().catalog(), focus, false));
+            }
+            int work = options.incremental() ? discoveries.size() : discoveryFocuses.size();
+            int discoveryParallelism = agent.phaseParallelism(options, work, discoveries.stream().map(request -> request.task().model())
+                    .distinct().toList());
+            String route = "\n## Review route\n\n- deep — " + routeReason + ".\n"
+                    + "- Initial discovery roles: " + globalFocuses.stream().map(focus -> focus.id + " " + focus.name())
+                            .collect(java.util.stream.Collectors.joining(", ")) + ".\n"
+                    + "- Initial discovery parallelism limit: " + discoveryParallelism + ".\n" + plan.coverage() + localPlan.coverage();
             write(runDirectory.resolve("coverage.md"), evidence.coverage() + route);
-            write(runDirectory.resolve("evidence-index.md"), evidence.catalog().manifest());
+            write(runDirectory.resolve("evidence-index.md"), deepEvidence.catalog().manifest());
+            executionIssues.addAll(plan.gaps());
+            if (discoveries.isEmpty()) throw new ReviewStageException("No deep discovery request fit the evidence budget");
             progress.step(2, totalSteps, "Independent reviewers (0 of " + discoveries.size() + " complete)");
-            var responses = ReviewTasks.runIsolated(discoveries, agent, runDirectory.resolve("discovery"), options.reviewParallelism(),
-                    progress, 2, totalSteps, "Independent reviewers", resume);
+            EvidenceSession supplemental = new EvidenceSession(deepEvidence, new SupplementalEvidence(git, executor, options.languageCaches()),
+                    options.maxSupplementalRequests(), options.maxKnowledgeQueries());
+            var early = plan.batches().size() == 1
+                    ? new InitialDiscovery.EarlySupplement(deepEvidence, options, git, standard.bytes()) : null;
+            var responses = InitialDiscovery.run(discoveries, supplemental, prompts, options, agent, discoveryDirectory,
+                    work, limit, progress, totalSteps, resume, early);
             var findings = new ArrayList<ReviewFinding>();
             StringBuilder discoveryNotes = new StringBuilder();
-            String changeSummary = "";
+            var changeSummaries = new java.util.LinkedHashSet<String>();
+            var notesByReviewer = new LinkedHashMap<String, String>();
+            var requestsByCandidate = new LinkedHashMap<String, List<EvidenceRequest>>();
+            var questionsByCandidate = new LinkedHashMap<String, String>();
+            var premisesByCandidate = new LinkedHashMap<String, Map<Integer, String>>();
             StringBuilder rawCandidates = new StringBuilder();
-            for (var response : responses.entrySet()) {
-                var outcome = response.getValue();
+            if (!localPlan.units().isEmpty()) route += IncrementalReview.fileCoverage(localPlan.units(), responses, discoveryDirectory);
+            for (var response : responses) {
+                String id = response.id();
+                var outcome = response.outcome();
+                if (!response.gap().isEmpty()) executionIssues.add(id + " — " + response.gap());
                 if (!outcome.valid()) {
-                    executionIssues.add("discovery/" + response.getKey() + " [" + outcome.failureKind() + "]; see discovery/"
-                            + response.getKey() + "-state.properties");
+                    Path path = runDirectory.relativize(response.directory()).resolve(id);
+                    executionIssues.add(path + " [" + outcome.failureKind() + "]; see " + path + "-state.properties");
+                    Path saved = response.directory().resolve(id + "-response.md");
+                    if (outcome.failureKind().equals("INVALID_OUTPUT") && Files.isRegularFile(saved)) {
+                        String reply = Files.readString(saved);
+                        if (supplemental.requestOnly(reply)) {
+                            notesByReviewer.put(id, reply);
+                            discoveryNotes.append("\n## Evidence requests from unfinished reviewer ")
+                                    .append(id).append("\n\n").append(reply);
+                        }
+                    }
                     continue;
                 }
-                ReviewOutput.Discovery parsed = ReviewOutput.discovery(outcome.response(), response.getKey(), evidence.changedFiles());
+                if (!response.usable()) continue;
+                ReviewOutput.Discovery parsed = response.discovery();
                 findings.addAll(parsed.findings());
-                if (renderLocally && response.getKey().equals("R1")) changeSummary = parsed.changeSummary();
-                discoveryNotes.append("\n## ").append(response.getKey()).append("\n\n").append(parsed.notes());
-                rawCandidates.append("\n## ").append(response.getKey()).append("\n\n").append(outcome.response()).append('\n');
+                requestsByCandidate.putAll(parsed.candidateRequests());
+                questionsByCandidate.putAll(parsed.candidateQuestions());
+                premisesByCandidate.putAll(parsed.candidatePremises());
+                if (renderLocally && (id.equals("R1") || id.startsWith("R1-P") || id.equals("R7") || id.startsWith("R7-P"))
+                        && !parsed.changeSummary().isBlank()) changeSummaries.add(parsed.changeSummary());
+                notesByReviewer.put(id, parsed.notes());
+                discoveryNotes.append("\n## ").append(id).append("\n\n").append(parsed.notes());
+                rawCandidates.append("\n## ").append(id).append("\n\n").append(outcome.response()).append('\n');
             }
-            if (responses.values().stream().noneMatch(ReviewTasks.Outcome::valid)) {
+            if (responses.stream().noneMatch(InitialDiscovery.Result::usable)) {
+                write(runDirectory.resolve("coverage.md"), evidence.coverage() + route + supplemental.coverage());
+                write(runDirectory.resolve("supplemental-evidence.md"), supplemental.markdown());
                 throw new ReviewStageException("All independent discovery reviewers failed; see discovery task artifacts");
             }
             String candidates = rawCandidates.toString();
 
             progress.step(3, totalSteps, "Loading requested evidence");
-            EvidenceSession supplemental = new EvidenceSession(evidence, new SupplementalEvidence(git, executor, options.languageCaches()),
-                    options.maxSupplementalRequests(), options.maxKnowledgeQueries());
+            var preflightSources = supplemental.catalog().sources().stream().map(EvidenceSource::id)
+                    .collect(java.util.stream.Collectors.toSet());
             boolean discoveryMaterial = supplemental.load(discoveryNotes.toString(), "Discovery evidence requests");
+            var requestedOutsidePartition = new java.util.LinkedHashSet<String>();
+            if (plan.batches().size() > 1 || !localPaths.isEmpty()) {
+                for (var response : responses)
+                    requestedOutsidePartition.addAll(supplemental.delivery(notesByReviewer.getOrDefault(response.id(), ""), response.evidence()));
+            }
             write(runDirectory.resolve("scope.md"), scopeText);
             write(runDirectory.resolve("candidates.md"), candidates);
             write(runDirectory.resolve("supplemental-evidence.md"), supplemental.markdown());
-            ReviewQuality quality = new ReviewQuality(options, evidence, supplemental, prompts, agent, runDirectory, progress, totalSteps);
+            ReviewQuality quality = new ReviewQuality(options, deepEvidence, supplemental, prompts, agent, runDirectory, progress, totalSteps);
+            if (incremental != null) quality.incremental(incremental);
             quality.saveEvidence();
 
             progress.step(4, totalSteps, "Reviewing supplemental evidence");
-            if (discoveryMaterial) {
-                EvidenceBundle augmented = new EvidenceBundle(evidence.scope(), evidence.changedFiles(),
-                        evidence.markdown() + supplemental.markdown(), evidence.coverage(), 0, evidence.scopedKnowledge(), supplemental.catalog());
-                String prompt = prompts.independentDiscovery(augmented, """
-                        Inspect the supplemental evidence and newly supplied business rules for concrete regressions.
-                        This pass runs after evidence collection. Use the material already supplied and record remaining
-                        evidence gaps in prose. Do not issue additional evidence requests in this pass.
-                        """);
-                var followup = ReviewTasks.runIsolated(List.of(new ReviewTasks.Task("S1", prompt,
-                        reply -> ReviewOutput.discovery(reply, "S1", evidence.changedFiles()))), agent,
-                        runDirectory.resolve("discovery"), options.reviewParallelism(), progress, 4, totalSteps,
-                        "Supplemental evidence reviewer", resume);
-                if (!followup.get("S1").valid()) {
-                    executionIssues.add("discovery/S1 [" + followup.get("S1").failureKind() + "]; see discovery/S1-state.properties");
-                } else {
-                    String response = followup.get("S1").response();
-                    ReviewOutput.Discovery parsed = ReviewOutput.discovery(response, "S1", evidence.changedFiles());
-                    findings.addAll(parsed.findings());
-                    discoveryNotes.append("\n## S1\n\n").append(parsed.notes());
-                    rawCandidates.append("\n## S1\n\n").append(response).append('\n');
-                    write(runDirectory.resolve("candidates.md"), rawCandidates.toString());
-                    supplemental.load(parsed.notes(), "Supplemental discovery evidence requests");
-                    quality.saveEvidence();
+            var followup = new LinkedHashMap<String, ReviewTasks.Outcome>();
+            if (early != null) {
+                if (early.outcome() != null) followup.put("S1", early.outcome());
+                if (!early.coverage().isEmpty()) route += "\nEarly supplemental requests:\n" + early.coverage();
+                requestedOutsidePartition.addAll(early.pendingSources());
+            }
+            if (discoveryMaterial || !requestedOutsidePartition.isEmpty()) {
+                EvidenceCatalog available = supplemental.catalog();
+                var fresh = available.sources().stream().map(EvidenceSource::id)
+                        .filter(id -> !preflightSources.contains(id)).collect(java.util.stream.Collectors.toSet());
+                fresh.addAll(requestedOutsidePartition);
+                var augmented = new EvidenceBundle(deepEvidence.scope(), deepEvidence.changedFiles(),
+                        deepEvidence.markdown() + supplemental.markdown(), deepEvidence.coverage(), 0, deepEvidence.scopedKnowledge(), available);
+                var followupPlan = DeepDiscovery.plan(augmented, options, git, prompts, fresh, standard.bytes());
+                var tasks = new ArrayList<ReviewTasks.Task>();
+                for (var batch : followupPlan.batches()) {
+                    String id = partitionId(followup.isEmpty() ? "S1" : "S2", tasks.size(), followupPlan.batches().size());
+                    tasks.add(new ReviewTasks.Task(id, prompts.supplementalDiscovery(batch, fresh),
+                            ReviewTasks.Validator.singleResponse(reply -> ReviewOutput.discovery(reply, id, batch.changedFiles()))));
                 }
+                executionIssues.addAll(followupPlan.gaps());
+                if (!followupPlan.coverage().isEmpty()) route += "\nSupplemental requests:\n" + followupPlan.coverage();
+                followup.putAll(ReviewTasks.runPhase(tasks, agent, discoveryDirectory, options, tasks.size(), 4, totalSteps,
+                        "SUPPLEMENTAL_DISCOVERY", "Supplemental evidence reviewer", progress, resume));
+            }
+            if (!followup.isEmpty()) {
+                for (var entry : followup.entrySet()) {
+                    String id = entry.getKey();
+                    var outcome = entry.getValue();
+                    if (!outcome.valid()) {
+                        executionIssues.add("discovery/" + id + " [" + outcome.failureKind() + "]; see discovery/" + id + "-state.properties");
+                        continue;
+                    }
+                    String response = outcome.response();
+                    ReviewOutput.Discovery parsed = ReviewOutput.discovery(response, id, evidence.changedFiles());
+                    findings.addAll(parsed.findings());
+                    requestsByCandidate.putAll(parsed.candidateRequests());
+                    questionsByCandidate.putAll(parsed.candidateQuestions());
+                    premisesByCandidate.putAll(parsed.candidatePremises());
+                    discoveryNotes.append("\n## ").append(id).append("\n\n").append(parsed.notes());
+                    rawCandidates.append("\n## ").append(id).append("\n\n").append(response).append('\n');
+                    supplemental.load(parsed.notes(), "Supplemental discovery evidence requests");
+                }
+                write(runDirectory.resolve("candidates.md"), rawCandidates.toString());
+                quality.saveEvidence();
             }
 
             progress.step(5, totalSteps, findings.isEmpty() ? "No candidate findings to verify"
                     : "Verifying candidate issues (0 of " + findings.size() + " complete)");
-            List<ReviewOutput.Decision> preliminary = quality.verify(findings);
+            supplemental.prepareLookupEvidence(findings, requestsByCandidate);
+            supplemental.prepareAttributionEvidence(findings);
+            List<ReviewOutput.Decision> preliminary = quality.verify(findings,
+                    supplemental.verificationBriefs(questionsByCandidate, premisesByCandidate, requestsByCandidate));
             verifiedSnapshot = preliminary;
             String verificationCoverage = ReviewQuality.coverage("Individual candidate verification", preliminary);
             verificationCoverage += "\nCandidates: " + findings.size() + ". Confirmed before deduplication: "
@@ -269,8 +382,11 @@ final class ReviewPipeline {
             List<ReviewConcerns.Item> concerns = ReviewConcerns.collect(preliminary, adjudicated, publication.groups());
             verificationCoverage += publication.groupingNote() + ReviewQuality.coverage("Publication adjudication", adjudicated);
             write(runDirectory.resolve("coverage.md"), evidence.coverage() + route + supplemental.coverage() + verificationCoverage);
-            OutputLanguage language = OutputLanguage.parse(options.language());
-            List<ReviewFinding> confirmed = adjudicated.stream()
+            OutputLanguage language = OutputLanguage.EN;
+            var reportDecisions = PublicationGate.enabledFor(options)
+                    ? PublicationGate.reportDecisions(adjudicated, publication.groups(), supplemental.index(), scope.targetCommit())
+                    : adjudicated;
+            List<ReviewFinding> confirmed = reportDecisions.stream()
                     .filter(d -> d.verdict().status() == ReviewOutput.Status.CONFIRMED)
                     .map(d -> ReviewQuality.publishedFinding(d, language)).toList();
             published = confirmed;
@@ -284,9 +400,9 @@ final class ReviewPipeline {
             progress.step(8, totalSteps, "Preparing the report");
             String report;
             if (renderLocally) {
-                report = ReviewReport.deepReport(evidence, changeSummary, confirmed, publication.groups(), concerns, language);
+                report = ReviewReport.deepReport(evidence, String.join(" ", changeSummaries), confirmed, publication.groups(), concerns, language);
             } else {
-                String reportPrompt = prompts.finalizeReport(evidence, confirmed, discoveryNotes.toString(),
+                String reportPrompt = prompts.finalizeReport(deepEvidence, confirmed, discoveryNotes.toString(),
                         supplemental.markdown(), verificationCoverage) + "\nAUDITED REQUIREMENT ASSESSMENT\n" + assessment
                         + "\nPROGRAMMATIC CANDIDATE COUNTS\nDiscovery: " + findings.size() + "; unmet requirements: "
                         + requirementDecisions.size() + "; total: " + preliminary.size()
@@ -302,9 +418,7 @@ final class ReviewPipeline {
             }
             write(runDirectory.resolve("report.md"), completion.notice() + report);
             write(runDirectory.resolve("review-status.md"), completion.markdown());
-            progress.finish(totalSteps, completion.complete() ? "Wrote report.md" : "Wrote incomplete report.md ("
-                    + completion.pendingChecks() + " checks remain unresolved)");
-            return runDirectory;
+            return publishReport(runDirectory, reportLanguage, agent, progress, totalSteps, resume);
         } catch (ReviewStageException incomplete) {
             executionIssues.add(incomplete.reportMessage(runDirectory));
             var completion = ReviewQuality.completion(verifiedSnapshot, adjudicatedSnapshot, planSnapshot, executionIssues, outputLanguage);
@@ -312,8 +426,7 @@ final class ReviewPipeline {
             write(runDirectory.resolve("report.md"), completion.notice()
                     + ReviewReport.incompleteReport(scope, outputLanguage, published, concerns, assessmentSnapshot, executionIssues));
             write(runDirectory.resolve("review-status.md"), completion.markdown());
-            progress.finish(totalSteps, "Wrote incomplete report.md (required stage did not complete; resume is available)");
-            return runDirectory;
+            return publishReport(runDirectory, reportLanguage, agent, progress, totalSteps, resume);
         } catch (IOException | InterruptedException fatal) {
             executionFailure = fatal;
             boolean interrupted = Thread.interrupted();
@@ -329,12 +442,79 @@ final class ReviewPipeline {
             throw fatal;
         } finally {
             boolean interrupted = Thread.interrupted();
-            try { agent.timings().write(runDirectory, outputLanguage); }
+            try {
+                agent.saveConcurrencyHistory();
+                agent.timings().write(runDirectory, outputLanguage);
+            }
             catch (IOException diagnostics) {
                 if (executionFailure != null) executionFailure.addSuppressed(diagnostics);
                 else throw diagnostics;
             } finally { if (interrupted) Thread.currentThread().interrupt(); }
         }
+    }
+
+    private static Path publishReport(Path directory, OutputLanguage language, AgentRunner agent, CommandProgress progress,
+                                      int stages, boolean resume) throws IOException, InterruptedException {
+        if (!ReportTranslation.publish(directory, language, agent, progress, stages, resume)) {
+            progress.finish(stages, "Report translation failed. English report retained in report.md");
+        } else {
+            progress.finish(stages, Main.reviewExitCode(directory) == 0 ? "Wrote report.md" : "Wrote incomplete report.md");
+        }
+        return directory;
+    }
+
+    private static List<InitialDiscovery.Request> discoveryTasks(DeepDiscovery plan, CliOptions options, PromptFactory prompts,
+                                                         List<DiscoveryEvidence.Focus> focuses, boolean summarize,
+                                                         Path directory) throws IOException {
+        return discoveryTasks(plan, options, prompts, focuses, summarize, directory, List.of());
+    }
+
+    private static List<InitialDiscovery.Request> discoveryTasks(DeepDiscovery plan, CliOptions options, PromptFactory prompts,
+                                                         List<DiscoveryEvidence.Focus> focuses, boolean summarize,
+                                                         Path directory, List<String> localPaths) throws IOException {
+        var tasks = new ArrayList<InitialDiscovery.Request>();
+        for (var focus : focuses) {
+            String model = options.discoveryModels().isEmpty() ? null : options.discoveryModels().get(focus.modelSlot);
+            boolean requestSummary = summarize && (focus == DiscoveryEvidence.Focus.CORRECTNESS
+                    || focus == DiscoveryEvidence.Focus.CROSS_FILE_CORRECTNESS);
+            for (int j = 0; j < plan.batches().size(); j++) {
+                var batch = plan.batches().get(j);
+                if (focus == DiscoveryEvidence.Focus.CROSS_FILE_CORRECTNESS) {
+                    String local = localPaths.stream().filter(batch.changedFiles()::contains).map(EvidenceText::oneLine)
+                            .map(path -> "- " + path).collect(java.util.stream.Collectors.joining("\n"));
+                    batch = new EvidenceBundle(batch.scope(), batch.changedFiles(),
+                            "FILE-LOCAL REVIEWER ASSIGNMENTS\n" + (local.isEmpty() ? "(none)" : local) + "\n\n" + batch.markdown(),
+                            batch.coverage(), batch.supplementBudget(), batch.scopedKnowledge(), batch.catalog());
+                }
+                String id = partitionId(focus.id, j, plan.batches().size());
+                var view = DiscoveryEvidence.forFocus(batch, focus);
+                String prompt = prompts.independentDiscovery(view, focus, requestSummary);
+                Path savedPrompt = directory.resolve(id + "-prompt.md");
+                if (options.resumeDirectory() != null && Files.isRegularFile(savedPrompt)) {
+                    // Preserve checkpoints with the former shared view or before the optional summary.
+                    String saved = Files.readString(savedPrompt, StandardCharsets.UTF_8);
+                    if (!saved.equals(prompt) && (view != batch && saved.equals(prompts.independentDiscovery(batch, focus,
+                            requestSummary)) || requestSummary && saved.equals(prompts.independentDiscovery(batch, focus, false)))) prompt = saved;
+                }
+                var task = new ReviewTasks.Task(id, prompt, InitialDiscovery.validator(id, batch.changedFiles()), model);
+                tasks.add(new InitialDiscovery.Request(task, view, batch.catalog(), focus, requestSummary));
+            }
+        }
+        return tasks;
+    }
+
+    private static String partitionId(String reviewer, int index, int count) {
+        return count == 1 ? reviewer : reviewer + "-P" + (index + 1);
+    }
+
+    private static String promptLimit(String role, ModelPromptBudget.Limit limit) {
+        var capabilities = limit.capabilities();
+        return "- " + role + ": " + limit.bytes() + " UTF-8 bytes (" + limit.source() + ")"
+                + (capabilities == null || !capabilities.hasPromptLimits() ? "" : ", " + capabilities.inputTokens() + " input tokens, "
+                + capabilities.outputTokens() + " output tokens reported by the service")
+                + (capabilities == null || capabilities.maxConcurrentRequests() == 0 ? ""
+                    : ", " + capabilities.maxConcurrentRequests() + " concurrent requests reported by the service")
+                + "\n";
     }
 
     private static void requireMatchingResumeFile(Path path, String expected, boolean required) throws IOException {
@@ -346,10 +526,10 @@ final class ReviewPipeline {
         }
         String previous = Files.readString(path, StandardCharsets.UTF_8);
         if (path.getFileName().toString().equals("scope.md")) {
-            previous = previous.replaceAll("(?m)^- Review parallelism:.*\\R?", "");
-            expected = expected.replaceAll("(?m)^- Review parallelism:.*\\R?", "");
-            previous = previous.replaceAll("(?m)^- Verification evidence:.*\\R?", "");
-            expected = expected.replaceAll("(?m)^- Verification evidence:.*\\R?", "");
+            previous = previous.replaceAll("(?m)^- (Review|Deep candidate verification) parallelism:.*\\R?", "");
+            expected = expected.replaceAll("(?m)^- (Review|Deep candidate verification) parallelism:.*\\R?", "");
+            previous = previous.replaceAll("(?m)^- (Verification evidence|Output language|Report language):.*\\R?", "");
+            expected = expected.replaceAll("(?m)^- (Verification evidence|Output language|Report language):.*\\R?", "");
         }
         if (!previous.equals(expected)) {
             throw new IOException("Cannot resume because " + path.getFileName()
@@ -390,26 +570,38 @@ final class ReviewPipeline {
                 - File and language request count limit: %s
                 - Knowledge query count limit: %s
                 - Review parallelism: %s
+                - Deep candidate verification parallelism: %s
                 - Verification evidence: %s
-                - Output language: %s
+                - Report language: %s
                 - Dynamic verification: not run
                 """.formatted(options.repo(), scope.mode(), scope.requestedBase(), scope.requestedTarget(),
                 scope.baseCommit(), scope.targetCommit(), scope.diffExpression(), describe(requirement), describe(knowledge),
                 options.knowledgeMode().name().toLowerCase(Locale.ROOT),
                 options.maxSupplementalRequests() == 0 ? "unlimited" : options.maxSupplementalRequests(),
                 options.maxKnowledgeQueries() == 0 ? "unlimited" : options.maxKnowledgeQueries(),
-                options.reviewParallelism(), options.verificationEvidence().name().toLowerCase(Locale.ROOT), options.language())
+                parallelismDescription(options), parallelismDescription(options),
+                options.verificationEvidence().name().toLowerCase(Locale.ROOT), options.language())
                 + (options.baseRemote() == null ? "" : "- Baseline remote: `" + options.baseRemote() + "`\n"
                     + "- Baseline remote branch: `" + RemoteBaseline.branchRef(options.base()) + "`\n")
                 + (options.discoveryModels().isEmpty() ? "" : "- Discovery models (R1, R2, R3): "
                     + String.join(", ", options.discoveryModels()) + "\n")
+                + (options.maxPromptBytes() == null ? "" : "- Configured prompt budget fallback: "
+                    + options.maxPromptBytes() + " UTF-8 bytes\n")
                 + (options.focusedJsonSchema() ? "- Focused risk response: JSON Schema\n" : "")
+                + (options.batchedVerification() ? "- Deep verification scheduling: batched\n" : "")
+                + (options.incremental() ? "- Incremental file review: enabled\n" : "")
                 + "- Language modules: " + LanguageRegistry.defaults().modules().stream().map(LanguageModule::id)
                         .collect(java.util.stream.Collectors.joining(", ")) + "\n"
                 + "- Language capabilities: " + LanguageRegistry.defaults().capabilitySummary() + "\n"
                 + "- Language cache overrides: " + options.languageCaches().entrySet().stream().sorted(java.util.Map.Entry.comparingByKey())
                         .map(entry -> entry.getKey() + "=`" + entry.getValue() + "`")
                         .collect(java.util.stream.Collectors.joining(", ")) + "\n";
+    }
+
+    private static String parallelismDescription(CliOptions options) {
+        if (!options.adaptiveParallelism()) return Integer.toString(options.reviewParallelism());
+        return options.reviewParallelismLimit() == null ? "auto (service and outstanding work)"
+                : "auto (maximum " + options.reviewParallelismLimit() + ")";
     }
 
     private static String describe(InputDocument document) {

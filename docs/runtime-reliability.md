@@ -6,7 +6,7 @@ A model process completing successfully does not establish a correct review. All
 
 | Option | Default | Scope |
 | --- | --- | --- |
-| `--review-parallelism` | `3` | Concurrent independent review tasks in this CLI execution. `1` runs the same independent prompts sequentially. |
+| `--review-parallelism` | `auto` | Each stage uses its outstanding work count and any advertised model concurrency limit. A number fixes the CLI scheduling limit. `1` runs model requests sequentially. |
 | `--agent-timeout-seconds` | `900` | Maximum time for one process, stdin writing and stdout/stderr collection. |
 | `--agent-retries` | `1` | Additional recoverable invocation attempts shared by one task, across its output corrections. `0` disables them. |
 | `--agent-max-calls-per-task` | `5` | All CLI-launched model calls for a task, including the initial call, retries and format/source/decision corrections. |
@@ -25,7 +25,7 @@ The CLI cannot observe every retry, model route, or billing action inside Claude
 - Recognized authentication/configuration rejection and artifact-storage failures stop execution. Queued work is blocked and running task processes are cancelled. User interruption is also a cancellation, not a model timeout.
 - A business verdict of insufficient evidence is distinct from a check that did not execute successfully. Failed candidate decisions carry an explicit unfinished flag; their linked acceptance items display `NOT_COMPLETED`. The model cannot emit that programmatic assessment status.
 
-`review-status.md` records `RUNNING`, `COMPLETE`, `INCOMPLETE`, `FAILED`, `CANCELLED`, or `SKIPPED`. Review completion means required output is validated; it never means requirements are satisfied or target tests passed. CLI exit codes are `0` for completed/prepared/skipped output, `3` for incomplete review, `1` for execution failure and `2` for invalid arguments. An interrupt caught by the CLI returns `130`; operating-system signal handling may terminate the JVM directly.
+`review-status.md` records `RUNNING`, `COMPLETE`, `INCOMPLETE`, `FAILED`, `CANCELLED`, or `SKIPPED`. Review completion means required output is validated; it never means requirements are satisfied or target tests passed. CLI exit codes are `0` for completed/prepared/skipped output, `3` for incomplete review, `1` for execution failure and `2` for invalid arguments. If requested report translation fails, the review retains the English report and marks delivery incomplete. An interrupt caught by the CLI returns `130`; operating-system signal handling may terminate the JVM directly.
 
 ## Subprocess ownership
 
@@ -37,7 +37,7 @@ The executor observes descendants while its own parent process runs and retains 
 
 Each invocation gets a new `*-attempts/attempt-NNNN/` directory containing `call-prompt.md`, `call-stdout.log`, `call-stderr.log`, and `call-execution.log`. This applies to initial calls, retries, output corrections and resumed attempts. Top-level log names remain compatibility views of the latest attempt.
 
-A discovery reply without a complete `<findings>` block gets one format recovery that repeats the review from the original evidence and asks for the XML block first. A second invalid result remains an unfinished discovery task.
+Deep discovery and supplemental discovery request the `<findings>` block before evidence requests. Initial review responses are normalized locally when the result is unambiguous. An unusable reply leaves its task unfinished. The CLI preserves successful peers and can collect well-formed evidence requests from a request-only reply. It does not issue a second model call for initial response formatting.
 
 A candidate verification reply containing only supported evidence requests can advance to evidence delivery. A validated verdict is still required. If the requests add no evidence to that candidate, one follow-up asks for the verdict using the available evidence and the request outcomes.
 

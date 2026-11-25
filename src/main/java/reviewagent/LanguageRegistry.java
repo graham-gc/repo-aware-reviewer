@@ -67,7 +67,7 @@ final class LanguageRegistry {
 
     LanguageModule module(String id) throws IOException {
         LanguageModule module = byId.get(id);
-        if (module == null) throw new IOException("Language module is not registered: " + id);
+        if (module == null) throw new IOException("language: module is not registered: " + id);
         return module;
     }
 
@@ -98,22 +98,23 @@ final class LanguageRegistry {
     }
 
     String instructions(List<String> changedPaths) {
+        return instructions(changedPaths, true);
+    }
+
+    String instructions(List<String> paths, boolean includeOtherProviders) {
         var selected = new java.util.LinkedHashSet<LanguageModule>();
-        for (String path : changedPaths) {
+        for (String path : paths) {
             int priority = modules.stream().filter(module -> module.supports(path)).mapToInt(module -> module.sourcePriority(path)).max().orElse(-1);
             modules.stream().filter(module -> module.reviewAppliesTo(path) && (!module.supports(path) || module.sourcePriority(path) == priority)).forEach(selected::add);
         }
-        List<LanguageModule> active = List.copyOf(selected);
-        String review = active.stream().map(LanguageModule::instructions).filter(text -> !text.isBlank())
+        String review = selected.stream().map(LanguageModule::instructions).filter(text -> !text.isBlank())
                 .collect(java.util.stream.Collectors.joining("\n"));
         if (review.isEmpty()) review = "No language-specific review profile matched the changed paths. Use generic text evidence and explicit file/range requests.\n";
-        String helpers = modules.stream().filter(module -> active.contains(module)
-                        || module.capabilities().contains(LanguageModule.Capability.DECLARATION_LOOKUP)
-                        || module.capabilities().contains(LanguageModule.Capability.DEPENDENCY_EVIDENCE))
+        String helpers = modules.stream().filter(module -> selected.contains(module)
+                        || includeOtherProviders && (module.capabilities().contains(LanguageModule.Capability.DECLARATION_LOOKUP)
+                        || module.capabilities().contains(LanguageModule.Capability.DEPENDENCY_EVIDENCE)))
                 .map(LanguageModule::requestInstructions).filter(text -> !text.isBlank()).collect(java.util.stream.Collectors.joining("\n"));
-        return review + "\nAVAILABLE EVIDENCE HELPERS\n" + helpers
-                + "\nRepository navigation is language-neutral: REQUEST_FILE|target|directory/or/**/pattern|index|reason\n"
-                + "Use . for the root; read returned files with all, line-range, or symbol selectors. Indexes are metadata only.\n";
+        return helpers.isEmpty() ? review : review + "\nAVAILABLE EVIDENCE HELPERS\n" + helpers;
     }
 
     static LanguageModule.Repository repository(GitClient git) { return new GitRepository(git); }

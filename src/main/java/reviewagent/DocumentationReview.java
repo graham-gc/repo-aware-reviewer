@@ -46,19 +46,22 @@ final class DocumentationReview {
 
     static String run(EvidenceBundle evidence, CliOptions options, AgentRunner agent, Path directory,
                       CommandProgress progress, int stages) throws IOException, InterruptedException {
-        var language = OutputLanguage.parse(options.language());
+        var language = OutputLanguage.EN;
+        String taskPrompt = prompt(evidence, language, true);
+        if (EvidenceText.bytes(taskPrompt) > agent.promptBudget().bytes())
+            return "The documentation prompt exceeds the model budget; review the changes in partitions";
         String coverage = evidence.coverage() + "\n## Review route\n\n- documentation — complete Markdown diffs.\n";
         AtomicFiles.write(directory.resolve("coverage.md"), coverage);
         AtomicFiles.write(directory.resolve("evidence-index.md"), evidence.catalog().manifest());
         Path stage = directory.resolve("documentation");
-        String taskPrompt = prompt(evidence, language, true);
         Path savedPrompt = stage.resolve("review-prompt.md");
         if (options.resumeDirectory() != null && Files.isRegularFile(savedPrompt)) {
             String saved = Files.readString(savedPrompt);
             // The stronger output instructions do not invalidate evidence or citations from earlier runs.
             if (!saved.equals(taskPrompt) && saved.equals(prompt(evidence, language, false))) taskPrompt = saved;
         }
-        var task = new ReviewTasks.Task("review", taskPrompt, reply -> parse(reply, evidence, language));
+        var task = new ReviewTasks.Task("review", taskPrompt,
+                ReviewTasks.Validator.singleResponse(reply -> parse(reply, evidence, language)));
         var result = ReviewTasks.runIsolated(List.of(task), agent, stage, 1, progress, 2, stages,
                 "Reviewing the Markdown changes", options.resumeDirectory() != null).get(task.id());
         if (!result.valid()) throw new ReviewStageException("documentation", List.of(new ReviewStageException.FailedTask(
@@ -74,7 +77,6 @@ final class DocumentationReview {
         AtomicFiles.write(directory.resolve("report.md"),
                 ReviewReport.documentationReport(evidence, review.summary(), concerns, language));
         AtomicFiles.write(directory.resolve("review-status.md"), completion.markdown());
-        progress.finish(stages, "Wrote report.md");
         return null;
     }
 
@@ -120,8 +122,10 @@ final class DocumentationReview {
 
     private static String prompt(EvidenceBundle evidence, OutputLanguage language, boolean explicitOutput) {
         String output = explicitOutput ? """
-                Use only the provided diff. Do not call or request any tools.
-                Start with the complete <documentation-review> XML. Omit planning and commentary.
+                Return only the complete <documentation-review> XML. Use <summary> and <doc-findings>
+                even if findings are empty. If the diff cannot settle a specific implementation or
+                contract claim, name the claim and missing source in a direct <escalate> element.
+                Use the supplied numbered diff for all citations. Do not call or request any tools.
                 For a missing diagram step, cite target text that shows the step is still expected.
                 """ : "";
         return """

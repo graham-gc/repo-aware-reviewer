@@ -18,7 +18,7 @@ final class ReviewSchema {
             "nextCheck", "previousPremise", "sharedCandidates", "summary", "route", "requests", "escalate");
     static final Set<String> FINDING = Set.of("id", "title", "severity", "path", "line", "endLine", "trigger", "impact", "evidence", "diffRelation");
     static final Set<String> VERIFICATION = Set.of("status", "reason", "finding", "relation", "baseline", "contract", "citations", "support", "premises",
-            "nextCheck", "previousPremise", "sharedCandidates");
+            "triggerCitations", "outcomeCitations", "nextCheck", "previousPremise", "sharedCandidates");
     static final Set<String> ASSESSMENT_ITEM = Set.of("id", "requirement", "requirementText", "behavior", "status", "reasoning", "boundaries", "gap",
             "citations", "policyBasis", "policyReason", "requirementLines");
     private static final List<String> ADAPTIVE_FIELDS = List.of("route", "summary", "decisions");
@@ -36,11 +36,20 @@ final class ReviewSchema {
             + ADAPTIVE_FIELDS.stream().map(field -> "<" + field + ">").collect(java.util.stream.Collectors.joining(", ")) + ".\n"
             + CANDIDATE_REQUESTS;
     static final String VERIFICATION_REQUESTS = """
-            Return one complete <verification> XML document. When the verdict is INSUFFICIENT_EVIDENCE
-            and a tracked source can resolve it, append raw evidence request lines after </verification>.
-            Keep <nextCheck> inside <verification>. Use no <requests> element or request lines for a resolved verdict.
+            Return one complete <verification> XML document. When decisive evidence is missing, set
+            <status> to INSUFFICIENT_EVIDENCE. To request evidence, put a nonempty <nextCheck> directly
+            inside <verification> and each raw request on its own line after the closing XML.
+            Use the following shape for a missing premise that can be checked in a tracked file:
+            <verification>
+              <status>INSUFFICIENT_EVIDENCE</status>
+              <reason>The caller is missing; an early return would refute the trigger.</reason>
+              <nextCheck>Does the caller return early on empty input?</nextCheck>
+            </verification>
+            `REQUEST_FILE|target|{tracked caller path}|{first:last}|Check the caller guard`
+            Fill in the missing premise and real file coordinates. Emit the request as a raw line.
+            Omit <nextCheck> and evidence requests for a resolved verdict.
             """;
-    private static final Set<String> LISTS = Set.of("findings", "premises", "citations", "assessment", "candidate-groups",
+    private static final Set<String> LISTS = Set.of("findings", "premises", "citations", "triggerCitations", "outcomeCitations", "assessment", "candidate-groups",
             "finding-groups", "group", "decisions", "doc-findings", "verifications");
     private static final Map<String, Set<String>> CHILDREN = Map.ofEntries(
             Map.entry("findings", Set.of("finding")), Map.entry("finding", findingChildren()),
@@ -50,6 +59,7 @@ final class ReviewSchema {
             Map.entry("local-decision", LOCAL_DECISION),
             Map.entry("verification", VERIFICATION), Map.entry("verifications", Set.of("verification")), Map.entry("premises", Set.of("premise")),
             Map.entry("premise", Set.of("statement", "basis", "citations")), Map.entry("citations", Set.of("citation")),
+            Map.entry("triggerCitations", Set.of("citation")), Map.entry("outcomeCitations", Set.of("citation")),
             Map.entry("citation", Set.of("source", "quote", "lines")), Map.entry("assessment", Set.of("item")),
             Map.entry("item", ASSESSMENT_ITEM), Map.entry("candidate-groups", Set.of("group")),
             Map.entry("finding-groups", Set.of("group")), Map.entry("group", Set.of("id")));

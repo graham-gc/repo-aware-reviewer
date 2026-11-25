@@ -147,7 +147,18 @@ final class ReviewQualityTests {
         fails(() -> ReviewOutput.candidateGroups("<candidate-groups><group><id>R1-1</id></group></candidate-groups>", List.of(candidate, negative)));
         var positiveVerdict = ReviewGrounding.verification(confirmed, candidate, evidence, index);
         var negativeVerdict = new ReviewOutput.Decision(new ReviewOutput.Verification(negative, ReviewOutput.Status.REJECTED,
-                "The policy contradicts this claim", null), ReviewOutput.Relation.PRE_EXISTING, "", "", List.of());
+                "The policy contradicts this claim", null), ReviewOutput.Relation.PRE_EXISTING, "",
+                "This policy applies only to errors from the parser", List.of());
+        var verdicts = List.of(positiveVerdict, negativeVerdict);
+        String groupingPrompt = new PromptFactory().groupCandidates(verdicts);
+        require(groupingPrompt.contains("<finding id=\"R1-1\"><status>CONFIRMED</status>")
+                && groupingPrompt.contains("<finding id=\"R2-1\"><status>REJECTED</status>")
+                && groupingPrompt.contains("<trigger>") && groupingPrompt.contains("<impact>")
+                && groupingPrompt.contains("<contract>This policy applies only to errors from the parser</contract>")
+                && groupingPrompt.contains("<reason>The policy contradicts this claim</reason>")
+                && !groupingPrompt.contains("<evidence>") && !groupingPrompt.contains(code)
+                && PromptFactory.publicationContext(verdicts, index).contains(code),
+                "grouping sees claims and disagreements while publication retains the source proof");
         var reconciled = ReviewQuality.resolveConflicts(List.of(positiveVerdict, negativeVerdict), groups, OutputLanguage.EN);
         require(reconciled.getFirst().verdict().status() == ReviewOutput.Status.DISPUTED
                 && reconciled.getFirst().verdict().confirmed().equals(positiveVerdict.verdict().confirmed()),
@@ -242,7 +253,7 @@ final class ReviewQualityTests {
         String existing = ReviewOutput.findingXml(finding("unused", "Existing acceptance gap"));
         String positive = decision(finding("ID", "TITLE"), "INTRODUCED", citation("Core.java", code)
                 + citation("Core.java", "class Core { int value() { return Helper.parse(); } }"));
-        String explicit = decision(finding("R3-1", "Existing acceptance gap"), "UNMET_REQUIREMENT",
+        String explicit = decision(finding("R4-1", "Existing acceptance gap"), "UNMET_REQUIREMENT",
                 citation("Core.java", code) + citation("External requirement — " + requirementPath, requirement));
         String draft = assessment(requirement, "SATISFIED", citation("Core.java", code), "Draft overlooked a boundary");
         String audited = assessment(requirement, "INSUFFICIENT_EVIDENCE", "", "Missing null-input handler evidence");
@@ -254,8 +265,8 @@ final class ReviewQualityTests {
                     printf '%s\\n' '<findings>'
                     case "$prompt" in
                       *'Correctness and regressions.'*) printf '%s\\n' 'DISPUTED' 'DEEP' ;;
-                      *'Requirements and business contracts.'*) printf '%s\\n' 'DISPUTED' ;;
-                      *) printf '%s\\n' 'EXISTING' ;;
+                      *'Business contracts and compatibility.'*) printf '%s\\n' 'DISPUTED' ;;
+                      *'Requirements compliance.'*) printf '%s\\n' 'EXISTING' ;;
                     esac
                     printf '%s\\n' '</findings>' ;;
                   'You are the independent candidate verification'*|'You are the independent publication adjudication'*)
@@ -274,22 +285,24 @@ final class ReviewQualityTests {
                           *'class Limits { static int limit() { return 0; } }'*)
                             printf '%s\\n' 'POSITIVE' | sed 's/ID/R1-2/g;s/TITLE/Deep failure/g' ;;
                           *'class Helper { static int parse() { return Limits.limit(); } }'*)
-                            printf '%s\\n' '<verification><status>INSUFFICIENT_EVIDENCE</status><reason>Need the transitive method.</reason></verification>' \\
+                            ref=$(printf '%s\\n' "$prompt" | sed -n 's/^- \\(SRC-[0-9]*\\): Helper.java at .*/\\1/p' | head -n 1)
+                            printf '<verification><status>INSUFFICIENT_EVIDENCE</status><reason>The helper delegates to Limits; its actual return is needed.</reason><previousPremise>SUPPORTED</previousPremise><nextCheck>Does Limits.limit return zero on this path?</nextCheck><citations><citation><source>%s</source><lines>1:1</lines></citation></citations></verification>\\n' "$ref"
+                            printf '%s\\n' \\
                               'REQUEST_FILE|target|Limits.java|symbol:limit|Trace the next decisive method' ;;
-                          *) printf '%s\\n' '<verification><status>INSUFFICIENT_EVIDENCE</status><reason>Need the called implementation.</reason></verification>' \\
+                          *) printf '%s\\n' '<verification><status>INSUFFICIENT_EVIDENCE</status><reason>Need the called implementation.</reason><nextCheck>Which method decides the value returned by Helper.parse?</nextCheck></verification>' \\
                               'REQUEST_FILE|target|Helper.java|symbol:parse|Read the missing implementation' ;;
                         esac ;;
                       *) printf '%s\\n' 'EXPLICIT' ;;
                     esac ;;
                   'You are the candidate reconciliation'*)
-                    printf '%s\\n' '<candidate-groups><group><id>R1-1</id><id>R2-1</id></group><group><id>R1-2</id></group><group><id>R3-1</id></group></candidate-groups>' ;;
+                    printf '%s\\n' '<candidate-groups><group><id>R1-1</id><id>R2-1</id></group><group><id>R1-2</id></group><group><id>R4-1</id></group></candidate-groups>' ;;
                   'You are the requirement assessment stage'*) printf '%s\\n' 'DRAFT' ;;
                   'You are the independent requirement assessment auditor'*)
                     printf '%s\\n' 'AUDITED' 'REQUEST_FILE|target|NoHandler.java|all|Find null-input error mapping' ;;
                   'You are the report consolidation'*)
                     printf '%s\\n' '# Review scope' '# Functional and business change' '# Findings' '[VERIFIED_FINDINGS]' \\
                       '# Requirement assessment' 'Fabricated satisfied conclusion.' '# Knowledge-base feedback' '# Verification limits' \\
-                      '<finding-groups><group><id>R1-2</id></group><group><id>R3-1</id></group></finding-groups>' ;;
+                      '<finding-groups><group><id>R1-2</id></group><group><id>R4-1</id></group></finding-groups>' ;;
                   *) exit 72 ;;
                 esac
                 """.replace("DISPUTED", disputed).replace("DEEP", deep).replace("EXISTING", existing)

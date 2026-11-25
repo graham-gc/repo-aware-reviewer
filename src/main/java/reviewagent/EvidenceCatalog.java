@@ -152,6 +152,10 @@ final class EvidenceCatalog {
 
     static boolean implementation(LanguageRegistry languages, String path) {
         try { return languages.forPath(path).implementationEvidence(path); }
-        catch (IOException missing) { return !path.matches("(?i).*\\.(md|mdx|txt|rst|adoc)$"); }
+        catch (IOException missing) { return !documentationPath(path); }
+    }
+
+    static boolean documentationPath(String path) {
+        return path.matches("(?i).*\\.(md|mdx|txt|rst|adoc)$");
     }
 }

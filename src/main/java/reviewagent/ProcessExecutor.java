@@ -27,6 +27,11 @@ final class ProcessExecutor {
     }
     record Observations(Long processStarted, Long stdinClosed, Long firstStdout, Long firstStderr, Long exitObserved) { }
 
+    @FunctionalInterface
+    interface StdoutObserver {
+        void line(String text, long receivedMillis);
+    }
+
     private static final class Timing {
         private final long started = System.nanoTime();
         private Long processStarted;
@@ -59,6 +64,12 @@ final class ProcessExecutor {
     CommandResult run(List<String> command, Path workingDirectory, String stdin, Duration timeout,
                       Path stdoutLog, Path stderrLog, java.util.Map<String, String> environment)
             throws IOException, InterruptedException {
+        return run(command, workingDirectory, stdin, timeout, stdoutLog, stderrLog, environment, null);
+    }
+
+    CommandResult run(List<String> command, Path workingDirectory, String stdin, Duration timeout,
+                      Path stdoutLog, Path stderrLog, java.util.Map<String, String> environment, StdoutObserver observer)
+            throws IOException, InterruptedException {
         var current = new Timing();
         timing.set(current);
         cleanupStatus.set("NOT_STARTED");
@@ -76,9 +87,9 @@ final class ProcessExecutor {
         var readers = Executors.newVirtualThreadPerTaskExecutor();
         try {
             Future<byte[]> stdoutReader = readers.submit(() ->
-                    capture(process.getInputStream(), stdoutLog, () -> current.firstStdout = current.elapsedMillis()));
+                    capture(process.getInputStream(), stdoutLog, () -> current.firstStdout = current.elapsedMillis(), current, observer));
             Future<byte[]> stderrReader = readers.submit(() ->
-                    capture(process.getErrorStream(), stderrLog, () -> current.firstStderr = current.elapsedMillis()));
+                    capture(process.getErrorStream(), stderrLog, () -> current.firstStderr = current.elapsedMillis(), current, null));
             Future<?> writer = readers.submit(() -> {
                 try (var output = process.getOutputStream()) {
                     if (stdin != null) {
@@ -176,19 +187,39 @@ final class ProcessExecutor {
         try { stream.close(); } catch (IOException ignored) { /* Preserve the original command failure. */ }
     }
 
-    private static byte[] capture(InputStream input, Path log, Runnable observeFirstByte) throws IOException {
+    private static byte[] capture(InputStream input, Path log, Runnable observeFirstByte, Timing timing, StdoutObserver observer)
+            throws IOException {
         try (OutputStream output = log == null ? OutputStream.nullOutputStream() : Files.newOutputStream(log)) {
             var captured = new ByteArrayOutputStream();
+            var line = observer == null ? null : new ByteArrayOutputStream();
             byte[] buffer = new byte[8192];
             int count;
+            long received = 0;
             while ((count = input.read(buffer)) != -1) {
                 if (count > 0 && captured.size() == 0) observeFirstByte.run();
+                if (observer != null) {
+                    received = timing.elapsedMillis();
+                    observeLines(buffer, count, line, observer, received);
+                }
                 output.write(buffer, 0, count);
                 output.flush();
                 captured.write(buffer, 0, count);
             }
+            if (line != null && line.size() > 0) observer.line(line.toString(StandardCharsets.UTF_8), received);
             return captured.toByteArray();
         }
+    }
+
+    private static void observeLines(byte[] buffer, int count, ByteArrayOutputStream line, StdoutObserver observer, long received) {
+        int start = 0;
+        for (int i = 0; i < count; i++) {
+            if (buffer[i] != '\n') continue;
+            line.write(buffer, start, i - start);
+            observer.line(line.toString(StandardCharsets.UTF_8), received);
+            line.reset();
+            start = i + 1;
+        }
+        line.write(buffer, start, count - start);
     }
 }
 

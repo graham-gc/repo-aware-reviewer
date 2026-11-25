@@ -12,22 +12,25 @@ import java.util.Locale;
 final class ReviewTimings {
     record Interval(long start, long end) { }
     private record Call(Path prefix, Path attempt, Interval interval, int bytes, String result,
-                        ProcessExecutor.Observations observed) { }
+                        ProcessExecutor.Observations observed, ClaudeStreamResponse.Timing stream) { }
     private record Validation(Path task, long elapsed, boolean cached, boolean accepted) { }
     private record Stage(Path directory, Interval interval) { }
     private record Prepared(Path task, int fullBytes, int selectedBytes, int sources, int totalSources) { }
+    private record Parallelism(long at, int limit, String reason) { }
     private final long started = System.nanoTime();
     private final List<Call> calls = new ArrayList<>();
     private final List<Validation> validations = new ArrayList<>();
     private final List<Stage> stages = new ArrayList<>();
     private final List<Prepared> prepared = new ArrayList<>();
+    private final List<Parallelism> parallelism = new ArrayList<>();
     private int reused;
     private int failed;
     private int unchanged;
+    private int incremental;
 
     synchronized void call(Path prefix, Path attempt, long start, long end, int bytes, String result,
-                           ProcessExecutor.Observations observed) {
-        calls.add(new Call(prefix, attempt, new Interval(start, end), bytes, result, observed));
+                           ProcessExecutor.Observations observed, ClaudeStreamResponse.Timing stream) {
+        calls.add(new Call(prefix, attempt, new Interval(start, end), bytes, result, observed, stream));
     }
     synchronized void validation(Path task, long elapsed, boolean cached, boolean accepted) {
         validations.add(new Validation(task, elapsed, cached, accepted));
@@ -38,6 +41,10 @@ final class ReviewTimings {
     }
     synchronized void task(boolean cached, boolean valid) { if (cached) reused++; if (!valid) failed++; }
     synchronized void unchanged() { unchanged++; }
+    synchronized void incremental() { incremental++; }
+    synchronized void parallelism(int limit, String reason) {
+        parallelism.add(new Parallelism(System.nanoTime(), limit, reason));
+    }
 
     synchronized void write(Path root, OutputLanguage language) throws IOException {
         AtomicFiles.write(root.resolve("timings.md"), markdown(root, language));
@@ -51,6 +58,9 @@ final class ReviewTimings {
                 .append(seconds(System.nanoTime() - started)).append('\n');
         out.append("- ").append(language.text("Actual launched attempts", "实际启动调用数")).append(": ").append(calls.size()).append('\n');
         out.append("- ").append(language.text("Valid cached tasks reused", "复用有效缓存任务数")).append(": ").append(reused).append('\n');
+        if (incremental > 0)
+            out.append("- ").append(language.text("Tasks reused from a previous review", "跨版本复用任务数"))
+                    .append(": ").append(incremental).append('\n');
         out.append("- ").append(language.text("Failed tasks", "失败任务数")).append(": ").append(failed).append('\n');
         out.append("- ").append(language.text("Unchanged follow-up tasks skipped", "未新增证据而跳过的追加任务数")).append(": ").append(unchanged).append("\n\n");
         out.append(language.text("Process durations overlap under concurrency and must not be added to infer user waiting time. Stage wall time includes queueing, backoff and validation. Input bytes are not token counts.\n\n",
@@ -71,6 +81,13 @@ final class ReviewTimings {
                     .append(seconds(entries.stream().mapToLong(c -> c.interval().end() - c.interval().start()).max().orElse(0))).append('|')
                     .append(entries.stream().mapToLong(Call::bytes).sum()).append("|\n");
         }
+        if (!parallelism.isEmpty()) {
+            out.append(language.text("\n## Adaptive concurrency\n\n", "\n## 自动并发\n\n"));
+            for (var event : parallelism) {
+                out.append("- ").append(seconds(event.at() - started)).append("s | ")
+                        .append(event.limit()).append(" | ").append(event.reason()).append('\n');
+            }
+        }
         out.append(language.text("\n## Candidate prompt preparation\n\nThese compare prepared task prompts, including cached or skipped tasks; they are not measured latency savings. Corrections and retries are counted above as actual calls.\n\n",
                 "\n## 候选提示词准备\n\n下表比较准备的任务提示词，包括缓存或跳过的任务，不代表实测提速。纠错和重试按上表的实际调用统计。\n\n"));
         out.append(language.text("| Task | Full bytes | Selected bytes | Provided sources |\n", "| 任务 | 全量提示词字节 | 实际选择字节 | 提供证据块数 |\n"))
@@ -90,6 +107,26 @@ final class ReviewTimings {
                     .append(observedMillis(observed.processStarted())).append('|').append(observedMillis(observed.stdinClosed())).append('|')
                     .append(observedMillis(observed.firstStdout())).append('|').append(observedMillis(observed.firstStderr())).append('|')
                     .append(observedMillis(observed.exitObserved())).append("|\n");
+        }
+        var streamed = calls.stream().filter(call -> call.stream() != null).toList();
+        if (!streamed.isEmpty()) {
+            out.append(language.text("\n## Claude stream timing\n\nEvent times are local receipt offsets from command launch, in milliseconds. "
+                            + "CLI duration and TTFT are the fields reported by Claude Code. Missing fields and events are marked with a dash.\n\n",
+                    "\n## Claude 流式计时\n\n事件时间为本地命令启动后收到事件的毫秒偏移。CLI 时长和首输出时间取自 Claude Code。横线表示未报告。\n\n"));
+            out.append(language.text(
+                    "| Attempt | First event | First thinking | Last thinking | First text | Last text | Result | CLI duration | API duration | CLI stream TTFT | CLI TTFT | Turns |\n",
+                    "| 调用记录 | 首个事件 | 首个思考片段 | 末个思考片段 | 首个正文片段 | 末个正文片段 | 最终结果 | CLI 时长 | API 时长 | CLI 流式首输出 | CLI 首输出 | 轮次 |\n"));
+            out.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n");
+            for (Call call : streamed) {
+                var stream = call.stream();
+                out.append('|').append(call.attempt() == null ? "unlogged" : root.relativize(call.attempt())).append('|')
+                        .append(observedMillis(stream.firstEvent())).append('|').append(observedMillis(stream.firstThinking())).append('|')
+                        .append(observedMillis(stream.lastThinking())).append('|').append(observedMillis(stream.firstText())).append('|')
+                        .append(observedMillis(stream.lastText())).append('|').append(observedMillis(stream.resultReceived())).append('|')
+                        .append(observedMillis(stream.duration())).append('|').append(observedMillis(stream.apiDuration())).append('|')
+                        .append(observedMillis(stream.streamTtft())).append('|').append(observedMillis(stream.ttft())).append('|')
+                        .append(observedMillis(stream.turns())).append("|\n");
+            }
         }
         out.append(language.text("\n## Local response validation\n\nValidation time covers local response checks. Model correction calls appear in the attempt table.\n\n",
                 "\n## 本地响应校验\n\n校验耗时仅统计本地响应检查。模型纠错调用见上表。\n\n"));

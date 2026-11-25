@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -12,6 +13,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 final class ReviewTasks {
     @FunctionalInterface
@@ -20,11 +22,23 @@ final class ReviewTasks {
         default String corrected(String response, IOException failure) throws IOException { return response; }
         default String correctionInstructions(IOException failure) { return ""; }
         default boolean allowOutputCorrection() { return true; }
+        default boolean restartOnInvalidReply(String response, IOException failure) { return false; }
+
+        static Validator singleResponse(Validator validator) {
+            return new Validator() {
+                @Override public void validate(String response) throws IOException { validator.validate(response); }
+                @Override public boolean allowOutputCorrection() { return false; }
+            };
+        }
     }
 
-    record Task(String id, String prompt, Validator validator, String model, String schema) {
+    record Task(String id, String prompt, Validator validator, String model, String schema, IncrementalReview.Entry cache) {
         Task(String id, String prompt, Validator validator) { this(id, prompt, validator, null); }
         Task(String id, String prompt, Validator validator, String model) { this(id, prompt, validator, model, null); }
+        Task(String id, String prompt, Validator validator, String model, String schema) {
+            this(id, prompt, validator, model, schema, null);
+        }
+        Task withCache(IncrementalReview.Entry entry) { return new Task(id, prompt, validator, model, schema, entry); }
     }
 
     record Outcome(String response, String error, String failureKind) {
@@ -32,8 +46,14 @@ final class ReviewTasks {
         boolean valid() { return error == null; }
     }
 
-    private record Reply(String id, Outcome outcome) {
+    record Job(Path directory, Task task) { }
+
+    @FunctionalInterface
+    interface OnCompletion {
+        List<Job> accept(Job job, Outcome outcome) throws IOException, InterruptedException;
     }
+
+    private record Reply(Job job, Outcome outcome) { }
 
     static Map<String, String> run(List<Task> tasks, AgentRunner agent, Path directory, int parallelism,
                                    CommandProgress progress, int stage, int stages, String description, boolean resume)
@@ -50,75 +70,80 @@ final class ReviewTasks {
         return runBatch(tasks, agent, directory, parallelism, progress, stage, stages, description, resume, true);
     }
 
+    static Map<String, Outcome> runPhase(List<Task> tasks, AgentRunner agent, Path directory, CliOptions options,
+                                         int work, int stage, int stages, String phase, String description,
+                                         CommandProgress progress, boolean resume) throws IOException, InterruptedException {
+        if (tasks.isEmpty()) return Map.of();
+        var jobs = tasks.stream().map(task -> new Job(directory, task)).toList();
+        var outcomes = new LinkedHashMap<String, Outcome>();
+        try (var concurrency = agent.phaseConcurrency(jobs, work, options, stage, phase,
+                directory.resolve(".review-parallelism"))) {
+            runReady(jobs, agent, directory, Math.min(concurrency.maximum(), jobs.size()), progress, stage, stages,
+                    description, resume, concurrency.admission(), (job, outcome) -> {
+                        outcomes.put(job.task().id(), outcome);
+                        return List.of();
+                    });
+        }
+        var ordered = new LinkedHashMap<String, Outcome>();
+        tasks.forEach(task -> ordered.put(task.id(), outcomes.get(task.id())));
+        return ordered;
+    }
+
     private static Map<String, Outcome> runBatch(List<Task> tasks, AgentRunner agent, Path directory, int parallelism,
                                                 CommandProgress progress, int stage, int stages, String description, boolean resume,
                                                 boolean isolateInvalidOutput) throws IOException, InterruptedException {
-        Files.createDirectories(directory);
-        if (tasks.isEmpty()) {
-            return Map.of();
+        var replies = new LinkedHashMap<String, Outcome>();
+        runReady(tasks.stream().map(task -> new Job(directory, task)).toList(), agent, directory,
+                Math.min(parallelism, tasks.size()), progress, stage, stages, description, resume, (job, outcome) -> {
+                    replies.put(job.task().id(), outcome);
+                    return List.of();
+                });
+        var ordered = new LinkedHashMap<String, Outcome>();
+        tasks.forEach(task -> ordered.put(task.id(), replies.get(task.id())));
+        if (!isolateInvalidOutput && ordered.values().stream().anyMatch(outcome -> !outcome.valid())) {
+            throw new ReviewStageException(description, ordered.entrySet().stream()
+                    .filter(entry -> !entry.getValue().valid())
+                    .map(entry -> new ReviewStageException.FailedTask(entry.getKey(), entry.getValue().failureKind(),
+                            directory.resolve(entry.getKey() + "-state.properties"))).toList());
         }
+        return ordered;
+    }
+
+    static void runReady(List<Job> initial, AgentRunner agent, Path directory, int parallelism,
+                         CommandProgress progress, int stage, int stages, String description, boolean resume,
+                         OnCompletion onCompletion) throws IOException, InterruptedException {
+        runReady(initial, agent, directory, parallelism, progress, stage, stages, description, resume, null, onCompletion);
+    }
+
+    static void runReady(List<Job> initial, AgentRunner agent, Path directory, int parallelism,
+                         CommandProgress progress, int stage, int stages, String description, boolean resume,
+                         AdaptiveConcurrency admission, OnCompletion onCompletion) throws IOException, InterruptedException {
+        Files.createDirectories(directory);
+        if (initial.isEmpty()) return;
         long batchStarted = System.nanoTime();
-        try (var workers = Executors.newFixedThreadPool(Math.min(parallelism, tasks.size()), Thread.ofVirtual().factory())) {
+        try (var workers = Executors.newFixedThreadPool(parallelism, Thread.ofVirtual().factory())) {
             var completions = new ExecutorCompletionService<Reply>(workers);
             var futures = new ArrayList<Future<Reply>>();
-            var globalFailure = new java.util.concurrent.atomic.AtomicBoolean();
+            var waiting = new ArrayDeque<>(initial);
+            var globalFailure = new AtomicBoolean();
             try {
-                for (Task task : tasks) {
-                    futures.add(completions.submit(() -> {
-                        try {
-                            if (globalFailure.get()) return blocked(directory, task);
-                            try (var budget = agent.task(task.model(), task.schema())) {
-                                if (globalFailure.get()) return blocked(directory, task);
-                                try {
-                                    state(directory, task, "RUNNING", "");
-                                    String response = invoke(task, agent, directory, resume);
-                                    Files.deleteIfExists(directory.resolve(task.id() + "-error.txt"));
-                                    state(directory, task, "SUCCEEDED", "");
-                                    agent.timings().task(budget.calls() == 0, true);
-                                    return new Reply(task.id(), new Outcome(response, null));
-                                } catch (IOException failure) {
-                                    // A task waiting for this permit must see a fatal failure before it can launch.
-                                    if (!isolatedFailure(failure)) globalFailure.set(true);
-                                    throw failure;
-                                }
-                            }
-                        } catch (IOException failure) {
-                            agent.timings().task(false, false);
-                            AtomicFiles.write(directory.resolve(task.id() + "-error.txt"), failure.getMessage());
-                            String kind = failure instanceof AgentCallException call ? call.kind().name()
-                                    : failure instanceof InvalidReviewResponseException ? "INVALID_OUTPUT" : "IO_FAILURE";
-                            state(directory, task, "FAILED", kind, failure);
-                            if (isolatedFailure(failure)) {
-                                return new Reply(task.id(), new Outcome(null, failure.getMessage(), kind));
-                            }
-                            throw failure;
-                        } catch (InterruptedException cancelled) {
-                            agent.timings().task(false, false);
-                            boolean interrupted = Thread.interrupted();
-                            try { state(directory, task, "CANCELLED", "CANCELLED"); }
-                            finally { if (interrupted) Thread.currentThread().interrupt(); }
-                            throw cancelled;
-                        }
-                    }));
-                }
-                var replies = new LinkedHashMap<String, Outcome>();
-                int invalidOutputs = 0;
-                for (int completed = 1; completed <= tasks.size(); completed++) {
+                int completed = 0;
+                int failed = 0;
+                while (!waiting.isEmpty() || completed < futures.size()) {
+                    if (admission != null) admission.readyTasks(waiting.size() + futures.size() - completed);
+                    while (!waiting.isEmpty() && futures.size() - completed < parallelism) {
+                        Job job = waiting.removeFirst();
+                        Files.createDirectories(job.directory());
+                        futures.add(completions.submit(() -> execute(job, agent, stage, resume, globalFailure, admission)));
+                    }
                     Reply reply = completions.take().get();
-                    replies.put(reply.id(), reply.outcome());
-                    if (!reply.outcome().valid()) invalidOutputs++;
-                    progress.step(stage, stages, description + " (" + completed + " of " + tasks.size() + " complete"
-                            + (invalidOutputs == 0 ? "" : "; " + invalidOutputs + " failed checks") + ")");
+                    completed++;
+                    if (!reply.outcome().valid()) failed++;
+                    onCompletion.accept(reply.job(), reply.outcome()).reversed().forEach(waiting::addFirst);
+                    progress.step(stage, stages, description + " (" + completed + " of "
+                            + (futures.size() + waiting.size()) + " complete"
+                            + (failed == 0 ? "" : "; " + failed + " failed checks") + ")");
                 }
-                var ordered = new LinkedHashMap<String, Outcome>();
-                tasks.forEach(task -> ordered.put(task.id(), replies.get(task.id())));
-                if (!isolateInvalidOutput && ordered.values().stream().anyMatch(outcome -> !outcome.valid())) {
-                    throw new ReviewStageException(description, ordered.entrySet().stream()
-                            .filter(entry -> !entry.getValue().valid())
-                            .map(entry -> new ReviewStageException.FailedTask(entry.getKey(), entry.getValue().failureKind(),
-                                    directory.resolve(entry.getKey() + "-state.properties"))).toList());
-                }
-                return ordered;
             } catch (ExecutionException failure) {
                 throw new IOException(description + " failed: " + failure.getCause().getMessage()
                         + ". See task artifacts in " + directory, failure.getCause());
@@ -129,9 +154,51 @@ final class ReviewTasks {
         } finally { agent.timings().stage(directory, batchStarted, System.nanoTime()); }
     }
 
-    private static Reply blocked(Path directory, Task task) throws IOException {
-        state(directory, task, "BLOCKED", "GLOBAL_FAILURE");
-        return new Reply(task.id(), new Outcome(null, "Blocked by a global failure", "GLOBAL_FAILURE"));
+    private static Reply execute(Job job, AgentRunner agent, int stage, boolean resume, AtomicBoolean globalFailure,
+                                 AdaptiveConcurrency admission)
+            throws IOException, InterruptedException {
+        Task task = job.task();
+        Path directory = job.directory();
+        try {
+            if (globalFailure.get()) return blocked(job);
+            try (var budget = agent.task(task.model(), task.schema(), stage, task.prompt(), admission,
+                    task.validator().allowOutputCorrection())) {
+                if (globalFailure.get()) return blocked(job);
+                try {
+                    state(directory, task, "RUNNING", "");
+                    String response = invoke(task, agent, budget, directory, resume);
+                    if (task.cache() != null) task.cache().save(response);
+                    Files.deleteIfExists(directory.resolve(task.id() + "-error.txt"));
+                    state(directory, task, "SUCCEEDED", "");
+                    agent.timings().task(budget.calls() == 0, true);
+                    budget.accepted();
+                    return new Reply(job, new Outcome(response, null));
+                } catch (IOException failure) {
+                    // A task waiting for this permit must see a fatal failure before it can launch.
+                    if (!isolatedFailure(failure)) globalFailure.set(true);
+                    throw failure;
+                }
+            }
+        } catch (IOException failure) {
+            agent.timings().task(false, false);
+            AtomicFiles.write(directory.resolve(task.id() + "-error.txt"), failure.getMessage());
+            String kind = failure instanceof AgentCallException call ? call.kind().name()
+                    : failure instanceof InvalidReviewResponseException ? "INVALID_OUTPUT" : "IO_FAILURE";
+            state(directory, task, "FAILED", kind, failure);
+            if (isolatedFailure(failure)) return new Reply(job, new Outcome(null, failure.getMessage(), kind));
+            throw failure;
+        } catch (InterruptedException cancelled) {
+            agent.timings().task(false, false);
+            boolean interrupted = Thread.interrupted();
+            try { state(directory, task, "CANCELLED", "CANCELLED"); }
+            finally { if (interrupted) Thread.currentThread().interrupt(); }
+            throw cancelled;
+        }
+    }
+
+    private static Reply blocked(Job job) throws IOException {
+        state(job.directory(), job.task(), "BLOCKED", "GLOBAL_FAILURE");
+        return new Reply(job, new Outcome(null, "Blocked by a global failure", "GLOBAL_FAILURE"));
     }
 
     private static boolean isolatedFailure(IOException failure) {
@@ -150,9 +217,10 @@ final class ReviewTasks {
                 + FailureDiagnostics.properties(cause, failure));
     }
 
-    private static String invoke(Task task, AgentRunner agent, Path directory, boolean resume)
+    private static String invoke(Task task, AgentRunner agent, AgentRunner.TaskScope budget, Path directory, boolean resume)
             throws IOException, InterruptedException {
         Path responseFile = directory.resolve(task.id() + "-response.md");
+        Path restartFile = directory.resolve(task.id() + "-restart-response.md");
         Path repairFile = directory.resolve(task.id() + "-repair-response.md");
         Path quoteRepairFile = directory.resolve(task.id() + "-quote-repair-response.md");
         Path decisionRepairFile = directory.resolve(task.id() + "-decision-repair-response.md");
@@ -163,7 +231,7 @@ final class ReviewTasks {
                 && Files.readString(promptFile, StandardCharsets.UTF_8).equals(task.prompt());
         // A valid old verdict is not reusable when its instructions or supplied evidence have changed.
         if (resume && samePrompt) {
-            for (Path saved : List.of(responseFile, repairFile, quoteRepairFile, decisionRepairFile)) {
+            for (Path saved : List.of(responseFile, restartFile, repairFile, quoteRepairFile, decisionRepairFile)) {
                 if (!Files.isRegularFile(saved)) {
                     continue;
                 }
@@ -185,13 +253,36 @@ final class ReviewTasks {
                 }
                 return cached;
             }
+            // An explicit resume may execute a failed task again. It still uses the original prompt
+            // and the same validation policy, without turning a cached failure into a repair request.
+            if (!task.validator().allowOutputCorrection()) response = null;
+        }
+        if (response == null && task.cache() != null) {
+            String saved;
+            try { saved = task.cache().read(); }
+            catch (IOException unreadable) { saved = null; }
+            if (saved != null) {
+                boolean valid = true;
+                try { validate(task, saved, directory, agent.timings(), true); }
+                catch (IOException invalid) {
+                    if (invalid instanceof ArtifactIOException) throw invalid;
+                    valid = false;
+                }
+                if (valid) {
+                    AtomicFiles.write(promptFile, task.prompt());
+                    AtomicFiles.write(responseFile, saved);
+                    AtomicFiles.write(directory.resolve(task.id() + "-incremental.txt"), "Validated response reused from the previous review.\n");
+                    agent.timings().incremental();
+                    return saved;
+                }
+            }
         }
         boolean responseFromCache = response != null;
         if (response == null) {
             // Invalidate before recording the new prompt: an interrupted invocation must not associate an
             // old response (or repair) with the new evidence on the next resume.
             if (!samePrompt) {
-                for (Path old : List.of(responseFile, repairFile, quoteRepairFile, decisionRepairFile, promptFile)) {
+                for (Path old : List.of(responseFile, restartFile, repairFile, quoteRepairFile, decisionRepairFile, promptFile)) {
                     if (Files.isRegularFile(old)) Files.move(old,
                             old.resolveSibling(old.getFileName().toString().replace(task.id() + "-", task.id() + "-superseded-" + java.util.UUID.randomUUID() + "-")),
                             java.nio.file.StandardCopyOption.REPLACE_EXISTING);
@@ -207,6 +298,13 @@ final class ReviewTasks {
                 validate(task, response, directory, agent.timings(), responseFromCache);
             } catch (IOException invalid) {
                 if (invalid instanceof ArtifactIOException) throw invalid;
+                if (!responseFromCache && budget.canRestart() && task.validator().restartOnInvalidReply(response, invalid)
+                        && attempted.add("restart")) {
+                    // There is no review to fix. Start a fresh request without feeding the invalid text back to the model.
+                    response = agent.invoke(task.prompt(), directory.resolve(task.id() + "-restart"));
+                    AtomicFiles.write(restartFile, response);
+                    continue;
+                }
                 boolean quotation = invalid instanceof SourceQuotationException;
                 boolean decision = invalid instanceof ReviewDecisionException;
                 String kind = quotation ? "quote-repair" : decision ? "decision-repair" : "repair";
@@ -237,30 +335,20 @@ final class ReviewTasks {
                             + "supported conclusions; do not invent a requirement or evidence, or promote an unconfirmed finding. "
                             + "If no supplied source supports a conclusion, keep it insufficient rather than manufacturing a quote. "
                         : "OUTPUT FORMAT CORRECTION\n"
-                            + "The previous response failed structural validation. Correct only its serialization and comply with the response schema above. "
+                            + "The previous response failed structural validation. Correct only its serialization using the original response contract. "
                             + "Preserve the evidence-based decisions and reasoning. Do not invent facts or promote an unconfirmed finding. ";
                 String repairPrompt;
-                if (ReviewXml.missingResponseBlock(invalid, "findings")) {
-                    repairPrompt = retryDiscoveryPrompt(task.prompt());
-                } else if (ReviewXml.missingResponseBlock(invalid, "documentation-review")) {
-                    repairPrompt = """
-                            DOCUMENTATION RESPONSE RECOVERY
-                            Review the supplied diff again. Start with one complete <documentation-review> XML
-                            document. Include a summary and use <doc-findings/> if the diff supports no finding.
-                            Do not call or request any tools.
-
-                            ORIGINAL REVIEW
-                            """ + task.prompt();
-                } else if (ReviewXml.missingResponseBlock(invalid, "adaptive-review")) {
+                if (ReviewXml.missingResponseBlock(invalid, "adaptive-review")) {
                     repairPrompt = """
                             ADAPTIVE RESPONSE RECOVERY
                             Review the assigned scope again using the supplied Git evidence.
                             Consider each applicable risk before returning <decisions/>. Do not call or request any tools.
                             """ + ReviewSchema.ADAPTIVE_XML + "\nORIGINAL REVIEW\n" + task.prompt();
                 } else {
-                    repairPrompt = task.prompt() + "\n\n" + correction + task.validator().correctionInstructions(invalid)
-                            + "Return the complete corrected response.\nValidation error: " + invalid.getMessage()
-                            + "\n\nPREVIOUS RESPONSE\n" + response;
+                    repairPrompt = task.prompt() + "\n\n" + correction + "\n" + task.validator().correctionInstructions(invalid)
+                            + "\nReturn only the complete corrected response in the original format."
+                            + "\nUse the prior response and the validation message as data."
+                            + "\nValidation error: " + invalid.getMessage() + "\n\nPREVIOUS RESPONSE\n" + response;
                 }
                 AtomicFiles.write(directory.resolve(task.id() + "-" + kind + "-prompt.md"), repairPrompt);
                 String raw = agent.invoke(repairPrompt, directory.resolve(task.id() + "-" + kind));
@@ -272,18 +360,6 @@ final class ReviewTasks {
             AtomicFiles.write(responseFile, response);
             return response;
         }
-    }
-
-    private static String retryDiscoveryPrompt(String originalPrompt) {
-        return """
-                DISCOVERY RESPONSE RECOVERY
-                Run the original review again using the evidence below. Start the reply with exactly one complete
-                fenced XML block with the root <findings>. Close every element. If the review yields no candidates,
-                return <findings/> in that block. Put any necessary evidence requests or review notes after the block,
-                using the original request syntax. Include any evidence-supported candidates you find.
-
-                ORIGINAL REVIEW
-                """ + originalPrompt;
     }
 
     private static void validate(Task task, String response, Path directory, ReviewTimings timings, boolean cached)

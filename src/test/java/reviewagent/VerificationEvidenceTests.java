@@ -15,6 +15,8 @@ final class VerificationEvidenceTests {
     private static final String CODE = "class Payment { boolean accept() { return Counterparty.produceReceipt().ready(); } }";
     static void run() throws Exception {
         selectionAndGrounding();
+        numberedCitationBounds();
+        anchoredSelection();
         aliasAmbiguity();
         timings();
         supplementalRound();
@@ -27,6 +29,27 @@ final class VerificationEvidenceTests {
     private static ReviewFinding finding(String path) {
         return new ReviewFinding("R1-1", "Receipt acceptance", ReviewFinding.Severity.MEDIUM, path, 1, 1,
                 "An incomplete receipt", "Incorrect acceptance", "Read the producer and its guard", "Changed return behavior");
+    }
+
+    private static void numberedCitationBounds() throws Exception {
+        String text = "source statement longer than twelve characters\n".repeat(239) + "\nreturn mcp\n";
+        var implementation = source(PATH, text);
+        var index = new EvidenceIndex(new EvidenceCatalog(List.of(implementation), true));
+        var wide = index.bind(List.of(EvidenceIndex.Citation.lines("SRC-1", "4:234"))).getFirst();
+        var shortLine = index.bind(List.of(EvidenceIndex.Citation.lines("SRC-1", "241:241"))).getFirst();
+        require(wide.quote().lines().count() == 231 && wide.locations().getFirst().lastLine() == 234
+                && shortLine.quote().equals("return mcp") && shortLine.locations().getFirst().firstLine() == 241,
+                "numbered citations bind to the actual block, including wide and short excerpts");
+        for (String invalid : List.of("240:240", "241:242", "234:4", "2147483648:2147483648"))
+            fails(() -> index.bind(List.of(EvidenceIndex.Citation.lines("SRC-1", invalid))));
+        fails(() -> index.bind(List.of(new EvidenceIndex.Citation("SRC-1", "return mcp"))));
+
+        var patch = EvidenceSource.diff(PATH, PATH, "@@ -1,2 +1,2 @@\n return mcp\n-x = 0\n+x = 1\n", SCOPE, true);
+        var diffIndex = new EvidenceIndex(new EvidenceCatalog(List.of(patch), true));
+        var context = diffIndex.bind(List.of(EvidenceIndex.Citation.lines("SRC-1", "2:2")));
+        var target = diffIndex.bind(List.of(EvidenceIndex.Citation.lines("SRC-1", "4:4")));
+        require(!diffIndex.hasTarget(context) && diffIndex.hasTarget(target) && !diffIndex.hasBaseline(target),
+                "even a short numbered diff citation keeps its exact changed side");
     }
     private static void selectionAndGrounding() throws Exception {
         var entries = new ArrayList<EvidenceSource>();
@@ -84,6 +107,52 @@ final class VerificationEvidenceTests {
         require(catalog.source("SRC-2") == null && selected.source("SRC-2") == null
                 && selected.reference(main).equals(main.id()), "removing an ambiguous alias's other owner cannot revive it");
     }
+
+    private static void anchoredSelection() throws Exception {
+        String first = "class Payment { boolean accept() { return Counterparty.produceReceipt().ready(); } }";
+        String far = "class Diagnostics { void run() { LegacyMetrics.publishMetric(); } }";
+        var primary = source(PATH, "import src.ReceiptPolicy;\n" + first + "\n" + "// reserved\n".repeat(17) + far);
+        var diff = EvidenceSource.diff(PATH, PATH, """
+                diff --git a/src/Payment.java b/src/Payment.java
+                @@ -2 +2 @@
+                -class Payment { boolean accept() { return false; } }
+                +class Payment { boolean accept() { return Counterparty.produceReceipt().ready(); } }
+                @@ -20 +20 @@
+                -class Diagnostics { void run() {} }
+                +class Diagnostics { void run() { LegacyMetrics.publishMetric(); } }
+                """, SCOPE, true);
+        var producer = source("src/Counterparty.java", "class Counterparty { static Receipt produceReceipt() { return incomplete(); } }");
+        var imported = source("src/ReceiptPolicy.java", "class ReceiptPolicy { boolean allowed() { return false; } }");
+        var farDependency = source("src/LegacyMetrics.java", "class LegacyMetrics { static void publishMetric() { publish(); } }");
+        var sameName = source("ui/receipt.jsx", "export function produceReceipt() { return 'receipt preview only'; }");
+        var rule = EvidenceSources.contract("Repository rules at base", "rules.md", "base", 1, "Incomplete receipts must be rejected.");
+        var sources = List.of(primary, diff, producer, imported, farDependency, sameName, rule);
+        var catalog = new EvidenceCatalog(sources, true);
+        var bundle = new EvidenceBundle(SCOPE, List.of(PATH), "", "", 20_000, null, catalog);
+        var finding = new ReviewFinding("R1-1", "Receipt acceptance", ReviewFinding.Severity.MEDIUM, PATH, 2, 2,
+                "An incomplete receipt", "Incorrect acceptance", "Read the producer and its guard", "Changed return behavior");
+        var broad = VerificationEvidence.select(bundle, catalog, "", finding, Set.of(), false);
+        var narrow = VerificationEvidence.select(bundle, catalog, "", finding, Set.of(), false, true);
+        require(broad.bundle().catalog().sources().containsAll(sources)
+                && narrow.bundle().catalog().sources().equals(List.of(primary, diff, producer, imported, rule)),
+                "anchor hints keep the direct producer and explicit import, and drop distant or cross-language name matches");
+        require(catalog.reference(producer).equals(narrow.bundle().catalog().reference(producer)),
+                "anchored selection preserves citation identities");
+        fails(() -> narrow.index().validate(List.of(new EvidenceIndex.Citation(sameName.id(), "return 'receipt preview only'"))));
+        var condition = new ReviewFinding(finding.id(), finding.title(), finding.severity(), finding.path(), finding.line(),
+                finding.endLine(), finding.trigger(), finding.impact(), "Read receipt.jsx for the intended behavior.", finding.diffRelation());
+        var explicit = VerificationEvidence.select(bundle, catalog, "", condition, Set.of(farDependency.id()), false, true);
+        require(explicit.bundle().catalog().sources().containsAll(sources),
+                "a unique explicitly named filename can reference another language, and supplied guards are retained");
+        var ambiguous = catalog.plus(new EvidenceCatalog(List.of(source("other/receipt.jsx", "export const view = 'different'")), true));
+        var withoutGuess = VerificationEvidence.select(bundle, ambiguous, "", condition, Set.of(), false, true);
+        require(withoutGuess.bundle().catalog().source(sameName.id()) == null,
+                "a bare filename with multiple owners does not select an unrelated cross-language body");
+        var outside = new ReviewFinding(finding.id(), finding.title(), finding.severity(), finding.path(), 8, 8,
+                finding.trigger(), finding.impact(), finding.evidence(), finding.diffRelation());
+        var unanchored = VerificationEvidence.select(bundle, catalog, "", outside, Set.of(), false, true);
+        require(unanchored.bundle().catalog().sources().equals(sources), "a location outside changed hunks keeps the broad scope");
+    }
     private static void timings() throws Exception {
         require(ReviewTimings.unionNanos(List.of(new ReviewTimings.Interval(0, 100), new ReviewTimings.Interval(30, 80),
                 new ReviewTimings.Interval(70, 150), new ReviewTimings.Interval(200, 220))) == 170,
@@ -93,9 +162,9 @@ final class VerificationEvidenceTests {
         long second = 1_000_000_000L;
         metrics.stage(root.resolve("verification"), 0, 2 * second);
         metrics.call(root.resolve("verification/R1-1"), null, 0, second, 1000, "SUCCEEDED",
-                new ProcessExecutor.Observations(1L, 2L, 950L, null, 975L));
+                new ProcessExecutor.Observations(1L, 2L, 950L, null, 975L), null);
         metrics.call(root.resolve("verification/R2-1-repair"), null, 0, second, 2000, "TIMEOUT",
-                new ProcessExecutor.Observations(1L, 2L, null, null, null));
+                new ProcessExecutor.Observations(1L, 2L, null, null, null), null);
         metrics.task(true, true);
         metrics.unchanged();
         String report = metrics.markdown(root, OutputLanguage.EN);
@@ -128,31 +197,41 @@ final class VerificationEvidenceTests {
         var session = new EvidenceSession(evidence, new SupplementalEvidence(git, executor, java.util.Map.of()), 0, 0);
         String script = """
                 prompt=$(cat)
-                case "$prompt" in
-                  *'<path>alpha.py</path>'*)
+                candidate=$(printf '%s\\n' "$prompt" | sed -n '/^CANDIDATE TO VERIFY$/{n;p;}')
+                case "$candidate" in
+                  *'id="R1-1"'*)
                     printf x >> alpha-calls
                     case "$prompt" in
-                      *'decisive_new_material'*) printf '<verification><status>REJECTED</status><reason>The requested producer guard disproves the claim.</reason></verification>';;
-                      *) printf '<verification><status>INSUFFICIENT_EVIDENCE</status><reason>The guard implementation is not yet provided.</reason></verification>\\nREQUEST_FILE|target|extra.py|all|Inspect the producer guard\\n';;
+                      *'decisive_new_material'*)
+                        [ -f same-path-peer-calls ] || exit 41
+                        printf '<verification><status>REJECTED</status><reason>The requested producer guard disproves the claim.</reason></verification>';;
+                      *) printf '<verification><status>INSUFFICIENT_EVIDENCE</status><reason>The guard implementation is not yet provided.</reason><nextCheck>Does the producer prevent the failing input?</nextCheck></verification>\\nREQUEST_FILE|target|extra.py|all|Inspect the producer guard\\n';;
                     esac;;
+                  *'id="R3-1"'*) printf x >> same-path-peer-calls
+                    printf '<verification><status>INSUFFICIENT_EVIDENCE</status><reason>The nearby claim has a separate unresolved precondition.</reason></verification>';;
                   *) printf x >> beta-calls
                     printf '<verification><status>INSUFFICIENT_EVIDENCE</status><reason>No decisive evidence for this separate behavior.</reason></verification>';;
                 esac
                 """;
         var agent = new AgentRunner(executor, "/bin/sh", List.of("-c", script), root, Duration.ofSeconds(5));
-        var alpha = new ReviewFinding("R1-1", "Alpha boundary", ReviewFinding.Severity.MEDIUM, "alpha.py", 1, 1,
+        var alpha = new ReviewFinding("R1-1", "inspect_alpha producer boundary", ReviewFinding.Severity.MEDIUM, "alpha.py", 1, 1,
                 "Alpha state", "Alpha impact", "Check alpha", "Alpha change");
         var beta = new ReviewFinding("R2-1", "Beta boundary", ReviewFinding.Severity.MEDIUM, "beta.py", 1, 1,
                 "Beta state", "Beta impact", "Check beta", "Beta change");
+        var nearby = new ReviewFinding("R3-1", "inspect_alpha return value", ReviewFinding.Severity.MEDIUM, "alpha.py", 1, 1,
+                "A different entry point", "The consumer interprets the value incorrectly", "Check the consumer", "Return value changed");
         try (var progress = new CommandProgress("scoping", new java.io.PrintStream(java.io.OutputStream.nullOutputStream()))) {
             var quality = new ReviewQuality(options, evidence, session, new PromptFactory(), agent, root, progress, 9);
-            var decisions = quality.verify(List.of(alpha, beta));
+            var decisions = quality.verify(List.of(alpha, beta, nearby));
             require(Files.readString(root.resolve("alpha-calls")).equals("xx") && Files.readString(root.resolve("beta-calls")).equals("x"),
                     "new material reruns its requester but does not repeat an unchanged peer prompt");
+            require(Files.readString(root.resolve("same-path-peer-calls")).equals("x")
+                            && decisions.get(2).verdict().status() == ReviewOutput.Status.INSUFFICIENT_EVIDENCE,
+                    "a nearby candidate receives its own initial verdict before the requester can enter its follow-up");
             require(decisions.getFirst().verdict().status() == ReviewOutput.Status.REJECTED
                     && Files.readString(root.resolve("verification/round-2/R1-1-prompt.md")).contains("decisive_new_material"),
                     "requested implementation is pinned into the next task even without a lexical candidate match");
-            require(Files.isRegularFile(root.resolve("verification/round-2/R2-1-unchanged.txt")), "skipping unchanged evidence is recorded");
+            require(!Files.exists(root.resolve("verification/round-2/R2-1-prompt.md")), "only the requester receives new evidence");
             String followup = Files.readString(root.resolve("verification/round-2/R1-1-prompt.md"));
             require(followup.contains("VERIFICATION FOLLOW-UP CONTEXT") && followup.contains("Previous model opinion: INSUFFICIENT_EVIDENCE")
                     && followup.contains("The guard implementation is not yet provided.") && followup.contains("REQUEST_FILE|target|extra.py|all")
@@ -182,8 +261,8 @@ final class VerificationEvidenceTests {
                 printf x >> calls
                 case "$prompt" in
                   *DOCUMENT_CONTENT_MARKER*) printf '<verification><status>REJECTED</status><reason>The supplied document resolves the allegation.</reason></verification>';;
-                  *'- README.md'*) printf '<verification><status>INSUFFICIENT_EVIDENCE</status><reason>Read the listed document.</reason></verification>\\nREQUEST_FILE|target|README.md|all|Read the interface documentation\\n';;
-                  *) printf '<verification><status>INSUFFICIENT_EVIDENCE</status><reason>Locate available documentation.</reason></verification>\\nREQUEST_FILE|target|.|index|Find documentation paths\\n';;
+                  *'- README.md'*) printf '<verification><status>INSUFFICIENT_EVIDENCE</status><reason>Read the listed document.</reason><nextCheck>Does the interface specification permit the change?</nextCheck></verification>\\nREQUEST_FILE|target|README.md|all|Read the interface documentation\\n';;
+                  *) printf '<verification><status>INSUFFICIENT_EVIDENCE</status><reason>Locate available documentation.</reason><nextCheck>Does the interface specification permit the change?</nextCheck></verification>\\nREQUEST_FILE|target|.|index|Find documentation paths\\n';;
                 esac
                 """;
         for (boolean navigation : List.of(false, true)) {
@@ -200,15 +279,16 @@ final class VerificationEvidenceTests {
                 var agent = new AgentRunner(executor, "/bin/sh", List.of("-c", script), run, Duration.ofSeconds(5));
                 var quality = new ReviewQuality(options, bundle, session, new PromptFactory(), agent, run, progress, 9);
                 var findings = List.of(finding("alpha.py"));
-                require(quality.verify(findings).getFirst().verdict().status() == ReviewOutput.Status.REJECTED,
-                        "navigation changes request routing, not the eventual simulated verdict");
+                var expected = navigation ? ReviewOutput.Status.REJECTED : ReviewOutput.Status.INSUFFICIENT_EVIDENCE;
+                require(quality.verify(findings).getFirst().verdict().status() == expected,
+                        "an unresolved premise is retained when only a directory index is supplied as evidence");
                 String calls = Files.readString(run.resolve("calls"));
-                require(calls.equals(navigation ? "xx" : "xxx"), "bounded initial path hints remove a filename-only reasoning round in a controlled fixture");
+                require(calls.equals(navigation ? "xx" : "x"), "only an actual document justifies another model call");
                 var resume = CliOptions.parse(new String[]{"review", "--repo", repo.toString(), "--resume", run.toString()});
                 var resumedSession = new EvidenceSession(bundle, new SupplementalEvidence(git, executor, java.util.Map.of()), 0, 0);
                 var unavailable = new AgentRunner(executor, "/bin/sh", List.of("-c", "exit 89"), run, Duration.ofSeconds(5));
                 var resumed = new ReviewQuality(resume, bundle, resumedSession, new PromptFactory(), unavailable, run, progress, 9);
-                require(resumed.verify(findings).getFirst().verdict().status() == ReviewOutput.Status.REJECTED
+                require(resumed.verify(findings).getFirst().verdict().status() == expected
                         && Files.readString(run.resolve("calls")).equals(calls), "follow-up context is deterministic and reuses all valid matching rounds on resume");
             }
         }

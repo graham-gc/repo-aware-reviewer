@@ -34,7 +34,7 @@ For a focused scope, `DEEP` with an `INSUFFICIENT_EVIDENCE` decision identifies 
 | Two valid structural interpretations | Reject rather than choose one. |
 | Plain evidence requests outside their unresolved decision | Restore a request only when its candidate is uniquely identifiable. Multiple candidates require an explicit file or symbol association for every request. The original response and normalization diagnostics are retained. |
 | A text field appears to swallow sibling citations | Require an explicit closer or CDATA; do not silently accept the merged field. |
-| A root is truncated or absent | Reject; do not infer the missing response. |
+| A root is truncated or absent | Reject without inferring a result. Initial review tasks record the failure without requesting a format correction from the model. |
 | Other mismatched closers, unknown fields, duplicate scalar fields | Reject. |
 | Source text is corrupted inside an otherwise recovered tree | Exact-source validation still rejects it. A separate source-correction attempt may select the actual included excerpt. |
 

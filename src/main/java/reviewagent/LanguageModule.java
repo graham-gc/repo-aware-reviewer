@@ -22,6 +22,10 @@ public interface LanguageModule {
     default Lines locate(String source, String symbol) throws IOException {
         throw new IOException("Symbol lookup is unavailable for language module " + id());
     }
+    /** Return the pinned source ranges containing the requested declarations. */
+    default List<Lines> declarations(String source, String name) throws IOException {
+        throw new IOException("Exact declaration lookup is unavailable for language module " + id());
+    }
     default String load(Request request, Environment environment, int maxBytes)
             throws IOException, InterruptedException {
         throw new IOException("This evidence request is unavailable for language module " + id());

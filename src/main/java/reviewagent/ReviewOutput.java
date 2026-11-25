@@ -6,6 +6,7 @@ import org.w3c.dom.Element;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -33,12 +34,7 @@ final class ReviewOutput {
     enum Relation { INTRODUCED, EXPOSED_BY_CHANGE, UNMET_REQUIREMENT, PRE_EXISTING, UNRESOLVED }
 
     record Decision(Verification verdict, Relation relation, String baseline, String contract,
-                    List<EvidenceIndex.Citation> citations, ReviewSupport support, List<String> sharedCandidates) {
-        Decision(Verification verdict, Relation relation, String baseline, String contract, List<EvidenceIndex.Citation> citations,
-                 ReviewSupport support) {
-            this(verdict, relation, baseline, contract, citations, support, List.of());
-        }
-
+                    List<EvidenceIndex.Citation> citations, ReviewSupport support) {
         Decision(Verification verdict, Relation relation, String baseline, String contract, List<EvidenceIndex.Citation> citations) {
             this(verdict, relation, baseline, contract, citations, ReviewSupport.unresolved());
         }
@@ -57,8 +53,13 @@ final class ReviewOutput {
         }
     }
 
-    record Discovery(List<ReviewFinding> findings, String notes) {
+    record Discovery(List<ReviewFinding> findings, String notes, EvidenceNeeded evidenceNeeded) {
         static final String CHANGE_SUMMARY_PREFIX = "CHANGE_SUMMARY|";
+        static final String NEEDS_EVIDENCE_PREFIX = "DISCOVERY_NEEDS_EVIDENCE|";
+        static final String VERIFY_PREMISE_PREFIX = "VERIFY_PREMISE|";
+        private static final String VERIFY_QUESTION_PREFIX = "VERIFY_QUESTION|";
+
+        record EvidenceNeeded(String question, String requests) { }
 
         String changeSummary() {
             return notes.lines().map(String::strip)
@@ -67,15 +68,93 @@ final class ReviewOutput {
                     .filter(summary -> !summary.isBlank())
                     .findFirst().orElse("");
         }
+
+        Map<String, List<EvidenceRequest>> candidateRequests() {
+            var requests = new LinkedHashMap<String, List<EvidenceRequest>>();
+            for (var request : EvidenceRequest.parse(notes)) {
+                int owner = request.discoveryOwner();
+                if (owner > 0 && owner <= findings.size())
+                    requests.computeIfAbsent(findings.get(owner - 1).id(), unused -> new ArrayList<>()).add(request);
+            }
+            return requests;
+        }
+
+        Map<String, String> candidateQuestions() {
+            var questions = new LinkedHashMap<String, String>();
+            var ambiguous = new java.util.HashSet<String>();
+            for (String line : notes.lines().map(String::strip).toList()) {
+                if (!line.startsWith(VERIFY_QUESTION_PREFIX)) continue;
+                String[] fields = line.split("\\|", 3);
+                if (fields.length != 3 || !fields[1].matches("[1-9][0-9]{0,8}") || fields[2].isBlank()) continue;
+                int owner = Integer.parseInt(fields[1]);
+                if (owner > findings.size()) continue;
+                String id = findings.get(owner - 1).id();
+                if (questions.putIfAbsent(id, fields[2].strip()) != null) ambiguous.add(id);
+            }
+            questions.keySet().removeAll(ambiguous);
+            return questions;
+        }
+
+        Map<String, Map<Integer, String>> candidatePremises() {
+            var plans = new LinkedHashMap<String, Map<Integer, String>>();
+            for (String line : notes.lines().map(String::strip).toList()) {
+                if (!line.startsWith(VERIFY_PREMISE_PREFIX)) continue;
+                String[] fields = line.split("\\|", 4);
+                if (fields.length != 4 || !fields[1].matches("[1-9][0-9]{0,8}")
+                        || !fields[2].matches("[1-9][0-9]{0,8}") || fields[3].isBlank()) continue;
+                int owner = Integer.parseInt(fields[1]);
+                if (owner > findings.size()) continue;
+                String id = findings.get(owner - 1).id();
+                var premises = plans.computeIfAbsent(id, unused -> new LinkedHashMap<>());
+                premises.merge(Integer.parseInt(fields[2]), fields[3].strip(),
+                        (first, next) -> first.equals(next) ? first : "");
+            }
+            return plans;
+        }
     }
 
     static Discovery discovery(String response, String reviewer, List<String> changedFiles) throws IOException {
+        return discovery(response, reviewer, changedFiles, false);
+    }
+
+    static Discovery initialDiscovery(String response, String reviewer, List<String> changedFiles) throws IOException {
+        return discovery(response, reviewer, changedFiles, true);
+    }
+
+    private static Discovery discovery(String response, String reviewer, List<String> changedFiles, boolean preflight)
+            throws IOException {
         XmlBlock block = xml(response, "findings");
         var findings = new ArrayList<ReviewFinding>();
         for (Element element : children(block.root(), "finding")) {
             findings.add(finding(element, reviewer + "-" + (findings.size() + 1), changedFiles, false));
         }
-        return new Discovery(List.copyOf(findings), block.remainder());
+        String notes = block.remainder();
+        var lines = notes.lines().map(String::strip).filter(line -> !line.isEmpty()).toList();
+        String marker = Discovery.NEEDS_EVIDENCE_PREFIX;
+        Discovery.EvidenceNeeded evidenceNeeded = null;
+        if (lines.stream().anyMatch(line -> line.startsWith(marker))) {
+            if (!preflight) throw new IOException("The evidence preflight response is only valid for initial reviewers");
+            if (!findings.isEmpty() || !lines.getFirst().startsWith(marker) || lines.size() < 2)
+                throw new IOException("A discovery evidence preflight requires empty findings, a question and evidence requests");
+            String question = lines.getFirst().substring(marker.length()).strip();
+            boolean trailingFence = lines.getLast().matches("`{3,}|~{3,}");
+            int requestEnd = lines.size() - (trailingFence ? 1 : 0);
+            String summary = Discovery.CHANGE_SUMMARY_PREFIX;
+            boolean trailingSummary = requestEnd > 1 && lines.get(requestEnd - 1).startsWith(summary)
+                    && !lines.get(requestEnd - 1).substring(summary.length()).isBlank();
+            var requestLines = lines.subList(1, requestEnd - (trailingSummary ? 1 : 0));
+            String requests = String.join("\n", requestLines);
+            if (question.isEmpty() || requestLines.isEmpty()
+                    || !requestLines.equals(EvidenceRequest.parse(requests).stream().map(EvidenceRequest::text).toList()))
+                throw new IOException("Return only the discovery preflight question and one unbulleted line per evidence request");
+            if (trailingFence || trailingSummary) {
+                ReviewXml.strict(response, "findings");
+                if (trailingFence) ResponseDiagnostics.record("Ignored a redundant final Markdown fence after validated discovery preflight requests.");
+                if (trailingSummary) ResponseDiagnostics.record("Ignored a change summary submitted before discovery was complete.");
+            }
+            evidenceNeeded = new Discovery.EvidenceNeeded(question, requests);
+        }
+        return new Discovery(List.copyOf(findings), notes, evidenceNeeded);
     }
 
     static Verification verification(String response, ReviewFinding candidate, List<String> changedFiles) throws IOException {
@@ -101,7 +180,7 @@ final class ReviewOutput {
         } else if (fields.containsKey("finding")) {
             throw new IOException("Unconfirmed verification contains a finding");
         }
-        String nextCheck = status == Status.INSUFFICIENT_EVIDENCE && fields.containsKey("nextCheck")
+        String nextCheck = status != Status.REJECTED && fields.containsKey("nextCheck")
                 ? fields.get("nextCheck").getTextContent().strip() : "";
         return new Verification(candidate, status, reason, confirmed, false, nextCheck);
     }
@@ -117,15 +196,11 @@ final class ReviewOutput {
             try { relation = Relation.valueOf(text(fields, "relation")); }
             catch (IllegalArgumentException invalid) { throw new IOException("Unknown finding relationship", invalid); }
         }
-        var shared = fields.containsKey("sharedCandidates")
-                ? java.util.Arrays.stream(fields.get("sharedCandidates").getTextContent().split(",", -1))
-                    .map(String::strip).toList()
-                : List.<String>of();
         return new Decision(verdict, relation, fields.containsKey("baseline") ? text(fields, "baseline") : "",
-                fields.containsKey("contract") ? text(fields, "contract") : "", citations(fields.get("citations")), support(fields), shared);
+                fields.containsKey("contract") ? text(fields, "contract") : "", citations(fields.get("citations")), support(fields, verdict.confirmed()));
     }
 
-    private static ReviewSupport support(Map<String, Element> fields) throws IOException {
+    private static ReviewSupport support(Map<String, Element> fields, ReviewFinding finding) throws IOException {
         ReviewSupport.Kind kind = ReviewSupport.Kind.UNRESOLVED;
         if (fields.containsKey("support")) {
             try { kind = ReviewSupport.Kind.valueOf(text(fields, "support")); }
@@ -137,6 +212,13 @@ final class ReviewOutput {
             try { premises.add(new ReviewSupport.Premise(text(premise, "statement"), ReviewSupport.Basis.valueOf(text(premise, "basis")),
                     citations(premise.get("citations")))); }
             catch (IllegalArgumentException invalid) { throw new IOException("Unknown premise basis", invalid); }
+        }
+        var trigger = fields.get("triggerCitations");
+        var outcome = fields.get("outcomeCitations");
+        if (trigger != null || outcome != null) {
+            if (finding == null) throw new IOException("Trigger and outcome citations require a confirmed finding.");
+            if (trigger != null) premises.add(new ReviewSupport.Premise(finding.trigger(), ReviewSupport.Basis.IMPLEMENTATION, citations(trigger)));
+            if (outcome != null) premises.add(new ReviewSupport.Premise(finding.impact(), ReviewSupport.Basis.OUTCOME, citations(outcome)));
         }
         return new ReviewSupport(kind, List.copyOf(premises));
     }
@@ -191,13 +273,17 @@ final class ReviewOutput {
         return xml(response, rootName).remainder();
     }
 
-    record Followup(String requests, boolean answeredPreviousPremise) { }
+    record Followup(String requests, String previousPremise) {
+        boolean answeredPreviousPremise() {
+            return previousPremise.equals("SUPPORTED") || previousPremise.equals("REFUTED");
+        }
+    }
 
     static Followup verificationFollowup(String response) throws IOException {
         var block = xml(response, "verification");
         var premise = fields(block.root(), ReviewSchema.VERIFICATION).get("previousPremise");
         String result = premise == null ? "" : premise.getTextContent().strip();
-        return new Followup(block.remainder(), result.equals("SUPPORTED") || result.equals("REFUTED"));
+        return new Followup(block.remainder(), result);
     }
 
     static List<EvidenceIndex.Citation> citations(Element element) throws IOException {
@@ -234,6 +320,22 @@ final class ReviewOutput {
                 + element("endLine", Integer.toString(finding.endLine())) + element("trigger", finding.trigger())
                 + element("impact", finding.impact()) + element("evidence", finding.evidence())
                 + element("diffRelation", finding.diffRelation()) + "</finding>";
+    }
+
+    static String groupingXml(Decision decision) {
+        var verdict = decision.verdict();
+        var finding = verdict.confirmed() == null ? verdict.candidate() : verdict.confirmed();
+        String location = finding.path() + ":" + finding.line()
+                + (finding.endLine() == finding.line() ? "" : "–" + finding.endLine());
+        return "<finding id=\"" + verdict.candidate().id() + "\">"
+                + element("status", verdict.status().name()) + element("title", finding.title())
+                + element("location", location) + element("trigger", finding.trigger())
+                + element("impact", finding.impact())
+                + element("diffRelation", decision.relation().name() + ": " + finding.diffRelation())
+                + (decision.contract().isBlank() ? "" : element("contract", decision.contract()))
+                + (verdict.status() == Status.CONFIRMED ? "" : element("reason", verdict.reason()))
+                + (verdict.nextCheck().isBlank() ? "" : element("nextCheck", verdict.nextCheck()))
+                + "</finding>";
     }
 
     private static String element(String name, String value) {

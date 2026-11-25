@@ -65,14 +65,14 @@ record ScopedVerificationBatch(List<ReviewFinding> candidates, VerificationEvide
     private static String prompt(List<ReviewFinding> candidates, VerificationEvidence view, OutputLanguage language) {
         String ids = candidates.stream().map(ReviewFinding::id).collect(Collectors.joining(", "));
         return """
-                You are the independent verifier for these distinct code-review candidates. Use the supplied pinned evidence.
-                Do not call tools. Verify one candidate at a time, treating each description as an allegation.
-                Trace its particular trigger, guards, caller or producer behavior, outcome and change attribution.
-                Distinct triggers can have different results even when they call the same code. Check counterevidence
-                for each and preserve its separate verdict. Limit impact to what its own evidence proves.
+                You are the independent verifier for these distinct code-review candidates.
 
+                REQUIRED RESPONSE
                 Return exactly one <verifications> document. Include one direct <verification id="..."> child
                 for each supplied candidate ID (%s). Use an outer id on every verdict, including rejections.
+                If a claim needs more evidence, use INSUFFICIENT_EVIDENCE and name the missing premise in reason.
+                This batch accepts only verdict fields. The CLI can move an unresolved member to individual verification.
+
                 For CONFIRMED, use this structure with the actual ID, target location and decisive premise citations:
                 <verifications><verification id="%s">
                   <status>CONFIRMED</status><reason>What proves this particular trigger and outcome</reason>
@@ -89,10 +89,13 @@ record ScopedVerificationBatch(List<ReviewFinding> candidates, VerificationEvide
                 </verification></verifications>
                 Use INTRODUCED or EXPOSED_BY_CHANGE for a proved regression. Cite base source or the relevant diff side
                 for attribution and pinned target implementation for behavior. A new-file diff header establishes absence at base.
-                Use REJECTED with reason and decisive target citations when the exact claim is disproved. Use
-                INSUFFICIENT_EVIDENCE with the missing premise in reason when the claim cannot be resolved.
-                For these two statuses omit finding. Each child contains only its own verdict fields. If more evidence is
-                needed, describe it in reason. End the document after the last verdict. Write descriptive text in %s.
+                Use REJECTED with decisive target citations for a disproved claim. Omit finding for REJECTED
+                and INSUFFICIENT_EVIDENCE. Write descriptive text in %s.
+
+                VERIFICATION TASK
+                Use the pinned evidence and check each candidate on its own trigger, guards, caller or producer,
+                outcome and change attribution. Search for counterevidence per candidate. Shared code does not
+                imply shared outcomes. Limit each decision to what its own citations prove.
 
                 """.formatted(ids, candidates.getFirst().id(), candidates.getFirst().id(), language.code())
                 + PromptFactory.SCOPED_OUTCOME_RULES + "\nCANDIDATES TO VERIFY\n"

@@ -10,9 +10,12 @@ import java.util.Set;
 import java.util.LinkedHashSet;
 import java.util.ArrayList;
 import java.util.function.Function;
+import java.util.stream.Collectors;
 
 /** Evidence-driven verification, cross-verdict adjudication and independent acceptance audit. */
 final class ReviewQuality {
+    private enum Followups { STANDARD, SCOPED, SCOPED_REFINEMENT, DECISIVE }
+
     record Adjudication(List<ReviewOutput.Decision> decisions, List<List<String>> groups, String groupingNote) {
         Adjudication(List<ReviewOutput.Decision> decisions, List<List<String>> groups) { this(decisions, groups, ""); }
     }
@@ -31,6 +34,35 @@ final class ReviewQuality {
     private final CommandProgress progress;
     private final int stages;
     private final Map<String, Set<String>> retainedEvidence = new LinkedHashMap<>();
+    private final Map<String, PublicationQuestion> pendingPublicationQuestions = new LinkedHashMap<>();
+    private IncrementalReview incremental;
+
+    void incremental(IncrementalReview value) { incremental = value; }
+
+    private record PublicationQuestion(String candidate, String question, String requests) { }
+
+    private record PublicationPreparation(EvidenceCatalog original, String supplemental,
+                                          Map<String, List<PublicationQuestion>> questions,
+                                          Map<PublicationQuestion, Set<String>> sources) {
+        Set<String> sourcesFor(String candidate) {
+            return questions.getOrDefault(candidate, List.of()).stream()
+                    .flatMap(question -> sources.get(question).stream()).collect(Collectors.toCollection(LinkedHashSet::new));
+        }
+
+        String context(String candidate, VerificationEvidence view) {
+            var relevant = questions.getOrDefault(candidate, List.of());
+            if (relevant.isEmpty()) return "";
+            var catalog = view.bundle().catalog();
+            return "\nINDEPENDENT VERIFICATION QUESTIONS FOR THIS ADJUDICATION\n"
+                    + relevant.stream().map(question -> {
+                        var supplied = catalog.select(sources.get(question)).sources().stream()
+                                .map(catalog::reference).toList();
+                        return "- " + question.candidate() + ": " + EvidenceText.oneLine(ReportText.summary(question.question(), 500))
+                                + (supplied.isEmpty() ? "\n  Requested excerpt absent from this prompt."
+                                        : "\n  Supplied evidence for this question: " + String.join(", ", supplied) + ".");
+                    }).collect(Collectors.joining("\n")) + "\n";
+        }
+    }
 
     ReviewQuality(CliOptions options, EvidenceBundle evidence, EvidenceSession session, PromptFactory prompts,
                   AgentRunner agent, Path directory, CommandProgress progress, int stages) {
@@ -45,12 +77,85 @@ final class ReviewQuality {
     }
 
     List<ReviewOutput.Decision> verify(List<ReviewFinding> findings) throws IOException, InterruptedException {
-        return verifyRounds(findings, (candidate, view) -> prompts.verifyFinding(view.bundle(), candidate, "", view.index()),
-                candidate -> Set.of(), "verification", 5, "Verifying candidate issues");
+        return verify(findings, Map.of());
+    }
+
+    List<ReviewOutput.Decision> verify(List<ReviewFinding> findings, Map<String, EvidenceSession.VerificationBrief> briefs)
+            throws IOException, InterruptedException {
+        boolean publicationProof = PublicationGate.enabledFor(options) || options.batchedVerification();
+        Function<ReviewFinding, EvidenceSession.VerificationBrief> brief =
+                candidate -> briefs.getOrDefault(candidate.id(), EvidenceSession.VerificationBrief.EMPTY);
+        VerificationPrompt individual = (candidate, view) -> prompts.verifyFinding(view.bundle(), candidate, "", view.index(),
+                PromptFactory.DECISIVE_FOLLOWUP + brief.apply(candidate).instructions(view.bundle().catalog()), publicationProof);
+        return verifyDeep(findings, individual, (candidates, view) -> prompts.verifyBatch(view, candidates,
+                        candidate -> brief.apply(candidate).instructions(view.bundle().catalog())),
+                candidate -> Set.of(), "verification", 5, "Verifying candidate issues", true, briefs, List::size, null);
+    }
+
+    private Map<String, List<ReadyCheck>> verificationAliases(List<ReadyCheck> checks,
+                                                               Map<String, EvidenceSession.VerificationBrief> briefs) {
+        record Input(String path, int line, int endLine, ReviewFinding.Severity severity, String title, String trigger,
+                     String impact, String evidence, String relation, EvidenceSession.VerificationBrief brief) { }
+        var representatives = new LinkedHashMap<Input, String>();
+        var aliases = new LinkedHashMap<String, List<ReadyCheck>>();
+        for (var check : checks) {
+            var finding = check.candidate;
+            if (finding.severity().compareTo(ReviewFinding.Severity.MEDIUM) < 0) continue;
+            var input = new Input(finding.path(), finding.line(), finding.endLine(), finding.severity(),
+                    finding.title(), finding.trigger(), finding.impact(), finding.evidence(), finding.diffRelation(),
+                    briefs.getOrDefault(finding.id(), EvidenceSession.VerificationBrief.EMPTY));
+            String representative = representatives.putIfAbsent(input, finding.id());
+            if (representative != null)
+                aliases.computeIfAbsent(representative, unused -> new ArrayList<>()).add(check);
+        }
+        return aliases;
+    }
+
+    private static boolean sharedVerificationAnchor(ReviewFinding first, ReviewFinding next) {
+        return first.path().equals(next.path()) && first.line() == next.line() && first.endLine() == next.endLine()
+                && first.severity().compareTo(ReviewFinding.Severity.MEDIUM) >= 0
+                && first.severity() == next.severity() && first.trigger().equals(next.trigger())
+                && first.impact().equals(next.impact()) && first.diffRelation().equals(next.diffRelation())
+                && !first.id().split("-", 2)[0].equals(next.id().split("-", 2)[0]);
+    }
+
+    private List<ReviewTasks.Job> releaseAliases(ReadyCheck check, List<ReadyCheck> aliases,
+                                                   Map<String, EvidenceSession.VerificationBrief> briefs) throws IOException {
+        if (aliases.isEmpty()) return List.of();
+        var first = check.candidate;
+        var decision = check.decision;
+        var confirmed = decision.verdict().confirmed();
+        if (!PublicationGate.ready(decision, session.index(), evidence.scope().targetCommit())
+                || !confirmed.path().equals(first.path()) || confirmed.line() != first.line() || confirmed.endLine() != first.endLine()
+                || !confirmed.trigger().equals(first.trigger()) || !confirmed.impact().equals(first.impact())) {
+            var jobs = new ArrayList<ReviewTasks.Job>();
+            for (var alias : aliases) {
+                alias.additions = check.additions;
+                alias.pinned.addAll(sourceIds(check.additions));
+                jobs.add(alias.prepare(initialMember(alias, briefs)));
+            }
+            return jobs;
+        }
+        for (var alias : aliases) {
+            var finding = alias.candidate;
+            var verdict = new ReviewOutput.Verification(finding, ReviewOutput.Status.CONFIRMED,
+                    decision.verdict().reason(), confirmed.withId(finding.id()));
+            alias.decision = new ReviewOutput.Decision(verdict, decision.relation(), decision.baseline(),
+                    decision.contract(), decision.citations(), decision.support());
+            retainedEvidence.put(finding.id(), new LinkedHashSet<>(retainedEvidence.getOrDefault(first.id(), Set.of())));
+            session.recordVerificationReuse(finding.id(), first.id());
+        }
+        return List.of();
     }
 
     List<ReviewOutput.Decision> verifyScoped(List<ReviewOutput.Decision> candidates, Map<String, Set<String>> delivered,
                                             String folder, String outcomeRules, boolean allowBatch)
+            throws IOException, InterruptedException {
+        return verifyScoped(candidates, delivered, folder, outcomeRules, allowBatch, false);
+    }
+
+    List<ReviewOutput.Decision> verifyScoped(List<ReviewOutput.Decision> candidates, Map<String, Set<String>> delivered,
+                                            String folder, String outcomeRules, boolean allowBatch, boolean allowRefinement)
             throws IOException, InterruptedException {
         var previous = candidates.stream().collect(java.util.stream.Collectors.toMap(
                 decision -> decision.verdict().candidate().id(), Function.identity()));
@@ -84,7 +189,8 @@ final class ReviewQuality {
                     var sources = new LinkedHashSet<>(delivered.getOrDefault(candidate.id(), Set.of()));
                     sources.addAll(citationIds(previous.get(candidate.id()).citations()));
                     return sources;
-                }, folder, 5, "Independently verifying selected candidates", true, batchEligible, delivered);
+                }, folder, 5, "Independently verifying selected candidates",
+                allowRefinement ? Followups.SCOPED_REFINEMENT : Followups.SCOPED, batchEligible, delivered, List::size, null);
     }
 
     Adjudication adjudicate(List<ReviewOutput.Decision> preliminary, String assessment, Set<String> requirementCandidates)
@@ -99,9 +205,20 @@ final class ReviewQuality {
             return new Adjudication(List.of(), List.of());
         }
         List<ReviewFinding> candidates = toGroup.stream().map(d -> d.verdict().candidate()).toList();
+        boolean gated = PublicationGate.enabledFor(options);
+        EvidenceIndex index = session.index();
+        String target = evidence.scope().targetCommit();
+        if (gated && toGroup.stream().allMatch(decision -> PublicationGate.ready(decision, index, target))) {
+            var equivalents = toGroup.size() == 1
+                    ? List.of(List.of(toGroup.getFirst().verdict().candidate().id()))
+                    : SharedAdjudication.equivalentGroups(toGroup);
+            if (equivalents.size() == 1 && equivalents.getFirst().size() == toGroup.size()) {
+                return new Adjudication(toGroup, equivalents, directPublicationNote(toGroup.getFirst(), equivalents.getFirst()));
+            }
+        }
         List<List<String>> groups;
         try {
-            var groupsReply = tasks(List.of(new ReviewTasks.Task("groups", prompts.groupCandidates(toGroup, session.index()),
+            var groupsReply = tasks(List.of(new ReviewTasks.Task("groups", prompts.groupCandidates(toGroup),
                     reply -> ReviewOutput.candidateGroups(reply, candidates))), "adjudication", 7, "Reconciling candidate verdicts");
             groups = ReviewOutput.candidateGroups(groupsReply.get("groups"), candidates);
         } catch (ReviewStageException failure) {
@@ -112,48 +229,93 @@ final class ReviewQuality {
         if (positives.isEmpty()) return new Adjudication(List.of(), groups);
 
         Map<String, List<ReviewOutput.Decision>> related = new LinkedHashMap<>();
-        Map<String, SharedAdjudication> shared = new LinkedHashMap<>();
-        Set<String> deferred = new LinkedHashSet<>();
+        Set<String> covered = new LinkedHashSet<>();
+        var sharedProofs = new LinkedHashMap<String, List<ReviewOutput.Decision>>();
+        var published = new ArrayList<ReviewOutput.Decision>();
+        var directNotes = new StringBuilder();
+        var sharingNotes = new StringBuilder();
         for (List<String> ids : groups) {
             List<ReviewOutput.Decision> members = preliminary.stream().filter(d -> ids.contains(d.verdict().candidate().id())).toList();
             for (String id : ids) related.put(id, members);
             if (ids.stream().anyMatch(requirementCandidates::contains)) continue;
-            var proposed = SharedAdjudication.eligible(members, evidence.scope(), session.catalog());
-            if (proposed != null) {
-                shared.put(proposed.candidateIds().getFirst(), proposed);
-                deferred.addAll(proposed.candidateIds().subList(1, proposed.candidateIds().size()));
+            if (gated && members.stream().allMatch(member -> member.verdict().status() == ReviewOutput.Status.CONFIRMED)) {
+                for (var member : members) {
+                    if (!PublicationGate.ready(member, index, target)) continue;
+                    published.add(member);
+                    var id = member.verdict().candidate().id();
+                    covered.add(id);
+                    directNotes.append(directPublicationNote(member, List.of(id)));
+                }
+            }
+            for (List<String> equivalent : SharedAdjudication.equivalentGroups(members)) {
+                var awaiting = equivalent.stream().filter(id -> !covered.contains(id)).toList();
+                if (awaiting.size() < 2) continue;
+                String representative = awaiting.getFirst();
+                covered.addAll(awaiting.subList(1, awaiting.size()));
+                sharingNotes.append("- ").append(representative).append(" is the publication task for ")
+                        .append(String.join(", ", awaiting)).append(" (identical independently verified claim and proof).\n");
+            }
+            if (gated && members.stream().noneMatch(member -> member.verdict().status() == ReviewOutput.Status.REJECTED
+                    || member.verdict().status() == ReviewOutput.Status.DISPUTED)) {
+                var awaiting = members.stream().filter(member -> !covered.contains(member.verdict().candidate().id()))
+                        .filter(member -> PublicationGate.ready(member, index, target)).toList();
+                if (awaiting.size() > 1 && awaiting.stream().map(member -> member.verdict().confirmed().severity()).distinct().count() == 1) {
+                    var representative = PublicationGate.representative(awaiting, index, target);
+                    if (representative != null) {
+                        var aliases = awaiting.stream().filter(member -> member != representative).toList();
+                        sharedProofs.put(representative.verdict().candidate().id(), aliases);
+                        aliases.forEach(member -> covered.add(member.verdict().candidate().id()));
+                    }
+                }
             }
         }
-        VerificationPrompt publicationPrompt = (candidate, view) -> {
-            var proposal = shared.get(candidate.id());
-            return prompts.adjudicate(view.bundle(), candidate, related.get(candidate.id()), "", view.index())
-                    + "\nINDEPENDENTLY AUDITED REQUIREMENT ASSESSMENT\n"
-                    + "Recheck any contradiction between the proposed finding and this assessment against the source.\n" + assessment
-                    + (proposal == null ? "" : "\n\n" + proposal.instructions());
-        };
+
+        var tasks = positives.stream().filter(candidate -> !covered.contains(candidate.id())).toList();
+        var potentialTasks = new ArrayList<>(tasks);
+        sharedProofs.values().stream().flatMap(List::stream).map(alias -> alias.verdict().confirmed()).forEach(potentialTasks::add);
+        var preparation = preparePublication(potentialTasks, related);
+        String assessedEvidence = "\nINDEPENDENTLY AUDITED REQUIREMENT ASSESSMENT\n"
+                + "Recheck any contradiction between the proposed finding and this assessment against the source.\n" + assessment;
+        VerificationPrompt publicationPrompt = (candidate, view) ->
+                prompts.adjudicate(view.bundle(), candidate, related.get(candidate.id()), "", view.index(),
+                        gated || options.batchedVerification(), preparation == null ? "" : preparation.context(candidate.id(), view))
+                        + assessedEvidence;
+        VerificationBatch.Prompt publicationBatch = (members, view) -> prompts.adjudicateBatch(view, members,
+                candidate -> (preparation == null ? "" : preparation.context(candidate.id(), view))
+                        + "\n" + PromptFactory.publicationContext(related.get(candidate.id()), view.index()),
+                assessedEvidence);
         Function<ReviewFinding, Set<String>> publicationEvidence = candidate -> groupEvidence(related.get(candidate.id()));
-        var decisions = new LinkedHashMap<String, ReviewOutput.Decision>();
-        var firstPass = positives.stream().filter(candidate -> !deferred.contains(candidate.id())).toList();
-        for (var decision : verifyRounds(firstPass, publicationPrompt, publicationEvidence,
-                "adjudication", 7, "Adjudicating findings before publication"))
-            decisions.put(decision.verdict().candidate().id(), decision);
-
-        var sharingNotes = new StringBuilder();
-        for (var entry : shared.entrySet()) {
-            var proposal = entry.getValue();
-            if (!proposal.accepts(decisions.get(entry.getKey()), evidence.scope(), session.catalog())) continue;
-            deferred.removeAll(proposal.candidateIds());
-            sharingNotes.append("- ").append(entry.getKey()).append(" covers ")
-                    .append(String.join(", ", proposal.candidateIds())).append(" in one validated publication verdict.\n");
+        java.util.function.ToIntFunction<List<String>> publicationWork = ids ->
+                (int) ids.stream().map(id -> related.get(id).getFirst().verdict().candidate().id()).distinct().count();
+        var ruled = verifyDeep(tasks, publicationPrompt, publicationBatch, publicationEvidence,
+                "adjudication", 7, "Adjudicating findings before publication", false, Map.of(), publicationWork, preparation);
+        published.addAll(ruled);
+        var fallback = new ArrayList<ReviewFinding>();
+        if (!sharedProofs.isEmpty()) {
+            var finalIndex = session.index();
+            for (var decision : ruled) {
+                String id = decision.verdict().candidate().id();
+                for (var alias : sharedProofs.getOrDefault(id, List.of())) {
+                    if (PublicationGate.representative(List.of(decision, alias), finalIndex, target) == null
+                            || decision.verdict().confirmed().severity() != alias.verdict().confirmed().severity()) {
+                        fallback.add(alias.verdict().confirmed());
+                        continue;
+                    }
+                    sharingNotes.append("- ").append(id).append(" is the publication task for ")
+                            .append(alias.verdict().candidate().id()).append(" (shared pinned trigger and outcome).\n");
+                }
+            }
+            published.addAll(verifyDeep(fallback, publicationPrompt, publicationBatch, publicationEvidence,
+                    "adjudication", 7, "Checking findings with a distinct publication verdict", false, Map.of(), publicationWork, preparation));
         }
-        var remaining = positives.stream().filter(candidate -> deferred.contains(candidate.id())).toList();
-        for (var decision : verifyRounds(remaining, publicationPrompt, publicationEvidence,
-                "adjudication", 7, "Adjudicating findings separately"))
-            decisions.put(decision.verdict().candidate().id(), decision);
+        String note = (directNotes.isEmpty() ? "" : "\n## Publication from independent verification\n\n" + directNotes)
+                + (sharingNotes.isEmpty() ? "" : "\n## Shared publication adjudication\n\n" + sharingNotes);
+        return new Adjudication(resolveConflicts(published, groups, OutputLanguage.EN), groups, note);
+    }
 
-        var adjudicated = positives.stream().map(candidate -> decisions.get(candidate.id())).filter(java.util.Objects::nonNull).toList();
-        String note = sharingNotes.isEmpty() ? "" : "\n## Shared publication adjudication\n\n" + sharingNotes;
-        return new Adjudication(resolveConflicts(adjudicated, groups, OutputLanguage.parse(options.language())), groups, note);
+    private static String directPublicationNote(ReviewOutput.Decision decision, List<String> ids) {
+        return "- Published " + decision.verdict().confirmed().id() + " from its grounded independent verification for "
+                + String.join(", ", ids) + ".\n";
     }
 
     static List<ReviewOutput.Decision> resolveConflicts(List<ReviewOutput.Decision> decisions, List<List<String>> groups,
@@ -194,40 +356,420 @@ final class ReviewQuality {
         return ids;
     }
 
+    private void rememberPublicationQuestion(ReviewOutput.Decision decision, ReviewOutput.Followup followup) {
+        var verdict = decision.verdict();
+        String id = verdict.candidate().id();
+        pendingPublicationQuestions.remove(id);
+        if (followup == null || verdict.status() != ReviewOutput.Status.INSUFFICIENT_EVIDENCE || verdict.nextCheck().isBlank()) return;
+        String requests = EvidenceRequest.parse(followup.requests()).stream()
+                .filter(this::publicationSourceRequest).map(EvidenceRequest::text).collect(Collectors.joining("\n"));
+        if (!requests.isEmpty()) pendingPublicationQuestions.put(id, new PublicationQuestion(id, verdict.nextCheck(), requests));
+    }
+
+    private boolean publicationSourceRequest(EvidenceRequest request) {
+        if (!request.text().startsWith("REQUEST_FILE|") || !session.requestOnly(request.text())) return false;
+        String[] fields = request.text().split("\\|", 5);
+        return !fields[3].equals("index") && !fields[3].startsWith("references:");
+    }
+
+    private PublicationPreparation preparePublication(List<ReviewFinding> tasks, Map<String, List<ReviewOutput.Decision>> related)
+            throws InterruptedException {
+        if (pendingPublicationQuestions.isEmpty()) return null;
+        var questions = new LinkedHashMap<String, List<PublicationQuestion>>();
+        var unique = new LinkedHashSet<PublicationQuestion>();
+        for (var candidate : tasks) {
+            var open = related.get(candidate.id()).stream()
+                    .map(member -> pendingPublicationQuestions.get(member.verdict().candidate().id()))
+                    .filter(java.util.Objects::nonNull).toList();
+            if (open.isEmpty()) continue;
+            questions.put(candidate.id(), open);
+            unique.addAll(open);
+        }
+        if (unique.isEmpty()) return null;
+        var before = session.catalog();
+        String supplemental = session.markdown();
+        String requests = unique.stream().map(PublicationQuestion::requests).collect(Collectors.joining("\n"));
+        session.load(requests, "Preparing evidence for first publication adjudication");
+        var sources = new LinkedHashMap<PublicationQuestion, Set<String>>();
+        for (var question : unique) sources.put(question, session.delivery(question.requests(), EvidenceCatalog.empty()));
+        return new PublicationPreparation(before, supplemental, questions, sources);
+    }
+
+    private VerificationEvidence includePublicationSources(PublicationPreparation preparation, ReviewFinding candidate,
+            VerificationEvidence view, VerificationPrompt prompt, EvidenceCatalog available, int limit) {
+        if (preparation == null) return view;
+        var extra = preparation.sourcesFor(candidate.id());
+        if (extra.isEmpty()) return view;
+        var enriched = view.withSources(available, extra);
+        return enriched == view || EvidenceText.bytes(prompt.build(candidate, enriched)) <= limit ? enriched : view;
+    }
+
+    private List<ReviewOutput.Decision> verifyDeep(List<ReviewFinding> findings, VerificationPrompt individual,
+            VerificationBatch.Prompt render, Function<ReviewFinding, Set<String>> requiredSources,
+            String folder, int stage, String description, boolean candidateVerification,
+            Map<String, EvidenceSession.VerificationBrief> briefs,
+            java.util.function.ToIntFunction<List<String>> workCount, PublicationPreparation preparation)
+            throws IOException, InterruptedException {
+        boolean batchEnabled = options.batchedVerification();
+        if (findings.isEmpty()) return List.of();
+        var root = Files.createDirectories(directory.resolve(folder));
+        var available = preparation == null ? session.catalog() : preparation.original();
+        String supplemental = preparation == null ? session.markdown() : preparation.supplemental();
+        var checks = new LinkedHashMap<String, ReadyCheck>();
+        for (var finding : findings)
+            checks.put(finding.id(), new ReadyCheck(finding, individual, requiredSources.apply(finding), available, supplemental, root,
+                    candidateVerification, preparation));
+
+        var aliases = candidateVerification && PublicationGate.enabledFor(options)
+                ? verificationAliases(List.copyOf(checks.values()), briefs) : Map.<String, List<ReadyCheck>>of();
+        var held = aliases.values().stream().flatMap(List::stream).collect(java.util.stream.Collectors.toSet());
+        var representatives = checks.values().stream().filter(check -> !held.contains(check)).toList();
+
+        var batches = new LinkedHashMap<String, VerificationBatch.Validation>();
+        var members = new LinkedHashMap<String, VerificationBatch.Member>();
+        var grouped = new LinkedHashSet<String>();
+        var initial = new ArrayList<ReviewTasks.Job>();
+        int maximum = Math.min(options.maxEvidenceBytes(), agent.promptBudget().bytes());
+        boolean autoBatch = !batchEnabled && candidateVerification && !options.incremental()
+                && PublicationGate.enabledFor(options) && options.verificationEvidence() != CliOptions.VerificationEvidenceMode.FULL;
+        if (batchEnabled) {
+            var paths = new LinkedHashMap<String, List<ReadyCheck>>();
+            for (var check : representatives)
+                paths.computeIfAbsent(check.candidate.path(), unused -> new ArrayList<>()).add(check);
+            for (var checksOnPath : paths.values()) {
+                var plan = VerificationBatch.plan(checksOnPath.stream().map(check -> check.propose(false)).toList(), render, maximum);
+                if (candidateVerification && options.verificationEvidence() != CliOptions.VerificationEvidenceMode.FULL) {
+                    var narrower = VerificationBatch.plan(checksOnPath.stream().map(check -> check.propose(true)).toList(), render, maximum);
+                    if (narrower.improvesOn(plan)) {
+                        plan = narrower;
+                        checksOnPath.forEach(check -> check.compact = true);
+                    }
+                }
+                if (!briefs.isEmpty()) {
+                    var withHandoff = plan.members().stream().map(member ->
+                            withHandoff(checks.get(member.candidate().id()), member, briefs, maximum)).toList();
+                    // Batch only candidates whose prepared evidence matches.
+                    if (!withHandoff.equals(plan.members())) plan = VerificationBatch.plan(withHandoff, render, maximum);
+                }
+                for (var member : plan.members()) members.put(member.candidate().id(), member);
+                for (var batch : plan.batches()) {
+                    batches.put(batch.id(), new VerificationBatch.Validation(batch));
+                    batch.members().forEach(member -> grouped.add(member.candidate().id()));
+                }
+            }
+        } else if (autoBatch) {
+            var peers = representatives.stream().collect(Collectors.groupingBy(check -> check.candidate.path(),
+                    LinkedHashMap::new, Collectors.toList()));
+            for (var checksOnPath : peers.values()) {
+                if (checksOnPath.size() < 2 || checksOnPath.stream().noneMatch(first -> checksOnPath.stream()
+                        .anyMatch(next -> sharedVerificationAnchor(first.candidate, next.candidate)))) continue;
+                var plan = VerificationBatch.plan(checksOnPath.stream().map(check -> initialMember(check, briefs)).toList(),
+                        render, maximum, ReviewQuality::sharedVerificationAnchor);
+                for (var member : plan.members()) members.put(member.candidate().id(), member);
+                for (var batch : plan.batches()) {
+                    batches.put(batch.id(), new VerificationBatch.Validation(batch));
+                    batch.members().forEach(member -> grouped.add(member.candidate().id()));
+                }
+            }
+        }
+
+        // Keep the original queue priority: a batch occupies its first member's slot.
+        for (var check : representatives) {
+            String id = check.candidate.id();
+            var member = members.get(id);
+            if (member == null) member = initialMember(check, briefs);
+            var job = check.prepare(member);
+            var validation = batches.get("batch-" + id);
+            if (validation != null) {
+                var batch = validation.batch;
+                var view = member.view();
+                int bytes = EvidenceText.bytes(batch.prompt());
+                agent.timings().prepared(root.resolve(batch.id()), bytes, bytes,
+                        view.bundle().catalog().sources().size(), view.totalSources());
+                AtomicFiles.write(root.resolve(batch.id() + "-evidence.md"), view.manifest(bytes, bytes));
+                initial.add(new ReviewTasks.Job(root, new ReviewTasks.Task(batch.id(), batch.prompt(), validation)));
+            } else if (!grouped.contains(id)) {
+                initial.add(job);
+            }
+        }
+
+        // Deferred aliases may still need independent verification if the representative cannot certify them.
+        int work = workCount.applyAsInt(findings.stream().map(ReviewFinding::id).toList());
+        String phase = candidateVerification ? "VERIFICATION" : "ADJUDICATION";
+        var refined = new LinkedHashSet<String>();
+        OutputLanguage language = OutputLanguage.EN;
+        Path history = directory.resolve(candidateVerification ? ".verification-parallelism" : ".adjudication-parallelism");
+        try (var concurrency = agent.phaseConcurrency(initial, work, options, stage, phase, history)) {
+            ReviewTasks.runReady(initial, agent, root, concurrency.maximum(), progress, stage, stages, description,
+                    options.resumeDirectory() != null, concurrency.admission(), (job, outcome) -> {
+                        var validation = batches.get(job.task().id());
+                        if (validation == null) {
+                            var check = checks.get(job.task().id());
+                            var next = check.complete(outcome, refined, language);
+                            return next == null ? releaseAliases(check, aliases.getOrDefault(check.candidate.id(), List.of()), briefs)
+                                    : List.of(next);
+                        }
+                        var batch = validation.batch;
+                        var replies = outcome.valid() ? validation.replies() : new VerificationBatch.Replies(Map.of(), Map.of());
+                        var accepted = replies.accepted();
+                        session.recordVerificationBatch(folder + "/" + batch.id(),
+                                batch.members().stream().map(member -> member.candidate().id()).toList(), accepted.keySet());
+                        var ready = new ArrayList<ReviewTasks.Job>();
+                        for (var member : batch.members()) {
+                            var check = checks.get(member.candidate().id());
+                            String response = accepted.get(member.candidate().id());
+                            if (response != null) {
+                                var next = check.complete(new ReviewTasks.Outcome(response, null), refined, language);
+                                if (next != null) ready.add(next);
+                                else ready.addAll(releaseAliases(check, aliases.getOrDefault(check.candidate.id(), List.of()), briefs));
+                            } else {
+                                var next = check.collectBatchGap(replies.evidenceGaps().get(member.candidate().id()));
+                                ready.add(next != null ? next : new ReviewTasks.Job(job.directory(), member.task()));
+                            }
+                        }
+                        return ready;
+                    });
+        }
+        saveEvidence();
+        return findings.stream().map(finding -> checks.get(finding.id()).decision).toList();
+    }
+
+    private VerificationBatch.Member initialMember(ReadyCheck check, Map<String, EvidenceSession.VerificationBrief> briefs) {
+        return withHandoff(check, check.propose(false), briefs,
+                Math.min(options.maxEvidenceBytes(), agent.promptBudget().bytes()));
+    }
+
+    private VerificationBatch.Member withHandoff(ReadyCheck check, VerificationBatch.Member member,
+            Map<String, EvidenceSession.VerificationBrief> briefs, int maximum) {
+        var brief = briefs.getOrDefault(check.candidate.id(), EvidenceSession.VerificationBrief.EMPTY);
+        var sources = brief.sources();
+        var visible = sourceIds(member.view().bundle().catalog());
+        if (visible.containsAll(sources)) return member;
+        var enriched = check.propose(check.compact, sources);
+        if (EvidenceText.bytes(enriched.task().prompt()) <= maximum) return enriched;
+
+        // Keep the initial view and admit complete sets of collected sources one premise at a time.
+        var pinned = new LinkedHashSet<String>();
+        var selected = member;
+        for (var group : brief.premiseSources()) {
+            if (sourceIds(selected.view().bundle().catalog()).containsAll(group)) continue;
+            var next = new LinkedHashSet<>(pinned);
+            next.addAll(group);
+            var proposal = check.propose(check.compact, next);
+            if (EvidenceText.bytes(proposal.task().prompt()) <= maximum) {
+                pinned = next;
+                selected = proposal;
+            }
+        }
+        return selected;
+    }
+
+    /** A continuation sees its initial evidence plus the blocks delivered to its own question. */
+    private final class ReadyCheck {
+        private final ReviewFinding candidate;
+        private final VerificationPrompt prompt;
+        private final EvidenceCatalog original;
+        private final String supplemental;
+        private final Path root;
+        private final boolean candidateVerification;
+        private final PublicationPreparation publication;
+        private boolean compact;
+        private final Set<String> pinned;
+        private EvidenceCatalog additions = EvidenceCatalog.empty();
+        private Set<String> delivered = Set.of();
+        private int round = 1;
+        private ReviewOutput.Decision decision;
+        private VerificationContinuation continuation;
+        private VerificationEvidence view;
+        private boolean needsVerdict;
+
+        ReadyCheck(ReviewFinding candidate, VerificationPrompt prompt, Set<String> required, EvidenceCatalog original,
+                   String supplemental, Path root, boolean candidateVerification, PublicationPreparation publication) {
+            this.candidate = candidate;
+            this.prompt = prompt;
+            this.original = original;
+            this.supplemental = supplemental;
+            this.root = root;
+            this.candidateVerification = candidateVerification;
+            this.publication = publication;
+            this.pinned = new LinkedHashSet<>(required);
+        }
+
+        private Path path() { return round == 1 ? root : root.resolve("round-" + round); }
+
+        private EvidenceCatalog available() {
+            return additions.sources().isEmpty() ? original : original.plus(additions);
+        }
+
+        private String supplemental() {
+            return supplemental + additions.sources().stream().map(EvidenceSource::markdown)
+                    .collect(java.util.stream.Collectors.joining());
+        }
+
+        ReviewTasks.Job prepare(VerificationBatch.Member member) throws IOException {
+            Path path = Files.createDirectories(path());
+            view = member.view();
+            Set<String> offered = sourceIds(view.bundle().catalog());
+            if (publication != null && round == 1) {
+                var extra = new LinkedHashSet<>(offered);
+                extra.removeAll(sourceIds(original));
+                if (!extra.isEmpty()) additions = additions.plus(view.bundle().catalog().select(extra));
+            }
+            pinned.addAll(offered);
+            retainedEvidence.computeIfAbsent(candidate.id(), unused -> new LinkedHashSet<>()).addAll(offered);
+            int selectedBytes = EvidenceText.bytes(member.task().prompt());
+            int fullBytes = view.fallback() ? selectedBytes : EvidenceText.bytes(promptText(
+                    VerificationEvidence.select(evidence, available(), supplemental(), candidate, pinned, true)));
+            agent.timings().prepared(path.resolve(candidate.id()), fullBytes, selectedBytes, offered.size(), view.totalSources());
+            AtomicFiles.write(path.resolve(candidate.id() + "-evidence.md"), view.manifest(fullBytes, selectedBytes));
+            var task = member.task();
+            var unit = incremental != null && candidateVerification && round == 1 && !options.batchedVerification()
+                    ? incremental.unit(candidate) : null;
+            if (unit != null) task = task.withCache(incremental.entry(unit, "verification/" + task.id(), task.prompt(),
+                    task.model(), view.bundle().catalog(), true));
+            return new ReviewTasks.Job(path, task);
+        }
+
+        private String promptText(VerificationEvidence supplied) {
+            String instruction = needsVerdict ? """
+
+                    The earlier request-only reply has been processed. Return a complete <verification> block now.
+                    Use INSUFFICIENT_EVIDENCE if the supplied material still leaves a decisive gap.
+                    """ : "";
+            return prompt.build(candidate, supplied) + (continuation == null ? "" : continuation.markdown(supplied)) + instruction;
+        }
+
+        VerificationBatch.Member propose(boolean narrow) {
+            return propose(narrow, Set.of());
+        }
+
+        VerificationBatch.Member propose(boolean narrow, Set<String> discoverySources) {
+            var selected = pinned;
+            if (!discoverySources.isEmpty()) {
+                selected = new LinkedHashSet<>(pinned);
+                selected.addAll(discoverySources);
+            }
+            var supplied = VerificationEvidence.select(evidence, available(), supplemental(), candidate, selected,
+                    options.verificationEvidence() == CliOptions.VerificationEvidenceMode.FULL, narrow);
+            boolean first = round == 1;
+            var requestView = first && publication != null ? includePublicationSources(publication, candidate, supplied, prompt,
+                    session.catalog(), Math.min(options.maxEvidenceBytes(), agent.promptBudget().bytes())) : supplied;
+            var task = new ReviewTasks.Task(candidate.id(), promptText(requestView), new ReviewTasks.Validator() {
+                @Override public void validate(String reply) throws IOException {
+                    if (!(first && session.requestOnly(reply) && EvidenceRequest.parse(reply).size() == 1))
+                        ReviewGrounding.verification(reply, candidate, requestView.bundle(), requestView.index());
+                }
+
+                @Override public String corrected(String response, IOException failure) throws IOException {
+                    return failure instanceof SourceQuotationException
+                            ? ReviewGrounding.recoverPendingCitations(response, candidate, requestView.bundle(), requestView.index())
+                            : response;
+                }
+            });
+            return new VerificationBatch.Member(candidate, requestView, task);
+        }
+
+        ReviewTasks.Job complete(ReviewTasks.Outcome outcome, Set<String> refined, OutputLanguage language)
+                throws IOException, InterruptedException {
+            String folder = directory.relativize(path()).toString().replace('\\', '/');
+            if (candidateVerification) pendingPublicationQuestions.remove(candidate.id());
+            if (!outcome.valid()) {
+                decision = invalidCandidate(candidate, folder, outcome, language);
+                return null;
+            }
+            String response = outcome.response();
+            boolean requestOnly = session.requestOnly(response);
+            decision = requestOnly ? unfinishedCandidate(candidate, language.text(
+                    "The reply requested evidence. A validated verification verdict is still pending.",
+                    "回复仅请求了证据，尚无经过校验的复核结论。"))
+                    : ReviewGrounding.verification(response, candidate, view.bundle(), view.index());
+            if (decision.verdict().status() != ReviewOutput.Status.INSUFFICIENT_EVIDENCE) return null;
+            var followup = requestOnly ? new ReviewOutput.Followup(response, "") : ReviewOutput.verificationFollowup(response);
+            if (candidateVerification) rememberPublicationQuestion(decision, followup);
+            String task = folder + "/" + candidate.id();
+            String requests = eligibleRequests(decision, followup, Followups.DECISIVE, requestOnly,
+                    round > 1 || !session.initialRequests(candidate.id()).isBlank(), delivered, refined, task);
+            if (EvidenceRequest.parse(requests).isEmpty() && !requestOnly) return null;
+            session.load(requests, task + " evidence");
+            var previousView = view.bundle().catalog();
+            delivered = options.batchedVerification() ? session.deliverDecisive(task, requests, previousView)
+                    : session.deliverScoped(task, requests, previousView);
+            if (delivered.isEmpty() && !requestOnly) return null;
+
+            continuation = new VerificationContinuation(decision, requests, session.lastCoverage(), sourceIds(previousView));
+            needsVerdict = requestOnly && delivered.isEmpty();
+            return continueWithEvidence();
+        }
+
+        ReviewTasks.Job collectBatchGap(VerificationBatch.EvidenceGap gap) throws IOException, InterruptedException {
+            if (gap == null) return null;
+            String task = directory.relativize(path()).resolve(candidate.id()).toString();
+            session.load(gap.requests(), task + " evidence from an unvalidated batch verdict");
+            var previousView = view.bundle().catalog();
+            Set<String> sources = session.deliverScoped(task, gap.requests(), previousView);
+            if (sources.isEmpty()) return null;
+            delivered = sources;
+            continuation = new VerificationContinuation(null, gap.requests(), session.lastCoverage(), sourceIds(previousView), gap.question());
+            return continueWithEvidence();
+        }
+
+        private ReviewTasks.Job continueWithEvidence() throws IOException {
+            additions = additions.plus(session.catalog().select(delivered));
+            pinned.addAll(delivered);
+            round++;
+            return prepare(propose(compact));
+        }
+    }
+
+    private static Set<String> sourceIds(EvidenceCatalog catalog) {
+        return catalog.sources().stream().map(EvidenceSource::id)
+                .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
+    }
+
     private List<ReviewOutput.Decision> verifyRounds(List<ReviewFinding> findings, VerificationPrompt prompt,
             Function<ReviewFinding, Set<String>> requiredSources, String folder, int stage, String description)
             throws IOException, InterruptedException {
-        return verifyRounds(findings, prompt, requiredSources, folder, stage, description, false, Map.of(), Map.of());
+        return verifyRounds(findings, prompt, requiredSources, folder, stage, description,
+                Followups.STANDARD, Map.of(), Map.of(), List::size, null);
     }
 
     private List<ReviewOutput.Decision> verifyRounds(List<ReviewFinding> findings, VerificationPrompt prompt,
             Function<ReviewFinding, Set<String>> requiredSources, String folder, int stage, String description,
-            boolean newEvidenceOnly, Map<String, ReviewOutput.Decision> batchEligible, Map<String, Set<String>> initialDelivery)
+            Followups followups, Map<String, ReviewOutput.Decision> batchEligible, Map<String, Set<String>> initialDelivery,
+            java.util.function.ToIntFunction<List<String>> workCount, PublicationPreparation preparation)
             throws IOException, InterruptedException {
+        boolean newEvidenceOnly = followups != Followups.STANDARD;
         var results = new LinkedHashMap<String, ReviewOutput.Decision>();
         var priorPrompts = new LinkedHashMap<String, String>();
         var continuations = new LinkedHashMap<String, VerificationContinuation>();
         var awaitingVerdicts = new LinkedHashSet<String>();
+        var refinedPremises = new LinkedHashSet<String>();
         Map<String, Set<String>> lastDelivery = initialDelivery;
-        OutputLanguage language = OutputLanguage.parse(options.language());
+        OutputLanguage language = OutputLanguage.EN;
         List<ReviewFinding> pending = findings;
         int round = 1;
+        boolean publication = folder.equals("adjudication");
         while (!pending.isEmpty()) {
             String path = round == 1 ? folder : folder + "/round-" + round;
             Path taskDirectory = Files.createDirectories(directory.resolve(path));
-            EvidenceCatalog available = session.catalog();
-            String supplemental = session.markdown();
+            var collected = session.catalog();
+            var firstPublication = round == 1 ? preparation : null;
+            EvidenceCatalog available = firstPublication == null ? collected : firstPublication.original();
+            String supplemental = firstPublication == null ? session.markdown() : firstPublication.supplemental();
             var views = new LinkedHashMap<String, VerificationEvidence>();
             var tasks = new ArrayList<ReviewTasks.Task>();
             for (ReviewFinding candidate : pending) {
                 var pinned = new LinkedHashSet<>(requiredSources.apply(candidate));
                 pinned.addAll(retainedEvidence.getOrDefault(candidate.id(), Set.of()));
                 var full = VerificationEvidence.select(evidence, available, supplemental, candidate, pinned, true);
-                var view = options.verificationEvidence() == CliOptions.VerificationEvidenceMode.FULL ? full
+                var selected = options.verificationEvidence() == CliOptions.VerificationEvidenceMode.FULL ? full
                         : VerificationEvidence.select(evidence, available, supplemental, candidate, pinned, false);
+                var view = includePublicationSources(firstPublication, candidate, selected, prompt, collected,
+                        Math.min(options.maxEvidenceBytes(), agent.promptBudget().bytes()));
                 String basePrompt = prompt.build(candidate, view);
                 boolean unchanged = basePrompt.equals(priorPrompts.put(candidate.id(), basePrompt)) && results.containsKey(candidate.id());
-                boolean verdictRequired = unchanged && awaitingVerdicts.contains(candidate.id());
+                boolean waitingForVerdict = awaitingVerdicts.contains(candidate.id());
+                boolean verdictRequired = unchanged && waitingForVerdict;
                 boolean reuse = unchanged && !verdictRequired;
                 var continuation = continuations.get(candidate.id());
                 String followup = verdictRequired ? """
@@ -254,7 +796,10 @@ final class ReviewQuality {
                 tasks.add(new ReviewTasks.Task(candidate.id(), text, new ReviewTasks.Validator() {
                     @Override
                     public void validate(String reply) throws IOException {
-                        if (newEvidenceOnly || verdictRequired || !session.requestOnly(reply))
+                        boolean standalone = session.requestOnly(reply);
+                        boolean legacyRequest = followups == Followups.DECISIVE && continuation == null
+                                && standalone && EvidenceRequest.parse(reply).size() == 1;
+                        if (!legacyRequest && (newEvidenceOnly || verdictRequired || !standalone))
                             ReviewGrounding.verification(reply, candidate, view.bundle(), view.index());
                     }
 
@@ -266,8 +811,9 @@ final class ReviewQuality {
                 }));
             }
             if (tasks.isEmpty()) break;
+            String phase = publication ? "ADJUDICATION" : "VERIFICATION";
             var execution = runVerificationTasks(tasks, round == 1 ? batchEligible : Map.of(), views, taskDirectory,
-                    stage, description + " (round " + round + ")", language);
+                    stage, description + " (round " + round + ")", language, phase, workCount);
             var replies = execution.individual();
             results.putAll(execution.shared());
             StringBuilder evidenceRequests = new StringBuilder();
@@ -279,6 +825,7 @@ final class ReviewQuality {
                 awaitingVerdicts.remove(candidate.id());
                 if (!reply.valid()) {
                     results.put(candidate.id(), invalidCandidate(candidate, path, reply, language));
+                    if (!publication) pendingPublicationQuestions.remove(candidate.id());
                     continue;
                 }
                 String response = reply.response();
@@ -289,25 +836,12 @@ final class ReviewQuality {
                             "The reply requested evidence. A validated verification verdict is still pending.",
                             "回复仅请求了证据，尚无经过校验的复核结论。"))
                         : ReviewGrounding.verification(response, candidate, view.bundle(), view.index()));
-                var followup = requestOnly ? new ReviewOutput.Followup(response, false)
+                var followup = requestOnly ? new ReviewOutput.Followup(response, "")
                         : ReviewOutput.verificationFollowup(response);
-                String requests = followup.requests();
-                if (newEvidenceOnly && !requests.isBlank()) {
-                    var decision = results.get(candidate.id());
-                    if (decision.verdict().status() != ReviewOutput.Status.INSUFFICIENT_EVIDENCE) continue;
-                    var supplied = lastDelivery.getOrDefault(candidate.id(), Set.of());
-                    boolean answeringRequest = round > 1 || !session.initialRequests(candidate.id()).isBlank();
-                    if (answeringRequest && decision.citations().stream().noneMatch(citation -> supplied.contains(citation.sourceId()))) {
-                        session.recordFollowup(path + "/" + candidate.id(), requests, Set.of(),
-                                "Stopped; the verdict cites no newly supplied evidence for the remaining premise.");
-                        continue;
-                    }
-                    if (answeringRequest && !followup.answeredPreviousPremise()) {
-                        session.recordFollowup(path + "/" + candidate.id(), requests, Set.of(),
-                                "Stopped; the previous evidence question remains unanswered.");
-                        continue;
-                    }
-                }
+                if (!publication) rememberPublicationQuestion(results.get(candidate.id()), followup);
+                String requests = eligibleRequests(results.get(candidate.id()), followup, followups, requestOnly,
+                        round > 1 || !session.initialRequests(candidate.id()).isBlank(),
+                        lastDelivery.getOrDefault(candidate.id(), Set.of()), refinedPremises, path + "/" + candidate.id());
                 candidateRequests.put(candidate.id(), EvidenceRequest.parse(requests).stream().map(EvidenceRequest::text)
                         .collect(java.util.stream.Collectors.joining("\n")));
                 evidenceRequests.append(requests).append('\n');
@@ -330,30 +864,72 @@ final class ReviewQuality {
                 }
             }
             saveEvidence();
-            if (newEvidenceOnly ? delivered.isEmpty() : !material && delivered.isEmpty() && awaitingVerdicts.isEmpty()) break;
+            boolean needsVerdict = (followups == Followups.DECISIVE || !newEvidenceOnly) && !awaitingVerdicts.isEmpty();
+            if (delivered.isEmpty() && !needsVerdict && (newEvidenceOnly || !material)) break;
             lastDelivery = delivered;
             pending = findings.stream().filter(candidate -> results.get(candidate.id()).verdict().status()
                     == ReviewOutput.Status.INSUFFICIENT_EVIDENCE)
-                    .filter(candidate -> !newEvidenceOnly || delivered.containsKey(candidate.id())).toList();
+                    .filter(candidate -> !newEvidenceOnly || delivered.containsKey(candidate.id())
+                            || needsVerdict && awaitingVerdicts.contains(candidate.id())).toList();
             round++;
         }
         return findings.stream().map(candidate -> results.get(candidate.id())).toList();
+    }
+
+    private String eligibleRequests(ReviewOutput.Decision decision, ReviewOutput.Followup followup, Followups mode,
+                                    boolean requestOnly, boolean answering, Set<String> supplied,
+                                    Set<String> refined, String task) {
+        String requests = followup.requests();
+        if (mode == Followups.STANDARD || requests.isBlank()) return requests;
+        if (decision.verdict().status() != ReviewOutput.Status.INSUFFICIENT_EVIDENCE) return "";
+        if (mode == Followups.DECISIVE && !requestOnly && decision.verdict().nextCheck().isBlank()) {
+            session.recordFollowup(task, requests, Set.of(),
+                    "Stopped; the verdict did not identify a premise that further evidence could resolve.");
+            return "";
+        }
+        if (!answering) return requests;
+        if (decision.citations().stream().noneMatch(citation -> supplied.contains(citation.sourceId()))) {
+            session.recordFollowup(task, requests, Set.of(),
+                    "Stopped; the verdict cites no newly supplied evidence for the remaining premise.");
+            return "";
+        }
+        if (followup.answeredPreviousPremise()) return requests;
+        String concrete = EvidenceRequest.parse(requests).stream().filter(request -> !request.navigationOnly())
+                .map(EvidenceRequest::text).collect(java.util.stream.Collectors.joining("\n"));
+        boolean allowed = mode == Followups.DECISIVE || mode == Followups.SCOPED_REFINEMENT;
+        if (!allowed || !followup.previousPremise().equals("UNRESOLVED") || concrete.isBlank()
+                || decision.verdict().nextCheck().isBlank() || !provedNewImplementation(decision, supplied)
+                || !refined.add(decision.verdict().candidate().id())) {
+            session.recordFollowup(task, requests, Set.of(), "Stopped; the previous evidence question remains unanswered.");
+            return "";
+        }
+        session.recordFollowup(task, requests, Set.of(),
+                "New source supports part of the previous premise. Checking one more concrete evidence step.");
+        return concrete;
+    }
+
+    private static boolean provedNewImplementation(ReviewOutput.Decision decision, Set<String> supplied) {
+        return decision.support().premises().stream().filter(premise -> premise.basis() == ReviewSupport.Basis.IMPLEMENTATION)
+                .flatMap(premise -> premise.citations().stream()).anyMatch(citation -> supplied.contains(citation.sourceId())
+                        && !citation.locations().isEmpty());
     }
 
     private record VerificationReplies(Map<String, ReviewTasks.Outcome> individual, Map<String, ReviewOutput.Decision> shared) { }
 
     private VerificationReplies runVerificationTasks(List<ReviewTasks.Task> tasks, Map<String, ReviewOutput.Decision> eligible,
                                                         Map<String, VerificationEvidence> views, Path taskDirectory,
-                                                        int stage, String description, OutputLanguage language)
+                                                        int stage, String description, OutputLanguage language, String phase,
+                                                        java.util.function.ToIntFunction<List<String>> workCount)
             throws IOException, InterruptedException {
         boolean resume = options.resumeDirectory() != null;
         var taskIds = tasks.stream().map(ReviewTasks.Task::id).toList();
+        int work = workCount.applyAsInt(taskIds);
         var batches = ScopedVerificationBatch.plan(taskIds, eligible, views, language).stream()
                 .filter(batch -> !resume || Files.isRegularFile(taskDirectory.resolve(batch.id() + "-response.md"))
                         || batch.candidates().stream().noneMatch(candidate ->
                                 Files.isRegularFile(taskDirectory.resolve(candidate.id() + "-response.md")))).toList();
-        if (batches.isEmpty()) return new VerificationReplies(ReviewTasks.runIsolated(tasks, agent, taskDirectory,
-                options.reviewParallelism(), progress, stage, stages, description, resume), Map.of());
+        if (batches.isEmpty()) return new VerificationReplies(ReviewTasks.runPhase(tasks, agent, taskDirectory, options,
+                work, stage, stages, phase, description, progress, resume), Map.of());
 
         var planned = new ArrayList<ReviewTasks.Task>();
         var grouped = new LinkedHashSet<String>();
@@ -371,8 +947,8 @@ final class ReviewQuality {
             AtomicFiles.write(taskDirectory.resolve(batch.id() + "-evidence.md"), batch.view().manifest(bytes, bytes));
         }
         tasks.stream().filter(task -> !grouped.contains(task.id())).forEach(planned::add);
-        var replies = new LinkedHashMap<>(ReviewTasks.runIsolated(planned, agent, taskDirectory,
-                options.reviewParallelism(), progress, stage, stages, description, resume));
+        var replies = new LinkedHashMap<>(ReviewTasks.runPhase(planned, agent, taskDirectory, options, work,
+                stage, stages, phase, description, progress, resume));
         var verified = new LinkedHashMap<String, ReviewOutput.Decision>();
         for (var batch : batches) {
             var outcome = replies.remove(batch.id());
@@ -382,8 +958,9 @@ final class ReviewQuality {
                     batch.candidates().stream().map(ReviewFinding::id).toList(), accepted.keySet());
         }
         var retry = tasks.stream().filter(task -> grouped.contains(task.id()) && !verified.containsKey(task.id())).toList();
-        if (!retry.isEmpty()) replies.putAll(ReviewTasks.runIsolated(retry, agent, taskDirectory, options.reviewParallelism(),
-                progress, stage, stages, "Verifying unresolved batch candidates individually", resume));
+        if (!retry.isEmpty()) replies.putAll(ReviewTasks.runPhase(retry, agent, taskDirectory, options,
+                workCount.applyAsInt(retry.stream().map(ReviewTasks.Task::id).toList()), stage, stages, phase,
+                "Verifying unresolved batch candidates individually", progress, resume));
         return new VerificationReplies(replies, verified);
     }
 
@@ -407,8 +984,8 @@ final class ReviewQuality {
     }
 
     AssessmentFindings.Plan planAssessment(AssessmentResult assessed) throws IOException {
-        var plan = AssessmentFindings.plan(assessed.items(), evidence, session.index(), OutputLanguage.parse(options.language()));
-        AtomicFiles.write(directory.resolve("assessment-findings.md"), AssessmentFindings.markdown(plan, List.of(), OutputLanguage.parse(options.language())));
+        var plan = AssessmentFindings.plan(assessed.items(), evidence, session.index(), OutputLanguage.EN);
+        AtomicFiles.write(directory.resolve("assessment-findings.md"), AssessmentFindings.markdown(plan, List.of(), OutputLanguage.EN));
         return plan;
     }
 
@@ -421,7 +998,7 @@ final class ReviewQuality {
     AssessmentResult reconcileAssessment(AssessmentResult initial, AssessmentFindings.Plan plan,
                                          List<ReviewOutput.Decision> preliminary, List<ReviewOutput.Decision> adjudicated) throws IOException {
         if (initial.items().isEmpty()) return initial;
-        OutputLanguage language = OutputLanguage.parse(options.language());
+        OutputLanguage language = OutputLanguage.EN;
         var decisions = latest(preliminary, adjudicated);
         var items = AssessmentFindings.reconcile(initial.items(), plan, decisions, language);
         String details = ReviewReport.assessmentMarkdown(items, language);
@@ -437,7 +1014,7 @@ final class ReviewQuality {
     }
 
     AssessmentResult assess(InputDocument requirement, String decisions) throws IOException, InterruptedException {
-        OutputLanguage language = OutputLanguage.parse(options.language());
+        OutputLanguage language = OutputLanguage.EN;
         if (requirement == null) {
             String text = ReviewReport.assessmentMarkdown(List.of(), language);
             return new AssessmentResult(text, text);
@@ -512,7 +1089,13 @@ final class ReviewQuality {
         };
         String references = decision.citations().stream().map(c -> ReviewReport.citationReference(c, language))
                 .distinct().collect(java.util.stream.Collectors.joining("; "));
+        String trigger = EvidenceIndex.normalize(finding.trigger());
+        String impact = EvidenceIndex.normalize(finding.impact());
         String premises = decision.support().premises().stream().map(ReviewSupport.Premise::statement)
+                .filter(statement -> {
+                    String normalized = EvidenceIndex.normalize(statement);
+                    return !normalized.equals(trigger) && !normalized.equals(impact);
+                })
                 .collect(java.util.stream.Collectors.joining("; "));
         String support = language.text(decision.support().kind().name(), switch (decision.support().kind()) {
             case REACHABLE_FAILURE -> "可达故障";

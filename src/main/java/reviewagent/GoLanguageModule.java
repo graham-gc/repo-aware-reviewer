@@ -15,6 +15,7 @@ public final class GoLanguageModule implements LanguageModule {
         return supports(path.toLowerCase(java.util.Locale.ROOT)) || Set.of("go.mod", "go.sum", "go.work", "go.work.sum").contains(name);
     }
     public Lines locate(String source, String symbol) throws IOException { return GoSource.locate(source, symbol); }
+    public List<Lines> declarations(String source, String name) throws IOException { return List.of(locate(source, name)); }
     public Path defaultCache() {
         String explicit = System.getenv("GOMODCACHE");
         if (explicit != null && !explicit.isBlank()) return Path.of(explicit).toAbsolutePath().normalize();
@@ -172,10 +173,11 @@ public final class GoLanguageModule implements LanguageModule {
 
     public String requestInstructions() {
         return """
-                Go helpers: REQUEST_FILE|target|path/file.go|symbol:Name|reason
+                Go helpers: use REQUEST_FILE with a tracked Go path and symbol:Name for symbol lookup.
                 Name can be a function, type, variable, constant, or Receiver.Method (pointer receivers omit *).
+                A declaration:Name request uses the same lexical declaration locator in that file.
                 Symbol extraction is lexical, not type checking; ambiguous names require a qualified method/file.
-                REQUEST_LANGUAGE|target|go|path/to/context.go|example.com/module/pkg|index|reason
+                `REQUEST_LANGUAGE|{side}|go|{context}|{package or schema directory}|{selector}|{reason}`
                 The context is a tracked source file or go.mod that selects its nearest pinned module/workspace.
                 Resource is the exact imported package path (or a known schema directory for .proto files);
                 selector is index, symbol:Name, symbol:Receiver.Method,

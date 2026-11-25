@@ -28,6 +28,16 @@ final class RepositoryNavigationTests {
                 "navigation is bounded in UTF-8 bytes, prioritizes root documentation and never claims full repository coverage");
         require(RepositoryNavigation.source(repository, "base", List.of("file.py"), Set.of(), 100) == null,
                 "tiny evidence budgets retain code space instead of overflowing navigation");
+
+        String changed = "modules/payment/ui/invoice_app_bridge.tsx";
+        String api = "modules/payment/backend/api/invoice_apps_api.py";
+        String service = "modules/payment/backend/services/invoice_apps_service.py";
+        String unrelated = "modules/stock/backend/api/invoice_apps_api.py";
+        paths.addAll(List.of(changed, api, service, unrelated, "modules/payment/tests/test_invoice_apps_api.py"));
+        var prioritized = RepositoryNavigation.source(repository, "pinned-head", List.of(changed), Set.of(), 1_000);
+        require(prioritized.text().contains("- " + api + "\n") && prioritized.text().contains("- " + service + "\n")
+                && !prioritized.text().contains(unrelated) && EvidenceText.bytes(prioritized.markdown()) <= 1_000,
+                "known implementation paths for a changed feature receive room before related tests and docs consume the budget");
     }
     private static void require(boolean value, String message) { if (!value) throw new AssertionError(message); }
 }

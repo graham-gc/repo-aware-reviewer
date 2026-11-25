@@ -2,6 +2,10 @@ package reviewagent;
 
 record ReviewFinding(String id, String title, Severity severity, String path, int line, int endLine,
                      String trigger, String impact, String evidence, String diffRelation) {
+    ReviewFinding withId(String id) {
+        return new ReviewFinding(id, title, severity, path, line, endLine, trigger, impact, evidence, diffRelation);
+    }
+
     enum Severity {
         CRITICAL, HIGH, MEDIUM, LOW;
 

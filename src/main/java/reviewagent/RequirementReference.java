@@ -1,7 +1,6 @@
 package reviewagent;
 
 import java.io.IOException;
-import java.util.ArrayList;
 import java.util.List;
 
 /** References only the explicitly supplied primary requirements document, never a repository or knowledge block. */
@@ -27,20 +26,23 @@ final class RequirementReference {
                 .filter(line -> !line.isBlank() && !alignment(line)).toList();
         if (wanted.isEmpty()) return "";
         List<String> lines = document.content().lines().toList();
-        var ranges = new ArrayList<String>();
+        String selector = "";
         for (int start = 0; start < lines.size(); start++) {
             if (!EvidenceIndex.normalize(lines.get(start)).equals(wanted.getFirst())) continue;
             int matched = 0, last = start;
-            for (int line = start; line < lines.size() && line - start < 200; line++) {
+            for (int line = start; line < lines.size(); line++) {
                 String actual = EvidenceIndex.normalize(lines.get(line));
                 if (actual.isBlank() || alignment(actual)) continue;
                 if (!actual.equals(wanted.get(matched))) break;
                 last = line;
-                if (++matched == wanted.size()) { ranges.add((start + 1) + ":" + (last + 1)); break; }
+                if (++matched == wanted.size()) {
+                    if (!selector.isEmpty()) return "";
+                    selector = (start + 1) + ":" + (last + 1);
+                    break;
+                }
             }
         }
-        if (ranges.size() != 1) return "";
-        String selector = ranges.getFirst();
+        if (selector.isEmpty()) return "";
         try {
             return "\nExact primary-document selector (replace requirement, do not include both fields): <requirementLines>"
                     + selector + "</requirementLines>. The CLI extracts the original text; do not add Markdown separator rows.\n"

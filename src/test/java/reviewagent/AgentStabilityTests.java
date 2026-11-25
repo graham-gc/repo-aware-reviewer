@@ -14,6 +14,7 @@ import java.util.List;
 final class AgentStabilityTests {
     static void run() throws Exception {
         policies();
+        claudeStreaming();
         retriesAndArtifacts();
         sharedBudget();
         independentFailures();
@@ -25,11 +26,71 @@ final class AgentStabilityTests {
         sharedStageFailure();
     }
 
+    private static void claudeStreaming() throws Exception {
+        Path dir = Files.createTempDirectory("review-claude-stream-");
+        try {
+            Path command = dir.resolve("claude");
+            Files.writeString(command, """
+                    #!/bin/sh
+                    input=$(cat)
+                    case " $* " in
+                      *' --output-format json --json-schema '*)
+                        printf '%s\n' '{"type":"result","structured_output":{"ok":true}}'
+                        exit ;;
+                      *' --output-format stream-json --verbose --include-partial-messages '*) ;;
+                      *) exit 91 ;;
+                    esac
+                    printf '%s\n' '{"type":"system","subtype":"init"}'
+                    printf '%s\n' '{"type":"stream_event","event":{"type":"message_start"}}'
+                    printf '%s' '{"type":"stream_event","event":{"type":"content_block_delta",'
+                    sleep 0.02
+                    printf '%s\n' '"delta":{"type":"thinking_delta","thinking":"private diagnostic text"}}}'
+                    sleep 0.02
+                    printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"ignored partial"}}}'
+                    case "$input" in
+                      partial) exit ;;
+                      rate) printf '%s\n' '{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["API Error: 429"]}'
+                        exit 1 ;;
+                    esac
+                    printf '%s' '{"type":"result","subtype":"success","is_error":false,"result":"<findings/>","duration_ms":100,"duration_api_ms":75,"ttft_stream_ms":14,"ttft_ms":20,"num_turns":1}'
+                    """);
+            require(command.toFile().setExecutable(true), "can launch the local Claude fixture");
+            var timeout = Duration.ofSeconds(5);
+            var runner = new AgentRunner(new ProcessExecutor(), command.toString(), AgentRunner.defaultArguments(), dir, timeout,
+                    new AgentPolicy(0, 1, timeout, Duration.ZERO));
+            try (var task = runner.task(null, null, 2, "request", null, false)) {
+                require(runner.invoke("request", dir.resolve("R5")).equals("<findings/>"), "existing validators receive the terminal text only");
+            }
+            String execution = Files.readString(dir.resolve("R5-execution.log"));
+            require(execution.contains("claudeApiDurationMillis=75\n") && execution.contains("claudeTtftStreamMillis=14\n")
+                    && execution.matches("(?s).*firstThinkingDeltaMillis=[0-9]+\\n.*firstTextDeltaMillis=[0-9]+\\n.*")
+                    && Files.readString(dir.resolve("R5-stdout.log")).equals("<findings/>")
+                    && runner.timings().markdown(dir, OutputLanguage.EN).contains("## Claude stream timing"),
+                    "timing uses live thinking and text events without retaining thinking contents");
+            for (var expected : java.util.Map.of("partial", AgentCallException.Kind.STRUCTURED_OUTPUT,
+                    "rate", AgentCallException.Kind.RATE_LIMIT).entrySet()) {
+                try (var task = runner.task(null, null, 2, expected.getKey(), null, false)) {
+                    runner.invoke(expected.getKey(), dir.resolve(expected.getKey()));
+                    throw new AssertionError("Incomplete or failed stream was accepted");
+                } catch (AgentCallException failure) {
+                    require(failure.kind() == expected.getValue(), "incomplete and failed streams retain their failure classification");
+                }
+            }
+            try (var task = runner.task(null, "{}", 2, "schema", null, false)) {
+                require(runner.invoke("schema").contains("\"structured_output\""), "schema tasks retain their structured stdout contract");
+            }
+        } finally {
+            try (var paths = Files.walk(dir)) {
+                for (Path path : paths.sorted(java.util.Comparator.reverseOrder()).toList()) Files.delete(path);
+            }
+        }
+    }
+
     private static void policies() {
         var defaults = CliOptions.parse(new String[]{"review", "--repo", "."});
-        require(defaults.reviewParallelism() == 3 && defaults.agentPolicy().maxCalls() == 5
+        require(defaults.adaptiveParallelism() && defaults.agentPolicy().maxCalls() == 5
                 && defaults.agentPolicy().retries() == 1 && defaults.agentPolicy().taskTimeout().toSeconds() == 1800,
-                "parallelism stays unchanged; calls and elapsed time have explicit task budgets");
+                "automatic parallelism preserves explicit call and elapsed-time budgets");
         var custom = CliOptions.parse(new String[]{"review", "--repo", ".", "--agent-retries", "0",
                 "--agent-max-calls-per-task", "2", "--agent-task-timeout-seconds", "7"});
         require(custom.agentPolicy().retries() == 0 && custom.agentPolicy().maxCalls() == 2
@@ -175,23 +236,25 @@ final class AgentStabilityTests {
                 && Files.readString(run.resolve("report.md")).startsWith("> **Review incomplete:"), "a missing discovery role cannot be presented as full review coverage");
         require(Files.isRegularFile(run.resolve("discovery/R2-response.md")) && Files.isRegularFile(run.resolve("discovery/R3-response.md"))
                 && Main.reviewExitCode(run) == 3, "valid reviewers survive and the CLI indicates incomplete execution");
-        require(Files.readString(run.resolve("timings.md")).contains("Actual launched attempts: 3"),
+        require(Files.readString(run.resolve("timings.md")).contains("Actual launched attempts: 5"),
                 "an incomplete run records its actual calls without counting compatibility logs twice");
         Files.delete(dir.resolve("fail-r1"));
         args.addAll(List.of("--resume", run.toString(), "--review-parallelism", "1"));
         pipeline.run(CliOptions.parse(args.toArray(String[]::new)));
         require(Main.reviewExitCode(run) == 0 && Files.readString(run.resolve("review-status.md")).contains("COMPLETE"), "validated resume clears the missing discovery role");
         require(Files.readString(run.resolve("timings.md")).contains("Actual launched attempts: 1")
-                && Files.readString(run.resolve("timings.md")).contains("Valid cached tasks reused: 2"),
+                && Files.readString(run.resolve("timings.md")).contains("Valid cached tasks reused: 4"),
                 "resumed timing excludes earlier calls and reports cache reuse separately");
         require(Files.readString(dir.resolve("R1-count")).equals("xx") && Files.readString(dir.resolve("R2-count")).equals("x")
-                && Files.readString(dir.resolve("R3-count")).equals("x"), "changing parallelism does not rerun completed independent reviewers");
+                && Files.readString(dir.resolve("R3-count")).equals("x") && Files.readString(dir.resolve("R5-count")).equals("x")
+                && Files.readString(dir.resolve("R6-count")).equals("x"),
+                "changing parallelism does not rerun completed independent reviewers");
         Files.createFile(dir.resolve("fail-report"));
         args.remove(args.indexOf("--resume") + 1); args.remove("--resume");
         Path local = pipeline.run(CliOptions.parse(args.toArray(String[]::new)));
         require(Main.reviewExitCode(local) == 0 && !Files.exists(local.resolve("report-prompt.md"))
                 && Files.readString(local.resolve("report.md")).contains("Changed paths")
-                && Files.readString(local.resolve("timings.md")).contains("Actual launched attempts: 3"),
+                && Files.readString(local.resolve("timings.md")).contains("Actual launched attempts: 5"),
                 "valid findings can produce a complete report even when the agent would fail report generation");
     }
 
@@ -325,8 +388,12 @@ final class AgentStabilityTests {
                   'You are the discovery stage'*)
                     case "$prompt" in
                       *'Correctness and regressions.'*) role=R1;;
-                      *'Requirements and business contracts.'*) role=R2;;
-                      *) role=R3;;
+                      *'Business contracts and compatibility.'*) role=R2;;
+                      *'Failure handling and recovery.'*) role=R3;;
+                      *'Requirements compliance.'*) role=R4;;
+                      *'Security and isolation.'*) role=R5;;
+                      *'Boundary inputs and data conversion.'*) role=R6;;
+                      *) exit 10;;
                     esac
                     printf x >> "$role-count"
                     if [ "$role" = R1 ] && [ -f fail-r1 ]; then exit 9; fi

@@ -8,9 +8,10 @@ import java.util.List;
 final class EvidenceIndex {
     static final String LINE_CITATION_GUIDANCE = """
             Cite a numbered evidence block by copying its SRC reference from the block heading and the printed
-            line numbers before the pipe into <lines>first:last</lines>. These numbers belong to that block.
-            Use actual target-file coordinates for a finding's line and endLine. For verbatim quote citations,
-            copy the source text after the pipe. Use either quote or lines for each citation.
+            line numbers before the pipe into <lines>first:last</lines>. Keep the range inside that block and
+            select the smallest nonblank excerpt that proves the claim. Use actual target-file coordinates
+            for a finding's line and endLine. For <quote>, copy at least 12 normalized characters from the source.
+            Use either quote or lines for each citation.
 
             """;
 
@@ -34,6 +35,45 @@ final class EvidenceIndex {
     }
     String inventory() { return catalog.inventory(); }
     String numberedMarkdown(String markdown) { return catalog.numberedMarkdown(markdown); }
+
+    String verificationReferences(String path) {
+        var sources = catalog.sources();
+        var patches = sources.stream().filter(source -> source.role(EvidenceSource.Role.IMPLEMENTATION)
+                && source.role(EvidenceSource.Role.DIFF) && path.equals(source.path())).toList();
+        var baselinePaths = new java.util.HashSet<String>();
+        baselinePaths.add(path);
+        patches.forEach(source -> baselinePaths.add(source.baselinePath()));
+        var standalone = sources.stream().filter(source -> source.role(EvidenceSource.Role.IMPLEMENTATION)
+                && !source.role(EvidenceSource.Role.DIFF)).toList();
+        var baseline = standalone.stream().filter(source -> source.role(EvidenceSource.Role.BASELINE)
+                && baselinePaths.contains(source.path())).toList();
+        var hints = new StringBuilder();
+        appendReferences(hints, "DIFF", patches, EvidenceSource.Role.DIFF);
+        appendReferences(hints, "BASE_SOURCE", baseline, EvidenceSource.Role.BASELINE);
+        appendReferences(hints, "TARGET_SOURCE", standalone.stream()
+                .filter(source -> path.equals(source.path())).toList(), EvidenceSource.Role.TARGET);
+        appendReferences(hints, "CONTRACT", sources, EvidenceSource.Role.CONTRACT);
+        var documentation = sources.stream().filter(EvidenceIndex::isPinnedDocumentation).limit(5)
+                .map(catalog::reference).collect(java.util.stream.Collectors.joining(", "));
+        if (!documentation.isEmpty())
+            hints.append("- ").append(documentation).append(" (DOCUMENTATION premises for published wording)\n");
+        if (!hints.isEmpty() && sources.stream().noneMatch(EvidenceIndex::hasBaselineMaterial)) {
+            hints.append("No supplied block can provide baseline evidence for change attribution. ")
+                    .append("For INTRODUCED or EXPOSED_BY_CHANGE, request the necessary BASE_SOURCE excerpt before confirming. ")
+                    .append("UNMET_REQUIREMENT uses the applicable CONTRACT clause and target evidence.\n");
+        }
+        if (hints.isEmpty()) return "";
+        return "CITATION REFERENCES FOR THIS CANDIDATE\n"
+                + "Copy the reference before the parentheses into <source>. Inspect the actual lines and use the full inventory for related files.\n"
+                + hints + "\n";
+    }
+
+    private void appendReferences(StringBuilder hints, String label, List<EvidenceSource> sources, EvidenceSource.Role role) {
+        String references = sources.stream().filter(source -> source.role(role)).limit(5)
+                .map(catalog::reference).collect(java.util.stream.Collectors.joining(", "));
+        if (!references.isEmpty()) hints.append("- ").append(references).append(" (").append(label).append(")\n");
+    }
+
     String reference(String id) {
         EvidenceSource source = catalog.source(id);
         return source == null ? id : catalog.reference(source);
@@ -64,9 +104,11 @@ final class EvidenceIndex {
                 }
             }
             String quote = normalize(original);
-            if (source == null || quote.length() < 12 || !normalize(source.text()).contains(quote)) {
+            boolean tooShort = selectedLocations == null ? quote.length() < 12 : quote.isBlank();
+            if (source == null || tooShort || selectedLocations == null && !normalize(source.text()).contains(quote)) {
                 String cause = source == null ? "unknown or ambiguous source reference"
-                        : quote.length() < 12 ? "quote is too short; copy a longer contiguous excerpt (minimum 12 normalized characters)"
+                        : selectedLocations != null ? "selected lines contain no source text; choose a nonblank excerpt"
+                        : tooShort ? "quote is too short; copy a longer contiguous excerpt (minimum 12 normalized characters) or use numbered lines"
                         : "quote is absent from this source";
                 errors.add(EvidenceText.oneLine(citation.source()) + "; " + cause
                         + "; invalid quote: " + EvidenceText.oneLine(citation.quote())
@@ -118,8 +160,7 @@ final class EvidenceIndex {
                     + EvidenceText.oneLine(String.join("\n", lines.subList(best, Math.min(best + 3, lines.size()))))
                     + "\nRe-read the actual condition, method, arguments and values; a shared prefix does not establish equivalent behavior.";
         }
-        int count = Math.min(200, Math.max(3, (int) quotation.lines().count()));
-        int last = Math.min(best + count, lines.size());
+        int last = best + Math.min(lines.size() - best, Math.max(3, (int) quotation.lines().count()));
         String selector = (best + 1) + ":" + last;
         String hint = String.join("\n", lines.subList(best, last));
         return "\nProvided source with a matching prefix (hint only; the proposed quotation remains invalid). "
@@ -144,6 +185,17 @@ final class EvidenceIndex {
 
     boolean hasImplementation(List<Citation> citations) { return hasRole(citations, EvidenceSource.Role.IMPLEMENTATION); }
     boolean hasContract(List<Citation> citations) { return hasRole(citations, EvidenceSource.Role.CONTRACT); }
+    boolean hasPinnedDocumentation(List<Citation> citations) {
+        return citations.stream().anyMatch(citation -> {
+            var source = source(citation);
+            return source != null && isPinnedDocumentation(source)
+                    && citation.locations().stream().anyMatch(location -> EvidenceCatalog.documentationPath(location.path()));
+        });
+    }
+    private static boolean isPinnedDocumentation(EvidenceSource source) {
+        return source.authoritative() && EvidenceCatalog.documentationPath(source.path())
+                && !source.role(EvidenceSource.Role.CONTRACT) && !source.role(EvidenceSource.Role.INDEX);
+    }
     private boolean hasRole(List<Citation> citations, EvidenceSource.Role role) {
         return citations.stream().map(this::source).anyMatch(s -> s != null && s.role(role));
     }
@@ -152,8 +204,7 @@ final class EvidenceIndex {
             EvidenceSource source = source(c);
             return source != null && source.role(EvidenceSource.Role.BASELINE) && source.role(EvidenceSource.Role.IMPLEMENTATION)
                     && (!source.role(EvidenceSource.Role.DIFF)
-                        || source.text().lines().anyMatch(line -> line.matches("new file mode [0-7]{6}"))
-                        || quotesDiffSide(c, source, '-'));
+                        || newFileDiff(source) || quotesDiffSide(c, source, '-'));
         });
     }
     boolean hasTarget(List<Citation> citations) {
@@ -170,12 +221,31 @@ final class EvidenceIndex {
         }).toList());
     }
     private static boolean quotesDiffSide(Citation citation, EvidenceSource source, char marker) {
+        if (!citation.excerptLines().isEmpty()) {
+            var side = marker == '-' ? EvidenceSource.Side.REMOVED : EvidenceSource.Side.ADDED;
+            return citation.locations().stream().anyMatch(location -> location.side() == side);
+        }
         String quote = normalize(citation.quote());
         if (quote.length() < 12) return false;
+        return diffSide(source, marker).filter(line -> line.length() >= 12)
+                .anyMatch(line -> line.contains(quote) || quote.contains(line));
+    }
+
+    static boolean newFileDiff(EvidenceSource source) {
+        return source.text().lines().anyMatch(line -> line.matches("new file mode [0-7]{6}"));
+    }
+
+    private static boolean hasBaselineMaterial(EvidenceSource source) {
+        return source.role(EvidenceSource.Role.BASELINE) && source.role(EvidenceSource.Role.IMPLEMENTATION)
+                && (source.role(EvidenceSource.Role.DIFF)
+                        ? newFileDiff(source) || diffSide(source, '-').findAny().isPresent()
+                        : !normalize(source.text()).isEmpty());
+    }
+
+    private static java.util.stream.Stream<String> diffSide(EvidenceSource source, char marker) {
         return source.text().lines().filter(line -> line.length() > 1 && line.charAt(0) == marker
                         && !line.startsWith("" + marker + marker + marker))
-                .map(line -> normalize(line.substring(1))).filter(line -> line.length() >= 12)
-                .anyMatch(line -> line.contains(quote) || quote.contains(line));
+                .map(line -> normalize(line.substring(1))).filter(line -> !line.isEmpty());
     }
 
     void validateLocation(ReviewFinding finding, List<Citation> citations) throws IOException {
